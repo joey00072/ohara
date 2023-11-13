@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import math
 from scheduler import CosineWithWarmupLR
 
-import gpt
+from ohara import gpt
 
 
 @torch.no_grad()
@@ -34,6 +34,7 @@ def estimate_loss(model: nn.Module, eval_iters: int, iter_batches, ctx):
 def main():
     config = gpt.Config()
     model = gpt.GPT(config)
+    model = torch.compile(model)
     print(model)
 
 

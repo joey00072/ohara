@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 import math
 from dataclasses import dataclass
+from ohara.ffn import SwiGLU
 
 
 @dataclass
@@ -11,40 +12,19 @@ class Config:
     vocab_size = 65
     seq_len = 64
     d_model = 128
-    num_head = 4
-    num_layer = 4
+    num_heads = 4
+    num_layers = 4
     dropout = 0.2
     multiple_of = 4
-    bias = False
-
-
-class MLP(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        multiple_of: int = 4,
-        dropout: float = None,
-        bias: bool = True,
-    ):
-        super().__init__()
-        self.w1 = nn.Linear(dim, multiple_of * dim, bias=bias)
-        self.w2 = nn.Linear(multiple_of * dim, dim, bias=bias)
-        self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
-
-    def forward(self, x):
-        x = self.w1(x)
-        x = F.gelu(x)
-        x = self.w2(x)
-        x = self.dropout(x)
-        return x
+    bias = True
 
 
 class Attention(nn.Module):
     def __init__(self, model_args: Config):
         super().__init__()
         d_model = model_args.d_model
-        self.num_head = model_args.num_head
-        self.head_dim = model_args.d_model // model_args.num_head
+        self.num_heads = model_args.num_heads
+        self.head_dim = model_args.d_model // model_args.num_heads
 
         self.key = nn.Linear(d_model, d_model)
         self.query = nn.Linear(d_model, d_model)
@@ -68,12 +48,12 @@ class Attention(nn.Module):
         v = self.value(x)
 
         k = k.view(
-            seq_len, self.num_head, self.head_dim
-        )  # shape = (B, seq_len, num_head, head_dim)
-        q = q.view(seq_len, self.num_head, self.head_dim)
-        v = v.view(seq_len, self.num_head, self.head_dim)
+            seq_len, self.num_heads, self.head_dim
+        )  # shape = (B, seq_len, num_heads, head_dim)
+        q = q.view(seq_len, self.num_heads, self.head_dim)
+        v = v.view(seq_len, self.num_heads, self.head_dim)
 
-        k = k.transpose(0, 1)  # shape = (B, num_head, seq_len, head_dim)
+        k = k.transpose(0, 1)  # shape = (B, num_heads, seq_len, head_dim)
         q = q.transpose(0, 1)
         v = v.transpose(0, 1)
 
@@ -108,7 +88,7 @@ class Block(nn.Module):
         super().__init__()
 
         self.attn = Attention(model_args)
-        self.ff = MLP(
+        self.ff = SwiGLU(
             dim=model_args.d_model,
             multiple_of=model_args.multiple_of,
             dropout=model_args.dropout,
@@ -131,7 +111,7 @@ class GPT(nn.Module):
         self.pos_emb = nn.Embedding(model_args.seq_len, model_args.d_model)
 
         self.layers = nn.ModuleList(
-            [Block(model_args) for _ in range(model_args.num_layer)]
+            [Block(model_args) for _ in range(model_args.num_layers)]
         )
 
         self.norm = nn.LayerNorm(model_args.d_model)

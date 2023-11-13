@@ -11,8 +11,8 @@ class Config:
     vocab_size = 65
     seq_len = 64
     d_model = 128
-    num_head = 4
-    num_layer = 4
+    num_heads = 4
+    num_layers = 4
     dropout = 0.2
     multiple_of = 4
     bias = False
@@ -85,8 +85,7 @@ def apply_rope(k,q,freqs_sin,freqs_cos):
     xq_out = xq_out.flatten(3) # (B,T,nhead,C) 
     xk_out = xk_out.flatten(3) # (B,T,nhead,C)
     
-    return xq_out.type_as(xq), xk_out.type_as(xk)
-    
+    return xq_out.type_as(q), xk_out.type_as(q)
     
 
 class MLP(nn.Module):
@@ -114,8 +113,8 @@ class Attention(nn.Module):
     def __init__(self, model_args: Config):
         super().__init__()
         d_model = model_args.d_model
-        self.num_head = model_args.num_head
-        self.head_dim = model_args.d_model // model_args.num_head
+        self.num_heads = model_args.num_heads
+        self.head_dim = model_args.d_model // model_args.num_heads
 
         self.key = nn.Linear(d_model, d_model)
         self.query = nn.Linear(d_model, d_model)
@@ -127,7 +126,7 @@ class Attention(nn.Module):
 
         self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, freqs_cos, freqs_sin, mask: torch.Tensor) -> torch.Tensor:
         batch, seq_len, d_model = x.shape
 
         k: torch.Tensor  # type hint for lsp
@@ -139,12 +138,14 @@ class Attention(nn.Module):
         v = self.value(x)
 
         k = k.view(
-            seq_len, self.num_head, self.head_dim
-        )  # shape = (B, seq_len, num_head, head_dim)
-        q = q.view(seq_len, self.num_head, self.head_dim)
-        v = v.view(seq_len, self.num_head, self.head_dim)
+            seq_len, self.num_heads, self.head_dim
+        )  # shape = (B, seq_len, num_heads, head_dim)
+        q = q.view(seq_len, self.num_heads, self.head_dim)
+        v = v.view(seq_len, self.num_heads, self.head_dim)
 
-        k = k.transpose(0, 1)  # shape = (B, num_head, seq_len, head_dim)
+        q, k = apply_rope(q, k, freqs_cos, freqs_sin)
+
+        k = k.transpose(0, 1)  # shape = (B, num_heads, seq_len, head_dim)
         q = q.transpose(0, 1)
         v = v.transpose(0, 1)
 
@@ -188,8 +189,8 @@ class Block(nn.Module):
         self.norm1 = nn.LayerNorm(model_args.d_model)
         self.norm2 = nn.LayerNorm(model_args.d_model)
 
-    def forward(self, x, mask):
-        x = x + self.attn(self.norm1(x), mask)
+    def forward(self, x, freqs_cos, freqs_sin, mask):
+        x = x + self.attn(self.norm1(x), freqs_cos, freqs_sin, mask)
         x = x + self.ff(self.norm2(x))
         return x
 
@@ -202,7 +203,7 @@ class RoFormer(nn.Module):
         self.pos_emb = nn.Embedding(model_args.seq_len, model_args.d_model)
 
         self.layers = nn.ModuleList(
-            [Block(model_args) for _ in range(model_args.num_layer)]
+            [Block(model_args) for _ in range(model_args.num_layers)]
         )
 
         self.norm = nn.LayerNorm(model_args.d_model)
@@ -210,7 +211,9 @@ class RoFormer(nn.Module):
             model_args.d_model, model_args.vocab_size, bias=False
         )
         
-        self.freqs_cis = precompute_freqs_cis(model_args.d_model // model_args.n_heads, model_args.seq_len * 2)
+        freqs_cos, freqs_sin = precompute_freqs_cis(model_args.d_model // model_args.n_heads, model_args.seq_len * 2)
+        self.register_buffer("freqs_cos", freqs_cos, persistent=False)
+        self.register_buffer("freqs_sin", freqs_sin, persistent=False)
 
         if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
             print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
@@ -223,10 +226,13 @@ class RoFormer(nn.Module):
             self.mask = None
 
     def forward(self, x):
-        x = self.word_emb(x) + self.pos_emb(x)
+        B, T = x.shape
+        x = self.word_emb(x) 
+        freqs_cos = self.freqs_cos[:T]
+        freqs_sin = self.freqs_sin[:T]
 
         for layer in self.layers:
-            x = layer(x, self.mask)
+            x = layer(x, freqs_cos, freqs_sin, self.mask)
 
         x = self.norm(x)
         x = self.vocab_proj(x)
