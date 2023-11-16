@@ -7,3 +7,6 @@ this is attempt to make it eveything in one place
 
 
 ### Status: (alpha) very early 
+
+### papers
+- Train Short, Test Long: Attention with Linear Biases Enables Input Length Extrapolation
