@@ -14,5 +14,6 @@ this is attempt to make it eveything in one place
 - [Rotary Embeddings](./ohara/embedings_pos/rotary/rotatry.py) | [md](./ohara/roformer/RoFormer.md) 
 - [LoRA - Low-Rank Adaptation of Large Language Models](./ohara/adaptor/lora.py)
 - [LLAMA](./ohara/llama/llama.py) | [md](./ohara/llama/llama.md)
+- [XPOS](./ohara/embedings_pos/xpos/xpos.py)
 - [GPT](./ohara/gpt/gpt.py) | [md](./ohara/gpt/gpt.md)
 
