@@ -16,6 +16,7 @@ this is attempt to make it eveything in one place
 3. [Rotary Embeddings](./ohara/embedings_pos/rotary/rotatry.py) | [md](./ohara/roformer/RoFormer.md) 
 4. [LoRA ](./ohara/adaptor/lora.py)
 5. [LLAMA](./ohara/llama/llama.py) | [md](./ohara/llama/llama.md)
+5. [Retet](./ohara/retnet/retnet.py)
 6. [XPOS](./ohara/embedings_pos/xpos/xpos.py)
 7. [GPT](./ohara/gpt/gpt.py) | [md](./ohara/gpt/gpt.md)
 
