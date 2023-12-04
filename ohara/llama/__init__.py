@@ -1,1 +1,1 @@
-from gpt.gpt import GPT, Config
+from .llama import LLAMA, Config
