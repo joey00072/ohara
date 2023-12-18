@@ -17,3 +17,8 @@ this is attempt to make it eveything in one place
 6. [XPOS](./ohara/embedings_pos/xpos/xpos.py)
 7. [GPT](./ohara/gpt/gpt.py) | [md](./ohara/gpt/gpt.md)
 
+
+
+### More
+1. [TinyLora](https://github.com/joey00072/TinyLora)
+2. [Neural Style Transfer in Pytorch](https://github.com/joey00072/Neural-Style-Transfer-in-Pytorch)
