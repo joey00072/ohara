@@ -2,9 +2,9 @@
 
 Name:"RoFormer: Enhanced Transformer with Rotary Position Embedding"
 
-Source: https://arxiv.org/abs/2104.09864
+Source: https://arxiv.org/abs/2104.09864 <br>
+code: [roformer](./roformer.py)
 
----
 
 
 ### What's new rotatry embedding 
