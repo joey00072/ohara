@@ -9,14 +9,14 @@ from ohara.ffn import SwiGLU
 
 @dataclass
 class Config:
-    vocab_size = 65
-    seq_len = 64
-    d_model = 128
-    num_heads = 4
-    num_layers = 4
-    dropout = 0.2
-    multiple_of = 4
-    bias = True
+    vocab_size:int = 65
+    seq_len:int = 64
+    d_model:int = 128
+    num_heads:int = 4
+    num_layers:int = 4
+    dropout:int = 0.2
+    multiple_of:int = 4
+    bias:int = True
 
 
 
@@ -108,7 +108,7 @@ class LLAMA(nn.Module):
     def __init__(self, model_args: Config, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        self.word_emb = nn.Embedding(model_args.vocab_size, model_args.d_model)
+        self.token_emb = nn.Embedding(model_args.vocab_size, model_args.d_model)
 
         self.layers = nn.ModuleList(
             [Block(model_args) for _ in range(model_args.num_layers)]
@@ -118,6 +118,8 @@ class LLAMA(nn.Module):
         self.vocab_proj = nn.Linear(
             model_args.d_model, model_args.vocab_size, bias=False
         )
+        
+        self.token_emb.weight = self.vocab_proj.weight 
 
         if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
             print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
@@ -130,7 +132,7 @@ class LLAMA(nn.Module):
             self.mask = None
 
     def forward(self, x):
-        x = self.word_emb(x)
+        x = self.token_emb(x)
 
         for layer in self.layers:
             x = layer(x, self.mask)
@@ -138,3 +140,6 @@ class LLAMA(nn.Module):
         x = self.norm(x)
         x = self.vocab_proj(x)
         return x
+    
+    
+
