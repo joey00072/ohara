@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-
+import time
 import numpy as np
 
 torch.manual_seed(2)
@@ -43,7 +43,7 @@ def sliding_window_attention_with_mask(q:Tensor,k:Tensor,v:Tensor,window_size:in
     out = wei @ v
     return out
 
-B,T,C = 5,7,8
+B,T,C = 5,1000,8
 
 q = torch.rand(B,T,C)
 k = torch.rand(B,T,C)
@@ -53,8 +53,21 @@ window_size = 3
 
 # out = sliding_window_attention(q,k,v,window_size=window_size)
 # print(out.shape)
+sliding_window_attention = torch.compile(sliding_window_attention)
+out = sliding_window_attention(q,k,v,window_size=window_size)
+ITERS = 1000
+start:float = time.perf_counter()
+for _ in range(ITERS):
+    out = sliding_window_attention(q,k,v,window_size=window_size)
+end:float = time.perf_counter()
+print(f"time:{(end-start)/ITERS}")
 
-out = sliding_window_attention_with_mask(q,k,v,window_size=window_size)
+
+start:float = time.perf_counter()
+for _ in range(ITERS):
+    out = sliding_window_attention_with_mask(q,k,v,window_size=window_size)
+end:float = time.perf_counter()
+print(f"time:{(end-start)/ITERS}")
 print(out)
 
 exit(0)

@@ -115,7 +115,7 @@ class LLAMA(eqx.Module):
         for block in self.blocks:
             x = block(x)
         x = self.norm(x)
-        return x
+        return self.emb.T @ x
     
 if __name__ == "__main__":
     key = jax.random.PRNGKey(0)
