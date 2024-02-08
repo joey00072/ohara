@@ -5,13 +5,9 @@ import math
 import json
 from dataclasses import dataclass
 
-from typing import List
-from typing import Optional
-from typing import Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from torch import Tensor
 from safetensors import safe_open
@@ -35,7 +31,9 @@ class PhiConfig:
 
 
 class KVCache:
-    def __init__(self, shape, max_seq_length, idx: int = None, device=None, dtype=None):
+    def __init__(
+        self, shape, max_seq_length, idx: int | None = None, device=None, dtype=None
+    ):
         self.idx = idx
         self.key: torch.Tensor = torch.zeros(shape, device=device, dtype=dtype)
         self.value: torch.Tensor = torch.zeros(shape, device=device, dtype=dtype)
@@ -43,7 +41,7 @@ class KVCache:
 
     def forward(
         self, keys: Tensor, values: Tensor, start_pos: Tensor
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         bsz, T, _, _ = keys.shape
         # print(f"start_pos={start_pos}, T={T}, bsz={bsz}")
         self.key[:bsz, start_pos : start_pos + T] = keys
@@ -155,7 +153,7 @@ class MLP(nn.Module):
         self.fc1 = nn.Linear(dim, hidden)
         self.fc2 = nn.Linear(hidden, dim)
 
-    def forward(self, x:torch.Tensor):
+    def forward(self, x: torch.Tensor):
         x = self.fc1(x)
         x = new_gelu(x)
         return self.fc2(x)
@@ -170,7 +168,7 @@ class LayerNorm(nn.LayerNorm):
 
 
 class PhiMHA(nn.Module):
-    def __init__(self,layer_idx, dim, num_heads, rotary_dim) -> None:
+    def __init__(self, layer_idx, dim, num_heads, rotary_dim) -> None:
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
@@ -188,12 +186,11 @@ class PhiMHA(nn.Module):
         self,
         x: Tensor,
         mask: Tensor = None,
-        kv_cache: Optional[KVCache] = None,
-        position_ids: Optional[Tensor] = None,
+        kv_cache: KVCache | None = None,
+        position_ids: Tensor | None = None,
     ) -> Tensor:
         batch_size, seq_length, d_model = x.shape
         # print(f"{batch_size}, {seq_length}, {d_model}")
-        debug_idx = 0
         k = self.k_proj(x)
         q = self.q_proj(x)
         v = self.v_proj(x)
@@ -201,24 +198,20 @@ class PhiMHA(nn.Module):
         k = k.view(batch_size, seq_length, self.num_heads, self.head_dim)
         q = q.view(batch_size, seq_length, self.num_heads, self.head_dim)
         v = v.view(batch_size, seq_length, self.num_heads, self.head_dim)
-        
-        
+
         if kv_cache is not None:
-            k,v = kv_cache.forward(k,v,position_ids)
-    
-            
+            k, v = kv_cache.forward(k, v, position_ids)
+
         k: Tensor = k.transpose(1, 2).to(
             torch.float32
         )  # shape = (B, num_heads, seq_len, head_dim)
         q: Tensor = q.transpose(1, 2).to(torch.float32)
         v: Tensor = v.transpose(1, 2).to(torch.float32)
 
-        
         offset = position_ids if kv_cache else 0
-        
+
         q = self.rope.forward(q, offset=offset).to(torch.float32)
         k = self.rope.forward(k).to(torch.float32)
-        
 
         # Finally perform the attention computation
         scale = math.sqrt(1 / q.shape[-1])
@@ -238,7 +231,7 @@ class PhiMHA(nn.Module):
         #     dropout_p=0,
         #     is_causal=True,
         # ).type_as(x)
-        
+
         output = output.transpose(1, 2).type_as(x)
         output = output.reshape(batch_size, seq_length, self.dim)
 
@@ -258,26 +251,28 @@ class Block(nn.Module):
     def __init__(
         self,
         config: PhiConfig,
-        block_idx: Optional[int] = None,
+        block_idx: int | None = None,
     ) -> None:
         super().__init__()
 
         self.ln = LayerNorm(config.d_model, eps=config.eps)
         self.block_idx = block_idx
 
-        self.mixer = PhiMHA(block_idx,config.d_model, config.num_heads, config.rotary_dim)
+        self.mixer = PhiMHA(
+            block_idx, config.d_model, config.num_heads, config.rotary_dim
+        )
         self.mlp = MLP(config.d_model, 4 * config.d_model)
 
     def forward(
         self,
         x: torch.FloatTensor,
-        mask: Optional[torch.BoolTensor] = None,
-        kv_cache: Optional[list[KVCache]] = None,
-        position_ids: Optional[torch.LongTensor] = None,
+        mask: torch.BoolTensor | None = None,
+        kv_cache: list[KVCache] | None = None,
+        position_ids: torch.LongTensor | None = None,
     ) -> torch.FloatTensor:
         residual = x
         x = self.ln(x)
-        return self.mixer(x, mask, kv_cache,position_ids) + self.mlp(x) + residual
+        return self.mixer(x, mask, kv_cache, position_ids) + self.mlp(x) + residual
 
 
 class Phi(nn.Module):
@@ -295,7 +290,7 @@ class Phi(nn.Module):
 
         mask = torch.full((1, 1, config.seq_len, config.seq_len), float("-inf"))
 
-        shape = (
+        (
             1,
             config.seq_len,
             config.num_heads,
@@ -305,12 +300,12 @@ class Phi(nn.Module):
         mask = torch.triu(mask, diagonal=1)
         self.register_buffer("mask", mask)
 
-    def forward(self, x,kv_cache: list[KVCache] = None, position_ids=None):
-        # print(f"{x.shape=}, {kv_cache=}")
+    def forward(self, x, kv_cache: list[KVCache] | None = None, position_ids=None):
         mask = self.mask
-        if kv_cache is not  None:
-            x = x[:,position_ids:]
+        if kv_cache is not None:
+            x = x[:, position_ids:]
             mask = None
+        # print(f"{x.shape=} {kv_cache=}")
         x = self.wte(x)
         # print(f"{x.sum(dim=-1)=}")
         cache = None
@@ -318,8 +313,8 @@ class Phi(nn.Module):
             if kv_cache is not None:
                 cache = kv_cache[idx]
             # print(f"{cache=}")
-            x = layer(x,mask, cache, position_ids=position_ids)
-            
+            x = layer(x, mask, cache, position_ids=position_ids)
+
         x = self.ln(x)
         x = self.lm_head(x)
         return x
@@ -348,8 +343,8 @@ class Phi(nn.Module):
     @staticmethod
     def from_pretrained(name: str) -> nn.Module:
         path_name = download_hf_model(name)
-        with open(os.path.join(path_name, "config.json"), "r", encoding="utf-8") as f:
-            cfg = json.load(f)
+        with open(os.path.join(path_name, "config.json"), encoding="utf-8") as f:
+            json.load(f)
 
         config = PhiConfig()
         model = Phi(config)

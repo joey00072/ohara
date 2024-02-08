@@ -1,13 +1,18 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 import time
-import numpy as np
 
+import jax.numpy as jnp
+from jax.nn import softmax
+import jax
+from jax import lax
 torch.manual_seed(2)
 
-def sliding_window_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, window_size: int = 16):
+
+def sliding_window_attention(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, window_size: int = 16
+):
     B, T, C = q.shape
     out = torch.zeros(B, T, C, device=q.device)
     for i in range(T):
@@ -24,59 +29,59 @@ def sliding_window_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, 
 
     return out
 
-def sliding_window_attention_with_mask(q:Tensor,k:Tensor,v:Tensor,window_size:int=16):
-    B,T,C = q.shape
-    out = torch.zeros(T,C)
-    mask = torch.zeros(T,T)
+
+def sliding_window_attention_with_mask(
+    q: Tensor, k: Tensor, v: Tensor, window_size: int = 16
+):
+    B, T, C = q.shape
+    out = torch.zeros(T, C)
+    mask = torch.zeros(T, T)
     for i in range(T):
         for j in range(T):
-            if j>i:
-                mask[i,j] = float("-inf")
-            if i-j>window_size-1:
-                mask[i,j] = float("-inf")
+            if j > i:
+                mask[i, j] = float("-inf")
+            if i - j > window_size - 1:
+                mask[i, j] = float("-inf")
 
-                
-    wei = q@k.transpose(-1,-2)
+    wei = q @ k.transpose(-1, -2)
     wei = wei + mask
-    wei = F.softmax(wei,dim=-1)
-    
+    wei = F.softmax(wei, dim=-1)
+
     out = wei @ v
     return out
 
-B,T,C = 5,1000,8
 
-q = torch.rand(B,T,C)
-k = torch.rand(B,T,C)
-v = torch.rand(B,T,C)
+B, T, C = 5, 1000, 8
+
+q = torch.rand(B, T, C)
+k = torch.rand(B, T, C)
+v = torch.rand(B, T, C)
 
 window_size = 3
 
 # out = sliding_window_attention(q,k,v,window_size=window_size)
 # print(out.shape)
 sliding_window_attention = torch.compile(sliding_window_attention)
-out = sliding_window_attention(q,k,v,window_size=window_size)
+out = sliding_window_attention(q, k, v, window_size=window_size)
 ITERS = 1000
-start:float = time.perf_counter()
+start: float = time.perf_counter()
 for _ in range(ITERS):
-    out = sliding_window_attention(q,k,v,window_size=window_size)
-end:float = time.perf_counter()
+    out = sliding_window_attention(q, k, v, window_size=window_size)
+end: float = time.perf_counter()
 print(f"time:{(end-start)/ITERS}")
 
 
-start:float = time.perf_counter()
+start: float = time.perf_counter()
 for _ in range(ITERS):
-    out = sliding_window_attention_with_mask(q,k,v,window_size=window_size)
-end:float = time.perf_counter()
+    out = sliding_window_attention_with_mask(q, k, v, window_size=window_size)
+end: float = time.perf_counter()
 print(f"time:{(end-start)/ITERS}")
 print(out)
 
 exit(0)
 
-import jax.numpy as jnp
-from jax.nn import softmax
-from jax import vmap
-import jax
-from jax import lax
+
+
 
 def sliding_window_attention_jax(q, k, v, window_size=16):
     T, C = q.shape
@@ -106,12 +111,13 @@ def sliding_window_attention_jax(q, k, v, window_size=16):
     out = lax.fori_loop(0, T, attention_step, out)
     return out
 
+
 # Dummy input tensors for testing the function
-B,T, C =10, 50, 128  # Example dimensions
-q = jnp.ones((B,T, C))  # Query tensor
-k = jnp.ones((B,T, C))  # Key tensor
-v = jnp.ones((B,T, C))  # Value tensor
+B, T, C = 10, 50, 128  # Example dimensions
+q = jnp.ones((B, T, C))  # Query tensor
+k = jnp.ones((B, T, C))  # Key tensor
+v = jnp.ones((B, T, C))  # Value tensor
 
 # Call the JAX function with the dummy inputs
 output_jax = jax.vmap(sliding_window_attention_jax)(q, k, v)
-print(output_jax.shape ) # Display the shape of the output for verification
+print(output_jax.shape)  # Display the shape of the output for verification

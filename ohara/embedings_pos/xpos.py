@@ -3,12 +3,12 @@ import torch.nn as nn
 
 
 class XPos(nn.Module):
-    def __init__(self, dim,num_heads):
+    def __init__(self, dim, num_heads):
         """
         https://arxiv.org/abs/2212.10554
         """
         super().__init__()
-        
+
         angle = 1.0 / (10000 ** torch.linspace(0, 1, dim // num_heads // 2))
         angle = angle.unsqueeze(-1).repeat(1, 2).flatten()
         decay = torch.log(1 - 2 ** (-5 - torch.arange(num_heads, dtype=torch.float)))

@@ -1,17 +1,19 @@
 import torch
-from typing import Tuple
 
-def svd_approx(W: torch.Tensor, r: int = None) -> Tuple[torch.Tensor, torch.Tensor, int, torch.Tensor]:
+
+def svd_approx(
+    W: torch.Tensor, r: int | None = None
+) -> tuple[torch.Tensor, torch.Tensor, int, torch.Tensor]:
     """
     Perform SVD approximation of a matrix with an optional rank specification.
-    
+
     Parameters:
     W (torch.Tensor): The input matrix to be approximated.
     r (int, optional): The rank for the approximation. If None, the full rank is used.
 
     Returns:
-    Tuple[torch.Tensor, torch.Tensor, int, torch.Tensor]: 
-        A tuple containing the matrices A and B (where A @ B is the approximation of W), 
+    Tuple[torch.Tensor, torch.Tensor, int, torch.Tensor]:
+        A tuple containing the matrices A and B (where A @ B is the approximation of W),
         the rank used for the approximation, and the Frobenius norm of the difference between W and its approximation.
     """
     U, S, V = torch.linalg.svd(W, full_matrices=False)

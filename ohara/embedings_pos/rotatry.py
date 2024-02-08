@@ -10,11 +10,10 @@ class RotatryEmbedding(nn.Module):
         super().__init__()
         self.dim = dim
         self.max_seq_len = max_seq_len
-        
+
         cis = RotatryEmbedding.precompute_freqs_cis(dim, max_seq_len)
         self.register_buffer("cos", cis[0])
         self.register_buffer("sin", cis[1])
-        
 
     @staticmethod
     def rotate_half(x: Tensor):
@@ -22,24 +21,24 @@ class RotatryEmbedding(nn.Module):
         x1 = x[..., : x.shape[-1] // 2]
         x2 = x[..., x.shape[-1] // 2 :]
         return torch.cat((-x2, x1), dim=-1)
-    
+
     @staticmethod
     def apply_rotary_pos_emb(
         x: Tensor,
         cos: Tensor,
         sin: Tensor,
-        position_ids: int=None,
+        position_ids: int | None = None,
         unsqueeze_dim: int = 1,
     ):
         cos = cos[position_ids].unsqueeze(unsqueeze_dim)
         sin = sin[position_ids].unsqueeze(unsqueeze_dim)
         x_embed = (x * cos) + (RotatryEmbedding.rotate_half(x) * sin)
         return x_embed
-    
-    def forward(self,x, position_ids=None):
-        return self.apply_rotary_pos_emb(x, self.cos, self.sin, position_ids=position_ids)
-     
 
+    def forward(self, x, position_ids=None):
+        return self.apply_rotary_pos_emb(
+            x, self.cos, self.sin, position_ids=position_ids
+        )
 
     @staticmethod
     def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -54,9 +53,6 @@ class RotatryEmbedding(nn.Module):
         freqs_cos = torch.cos(freqs)  # real
         freqs_sin = torch.sin(freqs)  # imaginary
         return freqs_cos, freqs_sin
-
-
-        
 
 
 # rotary embedding
@@ -139,7 +135,6 @@ def apply_rope(k, q, freqs_sin, freqs_cos):
     return xq_out.type_as(q), xk_out.type_as(q)
 
 
-
 class RoPE(nn.Module):
     """Implements the rotary positional encoding.
 
@@ -168,7 +163,7 @@ class RoPE(nn.Module):
         scale: float = 1.0,
     ):
         super().__init__()
-    
+
         self.dims = dims
         self.traditional = traditional
         self.base = base
@@ -205,7 +200,7 @@ class RoPE(nn.Module):
 
         return rx
 
-    def forward(self, x:Tensor, offset: int = 0):
+    def forward(self, x: Tensor, offset: int = 0):
         shape = x.shape
         x = x.reshape(-1, shape[-2], shape[-1])
         N = x.shape[1] + offset
@@ -234,4 +229,3 @@ class RoPE(nn.Module):
         freqs = torch.exp(-torch.arange(0.0, D, dtype=dtype) * (math.log(base) / D))
         theta = torch.reshape(positions, (-1, 1)) * torch.reshape(freqs, (1, -1))
         return torch.cos(theta), torch.sin(theta)
-

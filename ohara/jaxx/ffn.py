@@ -1,11 +1,5 @@
-from typing import Any
 import jax
-import jax.numpy as np
 import equinox as eqx
-import pretty_errors
-
-from jaxtyping import Array
-import jax.numpy as np
 
 
 class SwiGLU(eqx.Module):

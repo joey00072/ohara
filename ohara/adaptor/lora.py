@@ -15,7 +15,7 @@ class LoRALinear(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        
+
         """
         warning I am assuing bias=False
         """
@@ -23,7 +23,7 @@ class LoRALinear(nn.Module):
         self.rank = rank
         self.lora_alpha = lora_alpha
         self.merged = False
-        
+
         self.lora_dropout = (
             nn.Dropout(p=lora_dropout) if lora_dropout > 0.0 else lambda x: x
         )
@@ -34,16 +34,16 @@ class LoRALinear(nn.Module):
             self.lora_B = nn.Parameter(torch.zeros((out_features, rank)))
             self.scaling = self.lora_alpha / self.rank
             self.reset_parameters()
-            
+
     def reset_lora_parameters(self, lora_only=False):
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
         nn.init.zeros_(self.lora_B)
-        # funny story behind math.sqrt(5) I'll write blog later 
+        # funny story behind math.sqrt(5) I'll write blog later
 
     def reset_parameters(self, lora_only=False):
         nn.init.kaiming_normal_(self.linear.weight, a=math.sqrt(5))
         if hasattr(self, "lora_A") and hasattr(self, "lora_B"):
-            self.reset_lora_parameters()     
+            self.reset_lora_parameters()
 
     def merge(self):
         if not self.merged and self.rank > 0:
@@ -56,11 +56,10 @@ class LoRALinear(nn.Module):
             return pretrained
         lora = (self.lora_dropout(x) @ self.lora_A.T @ self.lora_B.T) * self.scaling
         return pretrained + lora
-    
 
-if __name__=="__main__":
-    model = LoRALinear(2, 2,rank=4)
+
+if __name__ == "__main__":
+    model = LoRALinear(2, 2, rank=4)
     print(model.linear.weight)
     model.reset_parameters()
     print(model.linear.weight)
-    
