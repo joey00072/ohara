@@ -1,11 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from ohara.ffn import MLP
-
 
 import math
 from dataclasses import dataclass
+from ohara.ffn.glu import SwiGLU
 
 
 @dataclass
@@ -17,7 +16,7 @@ class Config:
     num_layers = 4
     dropout = 0.2
     multiple_of = 4
-    bias = False
+    bias = True
 
 
 class Attention(nn.Module):
@@ -89,7 +88,7 @@ class Block(nn.Module):
         super().__init__()
 
         self.attn = Attention(model_args)
-        self.ff = MLP(
+        self.ff = SwiGLU(
             dim=model_args.d_model,
             multiple_of=model_args.multiple_of,
             dropout=model_args.dropout,
@@ -120,7 +119,7 @@ class GPT(nn.Module):
             model_args.d_model, model_args.vocab_size, bias=False
         )
 
-        if not hasattr(torch.nn.functional, "scaled_dot_product_attention"):
+        if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
             print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
             mask = torch.full(
                 (1, 1, model_args.seq_len, model_args.seq_len), float("-inf")

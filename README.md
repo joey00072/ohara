@@ -6,16 +6,16 @@ I hand lot of fragmented code of implimention of diffrent model
 this is attempt to make it eveything in one place
 
 
-### Status: (alpha) very early 
+###  The lib to maximize FAFO
 
 ### papers
-1. [SwiGLU](./ohara/ffn/glu.py) | [md](./ohara/ffn/GLU%20Variants%20Improve%20Transformer.md)
-2. [Alibi Embeddings](./ohara/embedings_pos/alibi/alibi.py) | [md](./ohara/embedings_pos/alibi/alibi.md)
-3. [Rotary Embeddings](./ohara/embedings_pos/rotary/rotatry.py) | [md](./ohara/roformer/RoFormer.md) 
+1. [SwiGLU](./ohara/models/mlp.py) | [md](./docs/glu/GLU%20Variants%20Improve%20Transformer.md)
+2. [Alibi Embeddings](./ohara/embedings_pos/alibi.py) | [md](./ohara/embedings_pos/alibi/alibi.md)
+3. [Rotary Embeddings](./ohara/embedings_pos/rotatry.py) | [md](./docs/RoFormer.md) 
 4. [LoRA ](./ohara/adaptor/lora.py)
-5. [LLAMA](./ohara/llama/llama.py) | [md](./ohara/llama/llama.md)
-6. [XPOS](./ohara/embedings_pos/xpos/xpos.py)
-7. [GPT](./ohara/gpt/gpt.py) | [md](./ohara/gpt/gpt.md)
+5. [LLAMA](./ohara/llama/llama.py) | [md](./docs/llama/llama.md)
+6. [XPOS](./ohara/embedings_pos/xpos.py)
+7. [GPT](./ohara/models/gpt.py) | [md](./docs/gpt/gpt.md)
 
 
 

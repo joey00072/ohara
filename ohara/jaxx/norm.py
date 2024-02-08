@@ -4,17 +4,19 @@ import equinox as eqx
 
 from jaxtyping import Array
 
+
 class RMSNorm(eqx.Module):
     eps: float
     weight: Array
-    def __init__(self,dim, eps=1e-6,*,key):
+
+    def __init__(self, dim, eps=1e-6, *, key):
         self.eps = eps
         self.weight = jnp.ones(dim)
 
-    def __call__(self, x:Array):
-        x = x * (1/jnp.sqrt(jnp.power(x,2).mean(-1, keepdims=True) + self.eps))
+    def __call__(self, x: Array):
+        x = x * (1 / jnp.sqrt(jnp.power(x, 2).mean(-1, keepdims=True) + self.eps))
         return self.weight * x
-    
+
 
 if __name__ == "__main__":
     key = jax.random.PRNGKey(0)

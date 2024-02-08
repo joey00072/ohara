@@ -17,6 +17,7 @@ class Config:
     multiple_of = 4
     bias = True
 
+
 class Attention(nn.Module):
     def __init__(self, model_args: Config):
         super().__init__()
@@ -53,13 +54,11 @@ class Attention(nn.Module):
         q = q.view(seq_len, self.num_heads, self.head_dim)
         v = v.view(seq_len, self.num_heads, self.head_dim)
         g = g.view(seq_len, self.num_heads, self.head_dim)
-        
 
         k = k.transpose(0, 1)  # shape = (B, num_heads, seq_len, head_dim)
         q = q.transpose(0, 1)
         v = v.transpose(0, 1)
         g = g.transpose(0, 1)
-
 
         attn_mtx = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
         attn_mtx = attn_mtx + mask[:, :, :seq_len, :seq_len]
@@ -67,12 +66,12 @@ class Attention(nn.Module):
         attn_mtx = self.attn_dropout(attn_mtx)
 
         v = torch.matmul(attn_mtx, v)  # (batch, n_head, seq_len, head_dim)
-        g = torch.matmul(attn_mtx, g) 
+        g = torch.matmul(attn_mtx, g)
         # restore time as batch dimension and concat heads
         v = v.transpose(1, 2).contiguous().view(batch, seq_len, d_model)
         g = g.transpose(1, 2).contiguous().view(batch, seq_len, d_model)
-        
-        output = self.proj(F.silu(g)*v)
+
+        output = self.proj(F.silu(g) * v)
 
         # final projection into the residual stream
         output = self.proj(output)

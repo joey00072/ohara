@@ -1,23 +1,23 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from mlp import MLP
+
 
 import math
 from dataclasses import dataclass
-from ohara.ffn import SwiGLU
 
 
 @dataclass
 class Config:
-    vocab_size:int = 65
-    seq_len:int = 64
-    d_model:int = 128
-    num_heads:int = 4
-    num_layers:int = 4
-    dropout:int = 0.2
-    multiple_of:int = 4
-    bias:int = True
-
+    vocab_size = 65
+    seq_len = 64
+    d_model = 128
+    num_heads = 4
+    num_layers = 4
+    dropout = 0.2
+    multiple_of = 4
+    bias = False
 
 
 class Attention(nn.Module):
@@ -89,7 +89,7 @@ class Block(nn.Module):
         super().__init__()
 
         self.attn = Attention(model_args)
-        self.ff = SwiGLU(
+        self.ff = MLP(
             dim=model_args.d_model,
             multiple_of=model_args.multiple_of,
             dropout=model_args.dropout,
@@ -104,11 +104,12 @@ class Block(nn.Module):
         return x
 
 
-class LLAMA(nn.Module):
+class GPT(nn.Module):
     def __init__(self, model_args: Config, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        self.token_emb = nn.Embedding(model_args.vocab_size, model_args.d_model)
+        self.word_emb = nn.Embedding(model_args.vocab_size, model_args.d_model)
+        self.pos_emb = nn.Embedding(model_args.seq_len, model_args.d_model)
 
         self.layers = nn.ModuleList(
             [Block(model_args) for _ in range(model_args.num_layers)]
@@ -118,10 +119,8 @@ class LLAMA(nn.Module):
         self.vocab_proj = nn.Linear(
             model_args.d_model, model_args.vocab_size, bias=False
         )
-        
-        self.token_emb.weight = self.vocab_proj.weight 
 
-        if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
+        if not hasattr(torch.nn.functional, "scaled_dot_product_attention"):
             print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
             mask = torch.full(
                 (1, 1, model_args.seq_len, model_args.seq_len), float("-inf")
@@ -132,7 +131,7 @@ class LLAMA(nn.Module):
             self.mask = None
 
     def forward(self, x):
-        x = self.token_emb(x)
+        x = self.word_emb(x) + self.pos_emb(x)
 
         for layer in self.layers:
             x = layer(x, self.mask)
@@ -140,6 +139,3 @@ class LLAMA(nn.Module):
         x = self.norm(x)
         x = self.vocab_proj(x)
         return x
-    
-    
-

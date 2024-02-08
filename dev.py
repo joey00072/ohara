@@ -26,13 +26,13 @@ testset = torchvision.datasets.MNIST(
 testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False)
 
 
-device =  torch.device("mps")
+device = torch.device("mps")
 
 
 class Linear(nn.Module):
     def __init__(self, input_features, output_features, rank=16):
         super().__init__()
-        self.bias = nn.Parameter(torch.zeros((output_features)))
+        self.bias = nn.Parameter(torch.zeros(output_features))
 
         self.A = nn.Parameter(torch.rand((rank, input_features)))
         self.scale = nn.Parameter(torch.ones(1))
@@ -41,12 +41,8 @@ class Linear(nn.Module):
         nn.init.kaiming_uniform_(self.A, a=math.sqrt(5))
 
     def forward(self, x):
-        lora =( (x @ self.A.t()) * self.scale)  @ self.B.t()
-        return  lora + self.bias
-
-
-
-
+        lora = ((x @ self.A.t()) * self.scale) @ self.B.t()
+        return lora + self.bias
 
 
 # Step 2: Define a Neural Network with only Linear layers
