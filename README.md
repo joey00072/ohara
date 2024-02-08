@@ -8,6 +8,8 @@ this is attempt to make it eveything in one place
 
 ###  The lib to maximize FAFO
 
+### WORK IS PROGESS (Not ready)
+
 ### papers
 1. [SwiGLU](./ohara/models/mlp.py) | [md](./docs/glu/GLU%20Variants%20Improve%20Transformer.md)
 2. [Alibi Embeddings](./ohara/embedings_pos/alibi.py) | [md](./ohara/embedings_pos/alibi/alibi.md)

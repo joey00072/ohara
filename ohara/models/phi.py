@@ -164,7 +164,7 @@ class LayerNorm(nn.LayerNorm):
         super().__init__(*args, **kwargs)
 
     def forward(self, x: Tensor) -> Tensor:
-        return super().forward(x.to(torch.float32)).type_as(x)
+        return super().forward(x)
 
 
 class PhiMHA(nn.Module):
