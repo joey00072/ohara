@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-from ohara import llama
+from ohara.models.llama import LLAMA,Config
 
 
 @torch.no_grad()
@@ -29,10 +29,13 @@ def estimate_loss(model: nn.Module, eval_iters: int, iter_batches, ctx):
 
 
 def main():
-    config = llama.Config()
-    model = llama.LLAMA(config)
+    config = Config(vocab_size=65,d_model=128)
+    model = LLAMA(config)
     model = torch.compile(model)
     print(model)
+    inputs = torch.arange(10)
+    
+    pred = model(inputs)
 
 
 if __name__ == "__main__":
