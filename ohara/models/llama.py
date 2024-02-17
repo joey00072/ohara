@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 import math
 from dataclasses import dataclass
-from glu import SwiGLU
+from .mlp import SwiGLU
 
 
 @dataclass

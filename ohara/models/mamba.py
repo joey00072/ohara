@@ -34,6 +34,7 @@ from torch import Tensor
 
 from dataclasses import dataclass
 
+from .pscan import pscan
 @dataclass
 class MambaConfig:
     d_model: int # D
@@ -110,7 +111,7 @@ class MambaBlock(nn.Module):
         # projects block output from ED back to D
         self.out_proj = nn.Linear(config.d_inner, config.d_model, bias=config.bias)
 
-    def forward(self, x:Tensor):
+    def forward(self, x:Tensor,*args,**kwargs):
         # x : (B, L, D)
         
         # y : (B, L, D)
