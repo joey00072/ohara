@@ -84,7 +84,7 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     return freqs_cis.view(shape)
 
 
-def apply_rope(k, q, freqs_sin, freqs_cos):
+def apply_rope(k, q, cis):
     # Idea suppose vector v = [x,y,x1,y1,...] # v.shape = dim
     # convert vetor into complex num # ie two vec one real, one imagery
     # [x,y,x1,y1,...] -> x+iy, x1+iy1
@@ -93,6 +93,8 @@ def apply_rope(k, q, freqs_sin, freqs_cos):
     # restack
     # x'+iy' -> [x',y',x1',y1'...]
     # you roated vector in chunks of two lfg!!!
+    
+    freqs_sin, freqs_cos = cis
 
     #  rehsape a shape (...,n )-> (..., n//2,2)
     q_cis = q.float().reshape(
@@ -107,8 +109,10 @@ def apply_rope(k, q, freqs_sin, freqs_cos):
     )  # (B,T,nhead,Cc,2) -> ((B,T,Cc), (B,T,Cc)) split into two tuple
     xk_r, xk_i = k_cis.unbind(-1)  # (B,T,nhead,Cc,2) -> ((B,T,Cc), (B,T,Cc))
 
+
     freqs_cos = reshape_for_broadcast(freqs_cos, xq_r)  # freqs.shape = (1,T,1,Cc)
-    freqs_sin = reshape_for_broadcast(freqs_cos, xq_r)
+    freqs_sin = reshape_for_broadcast(freqs_sin, xq_r)
+
 
     # e+if = (a+ib) * (c+di) = (ac-bd) + i (ad+bc)
     # a = xq_r , b = xq_i

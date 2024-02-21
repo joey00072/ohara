@@ -261,7 +261,7 @@ class Block(nn.Module):
         self.mixer = PhiMHA(
             block_idx, config.d_model, config.num_heads, config.rotary_dim
         )
-        self.mlp = MLP(config.d_model, 4 * config.d_model)
+        self.mlp = MLP(config.d_model, config.multiple_of * config.d_model)
 
     def forward(
         self,
