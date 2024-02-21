@@ -4,7 +4,7 @@ import time
 # import pretty_errors
 
 from transformers import AutoTokenizer
-from ohara.models.phi import Phi,PhiConfig,Block
+from ohara.models.phi import Phi, PhiConfig, Block
 
 
 import torch
@@ -39,48 +39,57 @@ class SVDLinear(nn.Module):
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         self.bias = nn.Parameter(torch.empty(out_features))
         self.decomposed = False
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not self.decomposed:
             return x @ self.weight.T + self.bias
-        print((x @ self.U.T).shape,"XX")
-        print(self.S.T.shape,"XW")
-        return (((x @ self.U.T) @ self.S.T ) @ self.V.T) + self.bias
-    
+        print((x @ self.U.T).shape, "XX")
+        print(self.S.T.shape, "XW")
+        return (((x @ self.U.T) @ self.S.T) @ self.V.T) + self.bias
+
     def svd(self):
-        U:torch.Tensor
-        S:torch.Tensor
-        V:torch.Tensor
+        U: torch.Tensor
+        S: torch.Tensor
+        V: torch.Tensor
         U, S, V = torch.linalg.svd(self.weight.detach().float(), full_matrices=False)
         self.U = nn.Parameter(U.half())
         self.S = nn.Parameter(S.half())
         self.V = nn.Parameter(V.half())
         self.decomposed = True
 
+
 layer: Block
 for layer in tqdm(model.layers):
-    in_features = model.config.d_model 
-    out_features = model.config.d_model *4
+    in_features = model.config.d_model
+    out_features = model.config.d_model * 4
 
     up_proj = SVDLinear(in_features, out_features)
     down_proj = SVDLinear(out_features, in_features)
 
-    assert layer.mlp.fc1.weight.shape == up_proj.weight.shape, f"{layer.mlp.fc1.weight.shape} != {up_proj.weight.shape}"
-    assert layer.mlp.fc1.bias.shape == up_proj.bias.shape, f"{layer.mlp.fc1.bias.shape} != {up_proj.bias.shape}"
-    assert layer.mlp.fc2.weight.shape == down_proj.weight.shape, f"{layer.mlp.fc2.weight.shape} != {down_proj.weight.shape}"
-    assert layer.mlp.fc2.bias.shape == down_proj.bias.shape, f"{layer.mlp.fc2.bias.shape} != {down_proj.bias.shape}"
-    
-    up_proj.weight =  layer.mlp.fc1.weight
-    up_proj.bias =  layer.mlp.fc1.bias
-    down_proj.weight =  layer.mlp.fc2.weight
-    down_proj.bias =  layer.mlp.fc2.bias
-    
+    assert (
+        layer.mlp.fc1.weight.shape == up_proj.weight.shape
+    ), f"{layer.mlp.fc1.weight.shape} != {up_proj.weight.shape}"
+    assert (
+        layer.mlp.fc1.bias.shape == up_proj.bias.shape
+    ), f"{layer.mlp.fc1.bias.shape} != {up_proj.bias.shape}"
+    assert (
+        layer.mlp.fc2.weight.shape == down_proj.weight.shape
+    ), f"{layer.mlp.fc2.weight.shape} != {down_proj.weight.shape}"
+    assert (
+        layer.mlp.fc2.bias.shape == down_proj.bias.shape
+    ), f"{layer.mlp.fc2.bias.shape} != {down_proj.bias.shape}"
+
+    up_proj.weight = layer.mlp.fc1.weight
+    up_proj.bias = layer.mlp.fc1.bias
+    down_proj.weight = layer.mlp.fc2.weight
+    down_proj.bias = layer.mlp.fc2.bias
+
     layer.mlp.fc1 = up_proj
     layer.mlp.fc2 = down_proj
-    
+
     layer.mlp.fc1.svd()
     layer.mlp.fc2.svd()
 
-    
 
 print("XX")
 # exit(0)

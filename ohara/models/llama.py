@@ -48,14 +48,14 @@ class Attention(nn.Module):
         v = self.value(x)
 
         k = k.view(
-            seq_len, self.num_heads, self.head_dim
+           batch, seq_len, self.num_heads, self.head_dim
         )  # shape = (B, seq_len, num_heads, head_dim)
-        q = q.view(seq_len, self.num_heads, self.head_dim)
-        v = v.view(seq_len, self.num_heads, self.head_dim)
+        q = q.view(batch,seq_len, self.num_heads, self.head_dim)
+        v = v.view(batch,seq_len, self.num_heads, self.head_dim)
 
-        k = k.transpose(0, 1)  # shape = (B, num_heads, seq_len, head_dim)
-        q = q.transpose(0, 1)
-        v = v.transpose(0, 1)
+        k = k.transpose(1,2)  # shape = (B, num_heads, seq_len, head_dim)
+        q = q.transpose(1,2)
+        v = v.transpose(1,2)
 
         if self.flash_attn:
             output = torch.nn.functional.scaled_dot_product_attention(
@@ -63,7 +63,7 @@ class Attention(nn.Module):
                 k,
                 v,  # order impotent
                 attn_mask=None,
-                dropout_p=self.dropout if self.training else 0.0,
+                dropout_p=self.attn_dropout.p if self.training else 0.0,
                 is_causal=True,
             )
         else:
@@ -131,8 +131,9 @@ class LLAMA(nn.Module):
             self.mask = None
 
     def forward(self, x):
+        # print(f"{max(x.reshape(-1).tolist())=}")
         x = self.token_emb(x)
-
+        # print(f"{x.shape=}")
         for layer in self.layers:
             x = layer(x, self.mask)
 

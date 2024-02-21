@@ -9,4 +9,3 @@ def generate(model, tokenizer, max_tokens=64, **kwargs):
         with torch.no_grad():
             outputs = model.generate(input_ids, **kwargs)
             tokenizer.decode(outputs[0].tolist())
-

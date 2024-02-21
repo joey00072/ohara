@@ -3,7 +3,6 @@ import torch.nn.functional as F
 from collections.abc import Callable
 
 
-
 class SwiGLU(nn.Module):
     def __init__(
         self,
@@ -35,7 +34,6 @@ class SwiGLU(nn.Module):
         return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
 
 
-
 class MLP(nn.Module):
     def __init__(
         self,
@@ -65,7 +63,6 @@ class MLP(nn.Module):
         x = self.w2(x)
         x = self.dropout(x)
         return x
-
 
 
 class GLU(nn.Module):
