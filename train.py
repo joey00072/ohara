@@ -53,18 +53,28 @@ def validate(
 def train(model, optimizer:optim.Optimizer, train_dataloader, val_dataloader,ignore_index):
     
     model.to(device)
-    max_iters=1000
+    max_iters=100
+    micro_batch = 5 
 # validate(model, val_dataloader, 100)
-    for idx, (data, target) in enumerate(val_dataloader):
-        data,target = data.to(device),target.to(device)
+    micro_batch_loss = 0
+    idx =0
+    while True:
+        micro_batch_loss = 0
         if idx >= max_iters:
-            break
-        logits: torch.Tensor = model(data)
-        loss = F.cross_entropy(
-            logits.view(-1, logits.size(-1)), target.view(-1), ignore_index=ignore_index
-        )
-        print(loss)
-        loss.backward()
+                break
+            
+        for _ in range(micro_batch):
+            idx+=1
+            (data, target) = next(iter(val_dataloader))
+            data,target = data.to(device),target.to(device)
+            
+            logits: torch.Tensor = model(data)
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)), target.view(-1), ignore_index=ignore_index
+            )
+            micro_batch_loss += loss.item()
+            loss.backward()
+        print(f"Iter: {idx}, Loss: {micro_batch_loss/micro_batch}")
         optimizer.step()
         optimizer.zero_grad()
 
