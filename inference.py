@@ -23,16 +23,16 @@ class Inference:
         max_gen_len: Optional[int] = None,
     ):
         self.model = self.model.eval()
-        
-        max_gen_len =max_gen_len if max_gen_len else self.args.max_seq_len - 1
- 
+
+        max_gen_len = max_gen_len if max_gen_len else self.args.max_seq_len - 1
+
         prompt_tokens = [
             self.tokenizer.encode(prompt, out_type=int, add_bos=True, add_eos=False)
             for prompt in prompts
         ]
 
         batch_size = len(prompt_tokens)
-        
+
         assert (
             batch_size <= self.args.max_batch_size
         ), f"batch size must be less than or equal to {self.args.max_batch_size}"
@@ -42,7 +42,6 @@ class Inference:
             max_prompt_len <= self.args.max_seq_len
         ), f"prompt length must be less than or equal to {self.args.max_seq_len}"
         total_len = min(self.args.max_seq_len, max_gen_len + max_prompt_len)
-
 
         pad_id = self.tokenizer.pad_id()
         tokens = torch.full(
@@ -55,13 +54,12 @@ class Inference:
         prompt_tokens_mask = (
             tokens != pad_id
         )  # True if the token is a prompt token, False otherwise
-        
-        
+
         cur_iterator = tqdm(range(1, total_len), desc="Generating tokens")
         for cur_pos in cur_iterator:
             with torch.no_grad():
                 logits = self.model.forward(tokens[:, cur_pos - 1 : cur_pos], cur_pos)
-                
+
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = self._sample_top_p(probs, top_p)
@@ -94,8 +92,9 @@ class Inference:
         return (out_tokens, out_text)
 
     def _sample_top_p(self, probs, p):
-        
-        probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True) # (B, vocab_size)
+        probs_sort, probs_idx = torch.sort(
+            probs, dim=-1, descending=True
+        )  # (B, vocab_size)
 
         probs_sum = torch.cumsum(probs_sort, dim=-1)
 
@@ -104,9 +103,9 @@ class Inference:
         probs_sort[mask] = 0.0
 
         probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
-        
+
         next_token = torch.multinomial(probs_sort, num_samples=1)
-        
+
         next_token = torch.gather(probs_idx, -1, next_token)
         return next_token
 

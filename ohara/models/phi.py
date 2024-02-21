@@ -314,7 +314,9 @@ class Phi(nn.Module):
                 cache = kv_cache[idx]
             # print(f"{cache=}")
             # print(f"{x.shape=}")
-            x = layer(x.to(self.wte.weight.dtype), mask, cache, position_ids=position_ids)
+            x = layer(
+                x.to(self.wte.weight.dtype), mask, cache, position_ids=position_ids
+            )
 
         x = self.ln(x)
         x = self.lm_head(x)
@@ -343,16 +345,13 @@ class Phi(nn.Module):
 
     @staticmethod
     def from_pretrained(name: str) -> nn.Module:
-        
         config = PhiConfig()
         model = Phi(config)
         # return model
-    
+
         path_name = download_hf_model(name)
         with open(os.path.join(path_name, "config.json"), encoding="utf-8") as f:
             json.load(f)
-
-        
 
         files = ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
         weights = {}

@@ -1,100 +1,51 @@
-import torch
-import torchvision
-import torchvision.transforms as transforms
-import matplotlib.pyplot as plt
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
+import pygame
+from pygame.joystick import Joystick
 
-from tqdm import tqdm
-import math
+# from rich import print
 
-batch_size = 128
-# Step 1: Load and preprocess the MNIST dataset
-transform = transforms.Compose(
-    [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))]
+pygame.init()
+pygame.joystick.init()
+
+if pygame.joystick.get_count() < 1:
+    print(f"Joeystick not found: {pygame.joystick.get_count()}")
+    exit(0)
+
+
+stick = Joystick(0)
+
+print(stick.get_name())
+
+
+from lightning.data import optimize
+from functools import partial
+import pyarrow.parquet as pq
+from pathlib import Path
+
+
+# 1. Function to tokenize the text contained within the Slimpajam files
+def tokenize_fn(filepath, tokenizer=None):
+    parquet_file = pq.ParquetFile(filepath)
+    # Process per batch to reduce RAM usage
+    for batch in parquet_file.iter_batches(batch_size=8192, columns=["content"]):
+        for text in batch.to_pandas()["content"]:
+            yield tokenizer.encode(text, bos=False, eos=True)
+
+
+# 2. Generate the inputs (we are going to optimize all the compressed json files from SlimPajama dataset )
+input_dir = (
+    "/teamspace/s3_connections/tinyllama-template/starcoderdata"
+)  # "/teamspace/studios/StarCoder_Dataset/data"
+inputs = [str(file) for file in Path(input_dir).rglob("*.parquet")]
+
+# 3. Store the optimized data wherever you want under "/teamspace/datasets" or "/teamspace/s3_connections"
+outputs = optimize(
+    fn=partial(
+        tokenize_fn, tokenizer=Tokenizer("./checkpoints/Llama-2-7b-hf")
+    ),  # Note: You can use HF tokenizer or any others
+    inputs=inputs,
+    output_dir="/teamspace/datasets/starcoder/",
+    chunk_size=(2049 * 8012),
+    num_nodes=16,
+    machine=Machine.DATA_PREP,  # use 32 CPU machine
+    reorder_files=True,  # split evenly the files based on their size across all machines
 )
-
-trainset = torchvision.datasets.MNIST(
-    root="./data", train=True, download=True, transform=transform
-)
-trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size, shuffle=True)
-
-testset = torchvision.datasets.MNIST(
-    root="./data", train=False, download=True, transform=transform
-)
-testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size, shuffle=False)
-
-
-device = torch.device("mps")
-
-
-class Linear(nn.Module):
-    def __init__(self, input_features, output_features, rank=16):
-        super().__init__()
-        self.bias = nn.Parameter(torch.zeros(output_features))
-
-        self.A = nn.Parameter(torch.rand((rank, input_features)))
-        self.scale = nn.Parameter(torch.ones(1))
-        self.B = nn.Parameter(torch.rand(output_features, rank))
-        # Initialize weights and biases
-        nn.init.kaiming_uniform_(self.A, a=math.sqrt(5))
-
-    def forward(self, x):
-        lora = ((x @ self.A.t()) * self.scale) @ self.B.t()
-        return lora + self.bias
-
-
-# Step 2: Define a Neural Network with only Linear layers
-class Net(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.fc1 = Linear(28 * 28, 512)
-        self.fc2 = Linear(512, 128)
-        self.fc3 = Linear(128, 10)
-
-    def forward(self, x):
-        x = x.view(-1, 28 * 28)  # Flatten the image
-        x = F.silu(self.fc1(x))
-        x = F.silu(self.fc2(x))
-        x = self.fc3(x)
-        return F.log_softmax(x, dim=1)
-
-
-net = Net().to(device)
-
-# Step 3: Define a Loss function and optimizer
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.AdamW(net.parameters(), lr=0.001)
-
-# Step 4: Train the network
-loss_values = []
-for epoch in range(5):  # loop over the dataset multiple times
-    running_loss = 0.0
-    for i, data in tqdm(enumerate(trainloader, 0), total=len(trainloader)):
-        inputs, labels = data
-        inputs, labels = inputs.to(device), labels.to(device)
-
-        optimizer.zero_grad()
-
-        outputs = net(inputs)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-
-        running_loss += loss.item()
-        if i % 100 == 99:  # print every 100 mini-batches
-            # print(f"[{epoch + 1}, {i + 1:5d}] loss: {running_loss / 100:.4f}")
-            loss_values.append(running_loss / 100)
-            running_loss = 0.0
-
-print(f"[{epoch + 1}, {i + 1:5d}] loss: {running_loss / 100:.4f}")
-print("Finished Training")
-
-
-# Step 5: Plot the Loss Graph
-plt.plot(loss_values)
-plt.xlabel("Iterations")
-plt.ylabel("Loss")
-plt.title("Training Loss")
-plt.show()

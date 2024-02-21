@@ -7,6 +7,7 @@ import jax.numpy as jnp
 from jax.nn import softmax
 import jax
 from jax import lax
+
 torch.manual_seed(2)
 
 
@@ -79,8 +80,6 @@ print(f"time:{(end-start)/ITERS}")
 print(out)
 
 exit(0)
-
-
 
 
 def sliding_window_attention_jax(q, k, v, window_size=16):
