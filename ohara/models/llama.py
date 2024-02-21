@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass
 from .mlp import SwiGLU
 
+from ohara.embedings_pos.rotatry import precompute_freqs_cis,apply_rope,reshape_for_broadcast
 
 @dataclass
 class Config:
@@ -17,6 +18,7 @@ class Config:
     dropout: int = 0.2
     multiple_of: int = 4
     bias: int = True
+
 
 
 class Attention(nn.Module):
@@ -36,7 +38,7 @@ class Attention(nn.Module):
 
         self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: torch.Tensor,freqs_cis) -> torch.Tensor:
         batch, seq_len, d_model = x.shape
 
         k: torch.Tensor  # type hint for lsp
@@ -53,6 +55,12 @@ class Attention(nn.Module):
         q = q.view(batch,seq_len, self.num_heads, self.head_dim)
         v = v.view(batch,seq_len, self.num_heads, self.head_dim)
 
+
+        q, k = apply_rope(q, k, freqs_cis)
+
+        # xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+        # xv = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+        
         k = k.transpose(1,2)  # shape = (B, num_heads, seq_len, head_dim)
         q = q.transpose(1,2)
         v = v.transpose(1,2)
@@ -97,8 +105,8 @@ class Block(nn.Module):
         self.norm1 = nn.LayerNorm(model_args.d_model)
         self.norm2 = nn.LayerNorm(model_args.d_model)
 
-    def forward(self, x, mask):
-        x = x + self.attn(self.norm1(x), mask)
+    def forward(self, x, mask,freqs_cis):
+        x = x + self.attn(self.norm1(x), mask,freqs_cis)
         x = x + self.ff(self.norm2(x))
         return x
 
@@ -106,6 +114,8 @@ class Block(nn.Module):
 class LLAMA(nn.Module):
     def __init__(self, model_args: Config, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        
+        self.config = model_args
 
         self.token_emb = nn.Embedding(model_args.vocab_size, model_args.d_model)
 
@@ -119,7 +129,10 @@ class LLAMA(nn.Module):
         )
 
         self.token_emb.weight = self.vocab_proj.weight
-
+        
+        self.cis = precompute_freqs_cis(model_args.d_model//model_args.num_heads,model_args.seq_len * 2)
+       
+        
         if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
             print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
             mask = torch.full(
@@ -130,12 +143,15 @@ class LLAMA(nn.Module):
         else:
             self.mask = None
 
-    def forward(self, x):
+    def forward(self, x:torch.Tensor):
         # print(f"{max(x.reshape(-1).tolist())=}")
+        batch,seqlen = x.shape
         x = self.token_emb(x)
-        # print(f"{x.shape=}")
+        device = self.token_emb.weight.device
+        freqs_cis = self.cis[0][:seqlen].to(device),self.cis[1][:seqlen].to(device)
+
         for layer in self.layers:
-            x = layer(x, self.mask)
+            x = layer(x, self.mask,freqs_cis)
 
         x = self.norm(x)
         x = self.vocab_proj(x)

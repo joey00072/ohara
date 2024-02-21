@@ -9,6 +9,8 @@ import torch.nn.functional as F
 from torch.utils.data import IterableDataset,DataLoader,IterDataPipe
 from pathlib import Path
 
+import requests
+import random
 
 PATH = Path("./data")
 # "google/byt5-small"
@@ -66,10 +68,64 @@ class MiniPile(IterableDataset):
             yield x[:-1], x[1:]
 
 
+class TinyShakespeareDataset(IterableDataset):
+    def __init__(
+        self,
+        tokenizer: AutoTokenizer = None,
+        path: Path = PATH,
+        min_length: int = 512,
+        max_length: int = 512,
+        cache_dir=None,
+    ):
+        assert tokenizer is not None, "must pass tokenizer"
+        self.tokenizer = tokenizer
+        self.tokenizer.padding_side = "right"
+        self.length = len(self.tokenizer)
+        self.PAD = tokenizer.pad_token_id
+
+      
+        self.vocab_size = len(tokenizer)
+        self.min_length = min_length
+        self.max_length = max_length
+        self.cache_dir = cache_dir
+        self.dataset_name = "tinyshakespeare"
+        
+        self.data_path = path.joinpath(self.dataset_name+".txt")
+        
+        try: # ugly ik 
+            with open(self.data_path)as f:
+                self.data = torch.Tensor(tokenizer.encode(f.read())).long()
+        except Exception as e:
+            self.download_data()
+            with open(self.data_path)as f:
+                self.data = torch.Tensor(tokenizer.encode(f.read())).long()
+        
+        self.length = len(self.data)
+        
+
+
+    def __iter__(self) -> torch.Tensor:
+        while True:
+            idx = random.randint(0,(self.length-self.max_length-1))
+            x = self.data[idx:idx+self.max_length+1]
+            yield x[:-1],x[1:]
+            
+    def download_data(self):
+        url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+        response = requests.get(url)
+        if response.status_code == 200:
+            with open(self.data_path, 'w', encoding='utf-8') as file:
+                file.write(response.text)
+        else:
+            raise Exception(f"Failed to download data. Status code: {response.status_code}")
+
+
+
 if __name__=="__main__":
-    tokenizer = AutoTokenizer.from_pretrained("NeelNanda/gpt-neox-tokenizer-digits")
-    dataset = MiniPile(tokenizer=tokenizer,split="test")
-    dataloader = DataLoader(dataset=dataset,batch_size=8)
-    for data,target in dataloader:
-        print(data.shape)
-        break
+    tokenizer = AutoTokenizer.from_pretrained("google/byt5-small")
+    dataset = TinyShakespeareDataset(tokenizer=tokenizer)
+    dataloder = DataLoader(dataset,batch_size=2)
+    
+    for data,target in dataloder:
+        print(data.shape,target.shape)
+        # print(tokenizer.decode(data.tolist()))

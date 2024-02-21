@@ -4,10 +4,13 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 import math
+import time
+
 import lightning as L
-from ohara.models.llama import LLAMA, Config
+# from ohara.models.llama import LLAMA, Config
+from ohara.models.phi import Phi,PhiConfig
 from ohara.lr_scheduler import CosineScheduler
-from ohara.dataset import MiniPile
+from ohara.dataset import MiniPile,TinyShakespeareDataset
 from ohara.utils.info import model_summary
 
 
@@ -15,7 +18,10 @@ from lightning.fabric.utilities.throughput import ThroughputMonitor, measure_flo
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
-import pretty_errors
+from ohara.inference import Inference
+
+
+# import pretty_errors
 
 
 device = torch.device("mps")
@@ -47,7 +53,7 @@ def validate(
 def train(model, optimizer:optim.Optimizer, train_dataloader, val_dataloader,ignore_index):
     
     model.to(device)
-    max_iters=100
+    max_iters=1000
 # validate(model, val_dataloader, 100)
     for idx, (data, target) in enumerate(val_dataloader):
         data,target = data.to(device),target.to(device)
@@ -67,31 +73,52 @@ def train(model, optimizer:optim.Optimizer, train_dataloader, val_dataloader,ign
 def main():
     learning_rate = 1e-5
     wornup_iters = 5
+    batch_size = 32
 
-    tokenizer = AutoTokenizer.from_pretrained("NeelNanda/gpt-neox-tokenizer-digits")
-    config = Config(
+    tokenizer = AutoTokenizer.from_pretrained("google/byt5-small")
+    config = PhiConfig(
         vocab_size=tokenizer.vocab_size,
-        d_model=512,
+        d_model=2560//2,
         seq_len=2048,
         num_layers=2,
         num_heads=4,
+        multiple_of=1,
+        
     )
     
     print(f"{tokenizer.vocab_size=} CrossEntropy={-math.log(1/tokenizer.vocab_size)}")
 
-    model = LLAMA(config)
-    ds = MiniPile(dataset_name="JeanKaddour/minipile",tokenizer=tokenizer,split="test")
-    dataloader = DataLoader(ds, batch_size=4)
+    model = Phi(config)
+    ds = TinyShakespeareDataset(tokenizer=tokenizer)
+    dataloader = DataLoader(ds, batch_size=batch_size)
 
     print(model)
     print(model_summary(model))
-    print(model_summary(model.token_emb))
+    print(model_summary(model.wte))
     # model = torch.compile(model)
     inputs = torch.arange(10).unsqueeze(0)
     get_lr = CosineScheduler(learning_rate=learning_rate)
     optimzer = optim.AdamW(model.parameters())
     train(model,optimzer,train_dataloader=dataloader,val_dataloader=dataloader,ignore_index=tokenizer.pad_token_id)
-    tokenizer.name_or_path
+    
+    start: float = time.time()
+    max_tokens = 200
+    model = model.eval()
+    with torch.no_grad():
+        inputs = torch.tensor(inputs).reshape(1, -1).to(device)
+        print(tokenizer.decode(inputs.tolist()[0]), end="")
+        for _idx in range(max_tokens):
+            logits = model(inputs)
+            max_logits = torch.argmax(logits, dim=-1)
+            # print(f"{idx=} {max_logits.shape}")
+            inputs: torch.Tensor = torch.cat((inputs, max_logits[:, -1:]), dim=-1)
+            input_pos = inputs.shape[1] - 1
+            print(tokenizer.decode(inputs.tolist()[0][-1]), end="", flush=True)
+
+    end: float = time.time()
+
+    print(f"Time: {end-start}")
+    
 
 
 
