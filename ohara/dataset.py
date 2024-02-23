@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 
-import os
 from transformers import AutoTokenizer
 from itertools import cycle
-from datasets import load_dataset, load_from_disk
-from datasets.download import DownloadMode
+from datasets import load_from_disk
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import IterableDataset, DataLoader, IterDataPipe
+from torch.utils.data import IterableDataset, DataLoader
 from pathlib import Path
 
 import requests
@@ -98,7 +96,7 @@ class TinyShakespeareDataset(IterableDataset):
         try:  # ugly ik
             with open(self.data_path) as f:
                 self.data = torch.Tensor(tokenizer.encode(f.read())).long()
-        except Exception as e:
+        except Exception:
             self.download_data()
             with open(self.data_path) as f:
                 self.data = torch.Tensor(tokenizer.encode(f.read())).long()

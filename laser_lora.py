@@ -4,7 +4,7 @@ import time
 # import pretty_errors
 
 from transformers import AutoTokenizer
-from ohara.models.phi import Phi, PhiConfig, Block
+from ohara.models.phi import Phi, Block
 
 
 import torch

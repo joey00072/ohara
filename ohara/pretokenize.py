@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
 
 from transformers import AutoTokenizer
 from datasets import load_dataset, DownloadMode
@@ -15,10 +14,12 @@ class DatasetPreprocessor:
         tokenizer_name: str = "NeelNanda/gpt-neox-tokenizer-digits",
         min_length: int = 512,
         max_length: int = 2049,
-        splits: list[str] = ["train", "test"],
+        splits: list[str] | None = None,
         output_dir: Path = Path("./data"),
         hf_cache: Path = Path("./hf_cache"),
     ):
+        if splits is None:
+            splits = ["train", "test"]
         self.dataset_name = dataset_name
         self.tokenizer_name = tokenizer_name
         self.min_length = min_length
