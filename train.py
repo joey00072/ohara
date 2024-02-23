@@ -6,16 +6,14 @@ import torch.optim as optim
 import math
 import time
 
-import lightning as L
 from ohara.models.llama import LLAMA, Config
 
 # from ohara.models.phi import Phi,PhiConfig
 from ohara.lr_scheduler import CosineScheduler
-from ohara.dataset import MiniPile, TinyShakespeareDataset
+from ohara.dataset import TinyShakespeareDataset
 from ohara.utils.info import model_summary
 
 
-from lightning.fabric.utilities.throughput import ThroughputMonitor, measure_flops
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
@@ -91,14 +89,10 @@ def main():
     batch_size = 32
     max_iters = 100
 
-    eval_interval = 2000
-    eval_iters = 100
 
-    wandb_log = False
-    wandb_project = "llamac"
-    wandb_run_name = "run" + datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    "run" + datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 
-    get_lr = CosineScheduler(
+    CosineScheduler(
         learning_rate=0.1, min_lr=0.001, warmup_iters=wornup_iters, max_iters=max_iters
     )
 
@@ -122,7 +116,7 @@ def main():
     print(model_summary(model))
     # model = torch.compile(model)
     inputs = torch.tensor(tokenizer.encode("The")).unsqueeze(0).clone().detach()
-    get_lr = CosineScheduler(learning_rate=learning_rate)
+    CosineScheduler(learning_rate=learning_rate)
     optimzer = optim.AdamW(model.parameters())
     train(
         model,
@@ -143,7 +137,7 @@ def main():
             max_logits = torch.argmax(logits, dim=-1)
             # print(f"{idx=} {max_logits.shape}")
             inputs: torch.Tensor = torch.cat((inputs, max_logits[:, -1:]), dim=-1)
-            input_pos = inputs.shape[1] - 1
+            inputs.shape[1] - 1
             print(tokenizer.decode(inputs.tolist()[0][-1]), end="", flush=True)
 
     end: float = time.time()

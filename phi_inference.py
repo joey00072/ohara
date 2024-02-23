@@ -1,22 +1,17 @@
-import os
 import time
 
-import random
 # import pretty_errors
 
 from transformers import AutoTokenizer
-from ohara.models.phi import Phi, PhiConfig, Block, PhiMHA
+from ohara.models.phi import Phi, Block
 
-from ohara.models.mamba import MambaBlock, MambaConfig
 
 import torch
 import torch.nn as nn
 
-from tqdm import tqdm
 import torch.nn.functional as F
 
 
-from ohara.inference import Inference  # Need to use this in future
 
 kv = True
 accelerator = "cpu"
@@ -98,7 +93,7 @@ class MLP(nn.Module):
         return self.down(x)
 
 
-for idx, layer in enumerate(model.layers):
+for _idx, layer in enumerate(model.layers):
     # if idx!=30:
     #     continue
     layer: Block

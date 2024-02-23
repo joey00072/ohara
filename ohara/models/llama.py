@@ -6,12 +6,8 @@ import math
 from dataclasses import dataclass
 from .mlp import SwiGLU
 
-from ohara.embedings_pos.rotatry import (
-    precompute_freqs_cis,
-    apply_rope,
-    reshape_for_broadcast,
-)
-
+from ohara.embedings_pos.rotatry import precompute_freqs_cis
+from ohara.embedings_pos.rotatry import apply_rope
 
 @dataclass
 class Config:

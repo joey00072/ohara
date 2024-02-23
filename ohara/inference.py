@@ -1,8 +1,4 @@
-from typing import Optional
 import torch
-import time
-from pathlib import Path
-import json
 from sentencepiece import SentencePieceProcessor
 from tqdm import tqdm
 
@@ -20,7 +16,7 @@ class Inference:
         prompts: list[str],
         temperature: float = 0.6,
         top_p: float = 0.9,
-        max_gen_len: Optional[int] = None,
+        max_gen_len: int | None = None,
     ):
         self.model = self.model.eval()
 
@@ -82,7 +78,7 @@ class Inference:
 
         out_tokens = []
         out_text = []
-        for prompt_index, current_prompt_tokens in enumerate(tokens.tolist()):
+        for _prompt_index, current_prompt_tokens in enumerate(tokens.tolist()):
             # Cut to the EOS token, if present
             if self.tokenizer.eos_id in current_prompt_tokens:
                 eos_idx = current_prompt_tokens.index(self.tokenizer.eos_id)
@@ -121,7 +117,7 @@ if __name__ == "__main__":
         "If Google was an Italian company founded in Milan, it would",
         # Few shot promt
         """Translate English to French:
-        
+
         sea otter => loutre de mer
         peppermint => menthe poivrée
         plush girafe => girafe peluche
@@ -129,7 +125,7 @@ if __name__ == "__main__":
         # Zero shot prompt
         """Tell me if the following person is actually Doraemon disguised as human:
         Name: Umar Jamil
-        Decision: 
+        Decision:
         """,
     ]
 

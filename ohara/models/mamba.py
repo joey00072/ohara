@@ -23,12 +23,13 @@
 # This file is taken from https://github.com/alxndrTL/mamba.py/tree/main
 # curtosy of @AlexandreTL2 https://twitter.com/AlexandreTL2/
 
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 
-from typing import Union
 from torch import Tensor
 
 
@@ -41,7 +42,7 @@ from .pscan import pscan
 class MambaConfig:
     d_model: int  # D
     n_layers: int
-    dt_rank: Union[int, str] = "auto"
+    dt_rank: int | str = "auto"
     d_state: int = 16  # N in paper/comments
     expand_factor: int = 2  # E in paper/comments
     d_conv: int = 4
