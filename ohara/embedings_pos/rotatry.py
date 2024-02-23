@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -93,7 +95,7 @@ def apply_rope(k, q, cis):
     # restack
     # x'+iy' -> [x',y',x1',y1'...]
     # you roated vector in chunks of two lfg!!!
-    
+
     freqs_sin, freqs_cos = cis
 
     #  rehsape a shape (...,n )-> (..., n//2,2)
@@ -109,10 +111,8 @@ def apply_rope(k, q, cis):
     )  # (B,T,nhead,Cc,2) -> ((B,T,Cc), (B,T,Cc)) split into two tuple
     xk_r, xk_i = k_cis.unbind(-1)  # (B,T,nhead,Cc,2) -> ((B,T,Cc), (B,T,Cc))
 
-
     freqs_cos = reshape_for_broadcast(freqs_cos, xq_r)  # freqs.shape = (1,T,1,Cc)
     freqs_sin = reshape_for_broadcast(freqs_sin, xq_r)
-
 
     # e+if = (a+ib) * (c+di) = (ac-bd) + i (ad+bc)
     # a = xq_r , b = xq_i

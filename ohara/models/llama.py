@@ -6,7 +6,12 @@ import math
 from dataclasses import dataclass
 from .mlp import SwiGLU
 
-from ohara.embedings_pos.rotatry import precompute_freqs_cis,apply_rope,reshape_for_broadcast
+from ohara.embedings_pos.rotatry import (
+    precompute_freqs_cis,
+    apply_rope,
+    reshape_for_broadcast,
+)
+
 
 @dataclass
 class Config:
@@ -18,7 +23,6 @@ class Config:
     dropout: int = 0.2
     multiple_of: int = 4
     bias: int = True
-
 
 
 class Attention(nn.Module):
@@ -38,7 +42,7 @@ class Attention(nn.Module):
 
         self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor,freqs_cis) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: torch.Tensor, freqs_cis) -> torch.Tensor:
         batch, seq_len, d_model = x.shape
 
         k: torch.Tensor  # type hint for lsp
@@ -50,20 +54,19 @@ class Attention(nn.Module):
         v = self.value(x)
 
         k = k.view(
-           batch, seq_len, self.num_heads, self.head_dim
+            batch, seq_len, self.num_heads, self.head_dim
         )  # shape = (B, seq_len, num_heads, head_dim)
-        q = q.view(batch,seq_len, self.num_heads, self.head_dim)
-        v = v.view(batch,seq_len, self.num_heads, self.head_dim)
-
+        q = q.view(batch, seq_len, self.num_heads, self.head_dim)
+        v = v.view(batch, seq_len, self.num_heads, self.head_dim)
 
         q, k = apply_rope(q, k, freqs_cis)
 
         # xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
         # xv = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        
-        k = k.transpose(1,2)  # shape = (B, num_heads, seq_len, head_dim)
-        q = q.transpose(1,2)
-        v = v.transpose(1,2)
+
+        k = k.transpose(1, 2)  # shape = (B, num_heads, seq_len, head_dim)
+        q = q.transpose(1, 2)
+        v = v.transpose(1, 2)
 
         if self.flash_attn:
             output = torch.nn.functional.scaled_dot_product_attention(
@@ -91,6 +94,40 @@ class Attention(nn.Module):
         return output
 
 
+class MoE(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *args,
+        **kwargs,
+    ):
+        super().__init__()
+        num_experts = 4
+        self.experts = nn.ModuleList([SwiGLU(dim, dim) for i in range(num_experts)])
+        self.gate = nn.Linear(dim, num_experts, bias=False)
+        self.num_experts_per_tok = 2
+
+    def forward(self, x: torch.Tensor):
+        orig_shape = x.shape
+        x = x.view(-1, x.shape[-1])
+
+        scores = self.gate(x)
+        expert_weights, expert_indices = torch.topk(
+            scores, self.num_experts_per_tok, dim=-1
+        )
+        expert_weights = expert_weights.softmax(dim=-1)
+        flat_expert_indices = expert_indices.view(-1)
+
+        x = x.repeat_interleave(self.num_experts_per_tok, dim=0)
+        y = torch.empty_like(x, dtype=x.dtype, device=x.device)
+        for i, expert in enumerate(self.experts):
+            y[flat_expert_indices == i] = expert(x[flat_expert_indices == i])
+        y = (y.view(*expert_weights.shape, -1) * expert_weights.unsqueeze(-1)).sum(
+            dim=1
+        )
+        return y.view(*orig_shape)
+
+
 class Block(nn.Module):
     def __init__(self, model_args: Config):
         super().__init__()
@@ -105,8 +142,8 @@ class Block(nn.Module):
         self.norm1 = nn.LayerNorm(model_args.d_model)
         self.norm2 = nn.LayerNorm(model_args.d_model)
 
-    def forward(self, x, mask,freqs_cis):
-        x = x + self.attn(self.norm1(x), mask,freqs_cis)
+    def forward(self, x, mask, freqs_cis):
+        x = x + self.attn(self.norm1(x), mask, freqs_cis)
         x = x + self.ff(self.norm2(x))
         return x
 
@@ -114,7 +151,7 @@ class Block(nn.Module):
 class LLAMA(nn.Module):
     def __init__(self, model_args: Config, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        
+
         self.config = model_args
 
         self.token_emb = nn.Embedding(model_args.vocab_size, model_args.d_model)
@@ -129,10 +166,11 @@ class LLAMA(nn.Module):
         )
 
         self.token_emb.weight = self.vocab_proj.weight
-        
-        self.cis = precompute_freqs_cis(model_args.d_model//model_args.num_heads,model_args.seq_len * 2)
-       
-        
+
+        self.cis = precompute_freqs_cis(
+            model_args.d_model // model_args.num_heads, model_args.seq_len * 2
+        )
+
         if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
             print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
             mask = torch.full(
@@ -143,15 +181,15 @@ class LLAMA(nn.Module):
         else:
             self.mask = None
 
-    def forward(self, x:torch.Tensor):
+    def forward(self, x: torch.Tensor):
         # print(f"{max(x.reshape(-1).tolist())=}")
-        batch,seqlen = x.shape
+        batch, seqlen = x.shape
         x = self.token_emb(x)
         device = self.token_emb.weight.device
-        freqs_cis = self.cis[0][:seqlen].to(device),self.cis[1][:seqlen].to(device)
+        freqs_cis = self.cis[0][:seqlen].to(device), self.cis[1][:seqlen].to(device)
 
         for layer in self.layers:
-            x = layer(x, self.mask,freqs_cis)
+            x = layer(x, self.mask, freqs_cis)
 
         x = self.norm(x)
         x = self.vocab_proj(x)

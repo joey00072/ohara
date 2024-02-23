@@ -63,7 +63,9 @@ class DatasetPreprocessor:
     def save_pre_tokenized_dataset(self, dataset, split):
         if not self.output_dir.exists():
             self.output_dir.mkdir(parents=True, exist_ok=True)
-        fpath = str(f"{self.dataset_name.replace('/','-')}--{self.tokenizer.name_or_path.replace('/','-')}")
+        fpath = str(
+            f"{self.dataset_name.replace('/','-')}--{self.tokenizer.name_or_path.replace('/','-')}"
+        )
         dataset.save_to_disk(self.output_dir.joinpath(fpath).joinpath(split))
 
         print(f"Dataset saved to {self.output_dir}")
