@@ -1,10 +1,11 @@
+from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 import math
 from dataclasses import dataclass
-from ohara.ffn.glu import SwiGLU
+from ohara.models.mlp import SwiGLU
 
 
 @dataclass

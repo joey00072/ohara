@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import math
 from dataclasses import dataclass
 
-from ohara.ffn.mlp import SwiGLU
+from ohara.models.mlp import SwiGLU
 
 
 @dataclass

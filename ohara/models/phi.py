@@ -312,8 +312,6 @@ class Phi(nn.Module):
         for idx, layer in enumerate(self.layers):
             if kv_cache is not None:
                 cache = kv_cache[idx]
-            # print(f"{cache=}")
-            # print(f"{x.shape=}")
             x = layer(
                 x.to(self.wte.weight.dtype), mask, cache, position_ids=position_ids
             )

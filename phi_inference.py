@@ -1,10 +1,11 @@
 import os
 import time
 
+import random
 # import pretty_errors
 
 from transformers import AutoTokenizer
-from ohara.models.phi import Phi, PhiConfig, Block,PhiMHA
+from ohara.models.phi import Phi, PhiConfig, Block, PhiMHA
 
 from ohara.models.mamba import MambaBlock, MambaConfig
 
@@ -13,6 +14,9 @@ import torch.nn as nn
 
 from tqdm import tqdm
 import torch.nn.functional as F
+
+
+from ohara.inference import Inference  # Need to use this in future
 
 kv = True
 accelerator = "cpu"
@@ -40,58 +44,68 @@ input_pos = 0
 inputs = tokenizer.encode(prompt)
 
 
-mamba_cfg = MambaConfig(
-    d_model=model.config.d_model,
-    n_layers=1,
-)
-mamba = MambaBlock(mamba_cfg).to(device).to(torch.float16)
-attn = 
-
 def distill_model(
     Teacher: nn.Module,
     Student: nn.Module,
     d_model,
-    seq_len=100,
-    batch_size=8,
+    seq_len=16,
+    batch_size=16,
     iters=100,
-    log_iter=100,
+    log_iter=10,
 ):
     Teacher.eval()
     Student.train()
 
-    Teacher = Teacher.to(device).to(torch.float32)
+    Teacher = Teacher.to(device).to(torch.float32).eval()
     Student = Student.to(device).to(torch.float32)
 
-    optimizer = torch.optim.AdamW(Student.parameters(), lr=1e-5)
+    optimizer = torch.optim.AdamW(Student.parameters(), lr=4e-3)
 
     avg_loss = 0
     for it in range(iters):
-        inputs = torch.rand((batch_size, seq_len, d_model)).to(device)
+        for _ in range(5):
+            inputs = torch.randn((batch_size, seq_len, d_model)).to(device)
 
-        with torch.no_grad():
-            labels = Teacher(inputs)
+            with torch.no_grad():
+                labels = Teacher(inputs)
 
-        pred = Student(inputs)
+            pred = Student(inputs)
 
-        loss = F.mse_loss(pred, labels)
-        loss.backward()
+            loss = F.mse_loss(pred, labels)
+            loss.backward()
 
-        optimizer.step()
-        optimizer.zero_grad()
+            optimizer.step()
+            optimizer.zero_grad()
 
-        avg_loss += loss.item()
+            avg_loss += loss.item()
 
         # if it % log_iter == 0:
-        print(f"Iter: {it} Loss: {avg_loss/log_iter}")
+        print(f"Iter: {it} Loss: {avg_loss/5}")
         avg_loss = 0
 
     return Student
 
-model = model.cpu()
-model.layers[0].mixer = distill_model(
-    model.layers[0].mixer, mamba, model.config.d_model
-).eval().to(model.wte.weight.dtype)
 
+class MLP(nn.Module):
+    def __init__(self, d_model=64):
+        super().__init__()
+        hidden = d_model * 5
+        self.up = nn.Linear(d_model, hidden)
+        self.down = nn.Linear(hidden, d_model)
+
+    def forward(self, x):
+        x = F.relu(self.up(x))
+        return self.down(x)
+
+
+for idx, layer in enumerate(model.layers):
+    # if idx!=30:
+    #     continue
+    layer: Block
+    S = MLP(d_model=model.config.d_model)
+    T = layer.mlp
+    distill_model(T, S, model.config.d_model)
+    layer.mlp = S.to(torch.float16)
 model = model.to(device)
 
 print("=" * 100)
