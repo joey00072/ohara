@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from collections.abc import Callable
 
 
+
 class SwiGLU(nn.Module):
     def __init__(
         self,
@@ -156,6 +157,10 @@ class ReGLU(nn.Module):
         return self.dropout(self.w2(F.relu(self.w1(x)) * self.w3(x)))
 
 
+# This might not me most efficient implementation of MOE 
+# but it is easy to understand
+# TODO: Write a more efficient implementation
+
 class GEGLU(nn.Module):
     def __init__(
         self,
@@ -183,3 +188,13 @@ class GEGLU(nn.Module):
 
     def forward(self, x):
         return self.dropout(self.w2(F.gelu(self.w1(x)) * self.w3(x)))
+
+
+MLP_MAP = {
+    "swiglu": SwiGLU,
+    "mlp": MLP,
+    "glu": nn.GLU,
+    "bilinear": BiLinear,
+    "reglu": ReGLU,
+    "geglu": GEGLU,
+}

@@ -89,7 +89,6 @@ def main():
     batch_size = 32
     max_iters = 100
 
-
     "run" + datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 
     CosineScheduler(

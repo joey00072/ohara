@@ -4,10 +4,11 @@ import torch.nn.functional as F
 
 import math
 from dataclasses import dataclass
-from .mlp import SwiGLU
+from ..modules.mlp import SwiGLU
 
 from ohara.embedings_pos.rotatry import precompute_freqs_cis
 from ohara.embedings_pos.rotatry import apply_rope
+
 
 @dataclass
 class Config:
@@ -89,39 +90,6 @@ class Attention(nn.Module):
         output = self.res_dropout(output)
         return output
 
-
-class MoE(nn.Module):
-    def __init__(
-        self,
-        dim,
-        *args,
-        **kwargs,
-    ):
-        super().__init__()
-        num_experts = 4
-        self.experts = nn.ModuleList([SwiGLU(dim, dim) for i in range(num_experts)])
-        self.gate = nn.Linear(dim, num_experts, bias=False)
-        self.num_experts_per_tok = 2
-
-    def forward(self, x: torch.Tensor):
-        orig_shape = x.shape
-        x = x.view(-1, x.shape[-1])
-
-        scores = self.gate(x)
-        expert_weights, expert_indices = torch.topk(
-            scores, self.num_experts_per_tok, dim=-1
-        )
-        expert_weights = expert_weights.softmax(dim=-1)
-        flat_expert_indices = expert_indices.view(-1)
-
-        x = x.repeat_interleave(self.num_experts_per_tok, dim=0)
-        y = torch.empty_like(x, dtype=x.dtype, device=x.device)
-        for i, expert in enumerate(self.experts):
-            y[flat_expert_indices == i] = expert(x[flat_expert_indices == i])
-        y = (y.view(*expert_weights.shape, -1) * expert_weights.unsqueeze(-1)).sum(
-            dim=1
-        )
-        return y.view(*orig_shape)
 
 
 class Block(nn.Module):

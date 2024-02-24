@@ -22,7 +22,7 @@ class XPos(nn.Module):
         if recurrent:
             sin = torch.sin(self.angle * (slen - 1))
             cos = torch.cos(self.angle * (slen - 1))
-            retention_rel_pos = ((sin, cos), self.decay.exp())
+            retention_rel_pos = ((cos,sin), self.decay.exp())
         else:
             index = torch.arange(slen).to(self.decay)
             sin = torch.sin(index[:, None] * self.angle[None, :])
@@ -34,14 +34,16 @@ class XPos(nn.Module):
             mask = torch.exp(mask * self.decay[:, None, None])
             mask = torch.nan_to_num(mask)
             mask = mask / mask.sum(dim=-1, keepdim=True).sqrt()
-            retention_rel_pos = ((sin, cos), mask)
+            retention_rel_pos = ((cos,sin), mask)
 
         return retention_rel_pos
 
 
+
+
 if __name__ == "__main__":
     xpos = XPos(64, 4)
-    ((sin, cos), decay) = xpos.forward(8)
+    ((cos,sin), decay) = xpos.forward(8)
     print(decay)
 
     for i in range(1, 9):
