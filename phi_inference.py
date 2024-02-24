@@ -12,7 +12,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-
 kv = True
 accelerator = "cpu"
 if torch.cuda.is_available():

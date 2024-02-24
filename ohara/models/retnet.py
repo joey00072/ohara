@@ -5,19 +5,22 @@ import torch.nn.functional as F
 import math
 from dataclasses import dataclass
 
-from ohara.models.mlp import SwiGLU
+from ohara.modules.mlp import SwiGLU
+from ohara.modules.norm import RMSNorm
+from ohara.embedings_pos.xpos import XPos
 
 
 @dataclass
 class Config:
-    vocab_size = 65
-    seq_len = 64
-    d_model = 128
-    num_heads = 4
-    num_layers = 4
-    dropout = 0.2
-    multiple_of = 4
-    bias = False
+    vocab_size:int = 65
+    seq_len:int = 64
+    d_model:int = 128
+    num_heads:int = 4
+    num_layers:int = 4
+    dropout:float = 0.2
+    multiple_of:int = 4
+    bias:bool = False
+    eps:float = 1e-5
 
 
 # rotary embedding
@@ -102,20 +105,24 @@ def apply_rope(k, q, freqs_sin, freqs_cos):
     return xq_out.type_as(q), xk_out.type_as(q)
 
 
-class Attention(nn.Module):
+class Retation(nn.Module):
     def __init__(self, model_args: Config):
         super().__init__()
-        d_model = model_args.d_model
+        self.d_model = model_args.d_model
         self.num_heads = model_args.num_heads
         self.head_dim = model_args.d_model // model_args.num_heads
+        self.key_dim = self.d_model // self.num_heads
+        self.scaling = self.key_dim ** -0.5
+        
+        
 
-        self.key = nn.Linear(d_model, d_model)
-        self.query = nn.Linear(d_model, d_model)
-        self.value = nn.Linear(d_model, d_model)
-        self.proj = nn.Linear(d_model, d_model)
-
-        self.attn_dropout = nn.Dropout(model_args.dropout)
-        self.res_dropout = nn.Dropout(model_args.dropout)
+        self.key = nn.Linear(self.d_model, self.d_model)
+        self.query = nn.Linear(self.d_model, self.d_model)
+        self.value = nn.Linear(self.d_model, self.d_model)
+        self.gate = nn.Linear(self.d_model, self.d_model)
+        self.proj = nn.Linear(self.d_model, self.d_model)
+        
+        self.norm = RMSNorm(self.head_dim,model_args.e)
 
         self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
 
@@ -131,6 +138,9 @@ class Attention(nn.Module):
         k = self.key(x)
         q = self.query(x)
         v = self.value(x)
+        g = self.gate(x)
+        
+        k = k* self.scaling
 
         k = k.view(
             seq_len, self.num_heads, self.head_dim
@@ -144,29 +154,21 @@ class Attention(nn.Module):
         q = q.transpose(0, 1)
         v = v.transpose(0, 1)
 
-        if self.flash_attn:
-            output = torch.nn.functional.scaled_dot_product_attention(
-                q,
-                k,
-                v,  # order impotent
-                attn_mask=None,
-                dropout_p=self.dropout if self.training else 0.0,
-                is_causal=True,
-            )
-        else:
-            attn_mtx = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
-            attn_mtx = attn_mtx + mask[:, :, :seq_len, :seq_len]
-            attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(k)
-            attn_mtx = self.attn_dropout(attn_mtx)
+        ret_mtx = torch.matmul(q, k.transpose(2, 3)) 
+        ret_mtx = ret_mtx/ret_mtx.detach().abs().sum(dim=-1, keepdim=True).clamp(min=1, max=5e4)
+        ret_mtx = ret_mtx + mask[:, :, :seq_len, :seq_len]
 
-            output = torch.matmul(attn_mtx, v)  # (batch, n_head, seq_len, head_dim)
-
-        # restore time as batch dimension and concat heads
+        output = torch.matmul(ret_mtx, v)  # (batch, n_head, seq_len, head_dim)
+        
+        output = self.norm(output)
+        
         output = output.transpose(1, 2).contiguous().view(batch, seq_len, d_model)
-
-        # final projection into the residual stream
+        
+        
+        
+        output = output * g
+        
         output = self.proj(output)
-        output = self.res_dropout(output)
         return output
 
 
@@ -174,7 +176,7 @@ class Block(nn.Module):
     def __init__(self, model_args: Config):
         super().__init__()
 
-        self.attn = Attention(model_args)
+        self.attn = Retation(model_args)
         self.ff = SwiGLU(
             dim=model_args.d_model,
             multiple_of=model_args.multiple_of,
@@ -205,22 +207,12 @@ class RoFormer(nn.Module):
         self.vocab_proj = nn.Linear(
             model_args.d_model, model_args.vocab_size, bias=False
         )
-
-        freqs_cos, freqs_sin = precompute_freqs_cis(
-            model_args.d_model // model_args.n_heads, model_args.seq_len * 2
-        )
-        self.register_buffer("freqs_cos", freqs_cos, persistent=False)
-        self.register_buffer("freqs_sin", freqs_sin, persistent=False)
-
-        if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
-            print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
-            mask = torch.full(
-                (1, 1, model_args.seq_len, model_args.seq_len), float("-inf")
-            )
-            mask = torch.triu(mask, diagonal=1)
-            self.register_buffer("mask", mask)
-        else:
-            self.mask = None
+        
+        (cos,sin),mask = XPos(model_args.d_model,model_args.seq_len).forward(slen=model_args.seq_len)
+        self.register_buffer("mask", mask, persistent=False)
+        self.register_buffer("freqs_cos", cos, persistent=False)
+        self.register_buffer("freqs_sin", sin, persistent=False)
+        
 
     def forward(self, x):
         B, T = x.shape
