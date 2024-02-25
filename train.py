@@ -11,6 +11,7 @@ from ohara.models.llama import LLAMA, Config
 # from ohara.models.phi import Phi,PhiConfig
 from ohara.lr_scheduler import CosineScheduler
 from ohara.dataset import TinyShakespeareDataset
+from ohara.utils import accelerator_device
 from ohara.utils.info import model_summary
 
 
@@ -21,9 +22,13 @@ from transformers import AutoTokenizer
 from datetime import datetime
 
 # import pretty_errors
+import lightning as L
 
+# fabic = L.Fabric()
+# fabic.launch()
 
-device = torch.device("mps")
+device = accelerator_device()
+print(f"Device: {device=}")
 
 
 @torch.no_grad()
@@ -55,7 +60,7 @@ def train(
     model, optimizer: optim.Optimizer, train_dataloader, val_dataloader, ignore_index
 ):
     model.to(device)
-    max_iters = 100
+    max_iters = 200
     micro_batch = 5
     # validate(model, val_dataloader, 100)
     micro_batch_loss = 0
@@ -99,9 +104,9 @@ def main():
     config = Config(
         vocab_size=tokenizer.vocab_size,
         d_model=2560 // 8,
-        seq_len=2048,
-        num_layers=2,
-        num_heads=4,
+        seq_len=256,
+        num_layers=4,
+        num_heads=8,
         multiple_of=1,
     )
 
