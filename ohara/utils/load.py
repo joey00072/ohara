@@ -4,7 +4,7 @@ import os
 
 # Load model directly
 from transformers import AutoModelForCausalLM
-
+from huggingface_hub import snapshot_download
 model_name = "microsoft/phi-2"
 
 
@@ -21,12 +21,8 @@ def download_hf_model(model_name: str) -> str:
     """
     download model from huggingface and return path of saved model
     """
-    path, err = get_model_path(model_name)
-    print(path, err)
-    AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True)
-
-    path, err = get_model_path(model_name)
-    return path
+    
+    return snapshot_download(model_name)
 
 
 if __name__ == "__main__":

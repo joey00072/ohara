@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch.nn as nn
 import torch.nn.functional as F
 from collections.abc import Callable
@@ -181,13 +183,14 @@ class GEGLU(nn.Module):
             hidden_dim = int(2 * hidden_dim / 3)
             hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = nn.Linear(dim, hidden_dim, bias=bias)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=bias)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=bias)
+        self.gate = nn.Linear(dim, hidden_dim, bias=bias)
+        self.up = nn.Linear(dim, hidden_dim, bias=bias)
+        self.down = nn.Linear(hidden_dim, dim, bias=bias)
+        
         self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
 
     def forward(self, x):
-        return self.dropout(self.w2(F.gelu(self.w1(x)) * self.w3(x)))
+        return self.dropout(self.down(F.gelu(self.gate(x)) * self.up(x)))
 
 
 MLP_MAP = {

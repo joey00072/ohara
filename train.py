@@ -1,34 +1,27 @@
+
+
+import time
+import math
+from datetime import datetime
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-import math
-import time
 
 from ohara.models.llama import LLAMA, Config
-
-# from ohara.models.phi import Phi,PhiConfig
 from ohara.lr_scheduler import CosineScheduler
-from ohara.dataset import TinyShakespeareDataset
-from ohara.utils import accelerator_device
+from ohara.dataset import PreTokenizedDataset
 from ohara.utils.info import model_summary
+from ohara.utils import accelerator_device
 
 
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
 
-from datetime import datetime
-
-# import pretty_errors
-import lightning as L
-
-# fabic = L.Fabric()
-# fabic.launch()
-
 device = accelerator_device()
-print(f"Device: {device=}")
 
 
 @torch.no_grad()
@@ -60,7 +53,7 @@ def train(
     model, optimizer: optim.Optimizer, train_dataloader, val_dataloader, ignore_index
 ):
     model.to(device)
-    max_iters = 200
+    max_iters = 100
     micro_batch = 5
     # validate(model, val_dataloader, 100)
     micro_batch_loss = 0
@@ -100,20 +93,20 @@ def main():
         learning_rate=0.1, min_lr=0.001, warmup_iters=wornup_iters, max_iters=max_iters
     )
 
-    tokenizer = AutoTokenizer.from_pretrained("google/byt5-small")
+    tokenizer = AutoTokenizer.from_pretrained("microsoft/phi-2")
     config = Config(
         vocab_size=tokenizer.vocab_size,
         d_model=2560 // 8,
-        seq_len=256,
-        num_layers=4,
-        num_heads=8,
+        seq_len=2048,
+        num_layers=2,
+        num_heads=4,
         multiple_of=1,
     )
 
     print(f"{tokenizer.vocab_size=} CrossEntropy={-math.log(1/tokenizer.vocab_size)}")
 
     model = LLAMA(config).to(device)
-    ds = TinyShakespeareDataset(tokenizer=tokenizer)
+    ds = PreTokenizedDataset(tokenizer=tokenizer)
     dataloader = DataLoader(ds, batch_size=batch_size)
 
     print(model)

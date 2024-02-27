@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import torch
 
-def accelerator_device(device=None):
+def accelerator_device(device=None)->torch.device:
     if isinstance(device,torch.device):
         return device
     if isinstance(device,str):
