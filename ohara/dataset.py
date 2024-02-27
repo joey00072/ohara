@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from torch.utils.data import IterableDataset, DataLoader
 from pathlib import Path
 
+import os
 import requests
 import random
 
@@ -28,7 +29,7 @@ def get_tokenizer(self, tokenizer: AutoTokenizer | str = None):
         )
 
 
-class MiniPile(IterableDataset):
+class PreTokenizedDataset(IterableDataset):
     def __init__(
         self,
         dataset_name: str = "JeanKaddour/minipile",
@@ -112,6 +113,8 @@ class TinyShakespeareDataset(IterableDataset):
     def download_data(self):
         url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
         response = requests.get(url)
+        if not os.path.exists(PATH):
+            os.makedirs(PATH)
         if response.status_code == 200:
             with open(self.data_path, "w", encoding="utf-8") as file:
                 file.write(response.text)
@@ -119,13 +122,14 @@ class TinyShakespeareDataset(IterableDataset):
             raise Exception(
                 f"Failed to download data. Status code: {response.status_code}"
             )
-
+ 
 
 if __name__ == "__main__":
-    tokenizer = AutoTokenizer.from_pretrained("google/byt5-small")
-    dataset = TinyShakespeareDataset(tokenizer=tokenizer)
+    tokenizer = AutoTokenizer.from_pretrained("microsoft/phi-2")
+    dataset = PreTokenizedDataset(dataset_name="roneneldan/TinyStories",tokenizer=tokenizer,cache_dir="hf_cache")
     dataloder = DataLoader(dataset, batch_size=2)
 
     for data, target in dataloder:
         print(data.shape, target.shape)
+        exit(0)
         # print(tokenizer.decode(data.tolist()))
