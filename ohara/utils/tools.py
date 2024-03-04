@@ -6,10 +6,11 @@ from dataclasses import dataclass
 
 import torch
 
-def accelerator_device(device=None)->torch.device:
-    if isinstance(device,torch.device):
+
+def auto_accelerator(device: str = None) -> torch.device:
+    if isinstance(device, torch.device):
         return device
-    if isinstance(device,str):
+    if isinstance(device, str):
         # assert device in ["cpu","cuda","mps","xla"]
         return torch.device(device)
     assert device is None, "Pass Valid Device"
@@ -20,11 +21,12 @@ def accelerator_device(device=None)->torch.device:
         accelerator = "mps"
     return torch.device(accelerator)
 
+
 @dataclass
 class BetterCycle:
-    iterable : Iterable
-    idx:int = 0
-    _iterator:Iterable= None
+    iterable: Iterable
+    idx: int = 0
+    _iterator: Iterable = None
 
     def __iter__(self) -> BetterCycle:
         return self
@@ -41,9 +43,8 @@ class BetterCycle:
             return next(self._iterator)
 
 
-
-if __name__=="__main__":
-    data = [0,1,2,3]
+if __name__ == "__main__":
+    data = [0, 1, 2, 3]
 
     cyc = BetterCycle(data)
 

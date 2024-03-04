@@ -9,9 +9,8 @@ import math
 from ohara.embedings_pos.rotatry import apply_rope
 
 
-
 class Attention(nn.Module):
-    def __init__(self,d_model,num_heads,attn_dropout=0,res_dropout=0):
+    def __init__(self, d_model, num_heads, attn_dropout=0, res_dropout=0):
         super().__init__()
         d_model = d_model
         self.num_heads = num_heads

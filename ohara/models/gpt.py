@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mlp import MLP
+from ohara.modules.mlp import MLP
 
 
 import math

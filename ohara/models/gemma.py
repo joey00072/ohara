@@ -61,7 +61,7 @@ class GemmaAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
 
-        self.scaling:float = self.head_dim**-0.5
+        self.scaling: float = self.head_dim**-0.5
 
         self.qkv_proj = nn.Linear(
             self.d_model, (self.num_heads + 2 * self.num_kv_heads) * self.head_dim
@@ -92,9 +92,9 @@ class GemmaAttention(nn.Module):
         k = apply_rope(k, freqs_cis=freqs_cis)
 
         # TODO: add code for kv chache
-        
+
         # Grouped Query Attention
-        if self.num_kv_heads != self.num_heads: 
+        if self.num_kv_heads != self.num_heads:
             key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=2)
             value = torch.repeat_interleave(value, self.num_queries_per_kv, dim=2)
 
@@ -143,7 +143,6 @@ class Block(nn.Module):
         return x
 
 
-
 class Gemma(nn.Module):
     def __init__(self, model_args: GemmaConfig, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -163,7 +162,7 @@ class Gemma(nn.Module):
 
         self.token_emb.weight = self.vocab_proj.weight
 
-        self.cos,self.sin = precompute_freqs_cis(
+        self.cos, self.sin = precompute_freqs_cis(
             model_args.d_model // model_args.num_heads, model_args.seq_len * 2
         )
 
@@ -180,7 +179,7 @@ class Gemma(nn.Module):
     def forward(self, x: torch.Tensor):
         batch, seqlen = x.shape
         x = self.token_emb(x)
-        
+
         device = self.token_emb.weight.device
         freqs_cis = self.cos[:seqlen].to(device), self.sin[:seqlen].to(device)
 

@@ -91,7 +91,6 @@ class Attention(nn.Module):
         return output
 
 
-
 class Block(nn.Module):
     def __init__(self, model_args: Config):
         super().__init__()
@@ -145,8 +144,9 @@ class LLAMA(nn.Module):
         else:
             self.mask = None
 
+        self.apply(self._init_weights)
+
     def forward(self, x: torch.Tensor):
-        # print(f"{max(x.reshape(-1).tolist())=}")
         batch, seqlen = x.shape
         x = self.token_emb(x)
         device = self.token_emb.weight.device
@@ -158,3 +158,11 @@ class LLAMA(nn.Module):
         x = self.norm(x)
         x = self.vocab_proj(x)
         return x
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
