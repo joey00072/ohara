@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-import math
 from dataclasses import dataclass
 
 from ohara.modules.mlp import SwiGLU
@@ -12,15 +10,15 @@ from ohara.embedings_pos.xpos import XPos
 
 @dataclass
 class Config:
-    vocab_size:int = 65
-    seq_len:int = 64
-    d_model:int = 128
-    num_heads:int = 4
-    num_layers:int = 4
-    dropout:float = 0.2
-    multiple_of:int = 4
-    bias:bool = False
-    eps:float = 1e-5
+    vocab_size: int = 65
+    seq_len: int = 64
+    d_model: int = 128
+    num_heads: int = 4
+    num_layers: int = 4
+    dropout: float = 0.2
+    multiple_of: int = 4
+    bias: bool = False
+    eps: float = 1e-5
 
 
 # rotary embedding
@@ -112,17 +110,15 @@ class Retation(nn.Module):
         self.num_heads = model_args.num_heads
         self.head_dim = model_args.d_model // model_args.num_heads
         self.key_dim = self.d_model // self.num_heads
-        self.scaling = self.key_dim ** -0.5
-        
-        
+        self.scaling = self.key_dim**-0.5
 
         self.key = nn.Linear(self.d_model, self.d_model)
         self.query = nn.Linear(self.d_model, self.d_model)
         self.value = nn.Linear(self.d_model, self.d_model)
         self.gate = nn.Linear(self.d_model, self.d_model)
         self.proj = nn.Linear(self.d_model, self.d_model)
-        
-        self.norm = RMSNorm(self.head_dim,model_args.e)
+
+        self.norm = RMSNorm(self.head_dim, model_args.e)
 
         self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
 
@@ -139,8 +135,8 @@ class Retation(nn.Module):
         q = self.query(x)
         v = self.value(x)
         g = self.gate(x)
-        
-        k = k* self.scaling
+
+        k = k * self.scaling
 
         k = k.view(
             seq_len, self.num_heads, self.head_dim
@@ -154,20 +150,20 @@ class Retation(nn.Module):
         q = q.transpose(0, 1)
         v = v.transpose(0, 1)
 
-        ret_mtx = torch.matmul(q, k.transpose(2, 3)) 
-        ret_mtx = ret_mtx/ret_mtx.detach().abs().sum(dim=-1, keepdim=True).clamp(min=1, max=5e4)
+        ret_mtx = torch.matmul(q, k.transpose(2, 3))
+        ret_mtx = ret_mtx / ret_mtx.detach().abs().sum(dim=-1, keepdim=True).clamp(
+            min=1, max=5e4
+        )
         ret_mtx = ret_mtx + mask[:, :, :seq_len, :seq_len]
 
         output = torch.matmul(ret_mtx, v)  # (batch, n_head, seq_len, head_dim)
-        
+
         output = self.norm(output)
-        
+
         output = output.transpose(1, 2).contiguous().view(batch, seq_len, d_model)
-        
-        
-        
+
         output = output * g
-        
+
         output = self.proj(output)
         return output
 
@@ -207,12 +203,13 @@ class RoFormer(nn.Module):
         self.vocab_proj = nn.Linear(
             model_args.d_model, model_args.vocab_size, bias=False
         )
-        
-        (cos,sin),mask = XPos(model_args.d_model,model_args.seq_len).forward(slen=model_args.seq_len)
+
+        (cos, sin), mask = XPos(model_args.d_model, model_args.seq_len).forward(
+            slen=model_args.seq_len
+        )
         self.register_buffer("mask", mask, persistent=False)
         self.register_buffer("freqs_cos", cos, persistent=False)
         self.register_buffer("freqs_sin", sin, persistent=False)
-        
 
     def forward(self, x):
         B, T = x.shape

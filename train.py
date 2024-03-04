@@ -1,5 +1,4 @@
-
-
+import sys
 import time
 import math
 from datetime import datetime
@@ -13,15 +12,48 @@ import torch.optim as optim
 from ohara.models.llama import LLAMA, Config
 from ohara.lr_scheduler import CosineScheduler
 from ohara.dataset import PreTokenizedDataset
-from ohara.utils.info import model_summary
-from ohara.utils import accelerator_device
+
+from ohara.utils import auto_accelerator, random_name, model_summary
 
 
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
+import wandb
+from rich import print, traceback
 
-device = accelerator_device()
+traceback.install()
+
+
+### CONFIGS
+wandb_project_name = "Ohara-LLAMA"
+wandb_run_name = random_name()
+
+learning_rate: float = 5e-4
+min_learning_rate: float = 0.0 
+
+wornup_iters: int = 1000
+max_iters: int = 100_000
+batch_size: int = 32
+micro_batch: int = 4
+eval_iters: int = 100
+
+d_model: int = 1024//16
+seq_len: int = 256
+num_layers: int = 4
+num_heads: int = 4
+multiple_of: int = 4
+
+assert d_model % num_heads == 0
+
+compile_model = not bool(sys.platform == "darwin")
+
+### Dataset and Tokenizer
+dataset_name = "roneneldan/TinyStories"  # run pretokeinze first
+tokenizer_name = "microsoft/phi-2"
+
+### Setup
+device = auto_accelerator()  # auto chose device (cuda, mps)
 
 
 @torch.no_grad()
@@ -32,40 +64,59 @@ def validate(
     ignore_index: int = -1,
     device=None,
 ) -> int:
-    # fabric.print("Validating ...")
     model.eval()
-    losses = torch.zeros(max_iters, device=device)
-    for idx, (data, target) in enumerate(dataloader):
-        if idx >= max_iters:
-            break
-        logits: torch.Tensor = model(data)
-        loss = F.cross_entropy(
-            logits.view(-1, logits.size(-1)), target.view(-1), ignore_index=ignore_index
-        )
-        losses[idx] = loss.item()
-        print(loss)
+    with torch.no_grad():
+        losses = torch.zeros(max_iters, device=device)
+        for idx, (data, target) in enumerate(dataloader):
+            data, target = data.to(device), target.to(device)
+            if idx >= max_iters:
+                break
+            logits: torch.Tensor = model(data)
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)), target.reshape(-1), ignore_index=ignore_index
+            )
+            losses[idx] = loss.item()
+        val_loss = losses.mean()
 
     model.train()
-    return losses.mean()
+    return val_loss
 
 
 def train(
-    model, optimizer: optim.Optimizer, train_dataloader, val_dataloader, ignore_index
+    model,
+    optimizer: optim.Optimizer,
+    micro_batch: int,
+    train_dataloader,
+    val_dataloader,
+    eval_iters: int,
+    get_lr,
+    ignore_index=-1,
+    logger=None,
 ):
     model.to(device)
-    max_iters = 100
-    micro_batch = 5
-    # validate(model, val_dataloader, 100)
+    
+    ignore_index = ignore_index if ignore_index else -1
+
+    # sanity test
+    validate(model, val_dataloader, 5,device=device)
+
+    (data, target) = next(iter(train_dataloader))
+    tokerns_per_iter = int(math.prod(data.shape)* micro_batch)
+
     micro_batch_loss = 0
     idx = 0
     while True:
         micro_batch_loss = 0
         if idx >= max_iters:
             break
+        idx += 1
+        
+        lr = get_lr(idx)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
 
         for _ in range(micro_batch):
-            idx += 1
-            (data, target) = next(iter(val_dataloader))
+            (data, target) = next(iter(train_dataloader))
             data, target = data.to(device), target.to(device)
 
             logits: torch.Tensor = model(data)
@@ -74,65 +125,98 @@ def train(
                 target.view(-1),
                 ignore_index=ignore_index,
             )
-            micro_batch_loss += loss.item()
+            loss = loss/micro_batch
             loss.backward()
-        print(f"Iter: {idx}, Loss: {micro_batch_loss/micro_batch}")
+            micro_batch_loss += loss.item()
+
         optimizer.step()
         optimizer.zero_grad()
 
+        print(f"iter: {idx} | loss: {micro_batch_loss:.4f} | lr: {lr:e} ")
+
+        if idx % eval_iters == 0:
+            val_loss = validate(model, val_dataloader, 100,device=device)
+            try:
+                logger.log(
+                    {
+                        "traning_loss": micro_batch_loss / micro_batch,
+                        "test_loss": val_loss,
+                        "iter": idx,
+                        "tokens": idx * tokerns_per_iter,
+                    },
+                    step=idx,
+                )
+            except Exception as e:
+                print(f"Error logging: {e}")
+
 
 def main():
-    learning_rate = 3e-4
-    wornup_iters = 5
-    batch_size = 32
-    max_iters = 100
+    wandb.init(project=wandb_project_name)
+    # wandb=None
 
-    "run" + datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
-    CosineScheduler(
-        learning_rate=0.1, min_lr=0.001, warmup_iters=wornup_iters, max_iters=max_iters
-    )
-
-    tokenizer = AutoTokenizer.from_pretrained("microsoft/phi-2")
     config = Config(
         vocab_size=tokenizer.vocab_size,
-        d_model=2560 // 8,
-        seq_len=2048,
-        num_layers=2,
-        num_heads=4,
-        multiple_of=1,
+        d_model=d_model,
+        seq_len=seq_len,
+        num_layers=num_layers,
+        num_heads=num_layers,
+        multiple_of=multiple_of,
     )
 
-    print(f"{tokenizer.vocab_size=} CrossEntropy={-math.log(1/tokenizer.vocab_size)}")
+    # loss should be close to cross_entropy before traning
+    print(f"{tokenizer.vocab_size=} CrossEntropy={-math.log(1/tokenizer.vocab_size)} ")
+
+    train_ds = PreTokenizedDataset(
+        dataset_name=dataset_name, tokenizer=tokenizer, split="train",max_length=seq_len,
+    )
+    test_ds = PreTokenizedDataset(
+        dataset_name=dataset_name, tokenizer=tokenizer, split="validation",max_length=seq_len,
+    )
+
+    train_dataloader = DataLoader(train_ds, batch_size=batch_size)
+    test_dataloader = DataLoader(test_ds, batch_size=batch_size)
 
     model = LLAMA(config).to(device)
-    ds = PreTokenizedDataset(tokenizer=tokenizer)
-    dataloader = DataLoader(ds, batch_size=batch_size)
+
+    if compile_model:
+        model = torch.compile(model)
 
     print(model)
     print(model_summary(model))
-    # model = torch.compile(model)
-    inputs = torch.tensor(tokenizer.encode("The")).unsqueeze(0).clone().detach()
-    CosineScheduler(learning_rate=learning_rate)
-    optimzer = optim.AdamW(model.parameters())
+
+    get_lr = CosineScheduler(
+        learning_rate=learning_rate,
+        min_lr=min_learning_rate,
+        warmup_iters=wornup_iters,
+        max_iters=max_iters,
+    )
+
+    # inputs = torch.tensor(tokenizer.encode("The")).unsqueeze(0).clone().detach()
+    optimzer = optim.AdamW(model.parameters(), lr=get_lr(0))
+
     train(
         model,
         optimzer,
-        train_dataloader=dataloader,
-        val_dataloader=dataloader,
+        micro_batch=micro_batch,
+        train_dataloader=train_dataloader,
+        val_dataloader=test_dataloader,
+        eval_iters=eval_iters,
+        get_lr=get_lr,
         ignore_index=tokenizer.pad_token_id,
+        logger=wandb,
     )
 
     start: float = time.time()
     max_tokens = 200
     model = model.eval()
+    inputs = tokenizer.encode("Once")
     with torch.no_grad():
         inputs = torch.tensor(inputs).reshape(1, -1).to(device).clone().detach()
-        # print(tokenizer.decode(inputs.tolist()[0]), end="")
         for _idx in range(max_tokens):
             logits = model(inputs)
             max_logits = torch.argmax(logits, dim=-1)
-            # print(f"{idx=} {max_logits.shape}")
             inputs: torch.Tensor = torch.cat((inputs, max_logits[:, -1:]), dim=-1)
             inputs.shape[1] - 1
             print(tokenizer.decode(inputs.tolist()[0][-1]), end="", flush=True)

@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 
 # Load model directly
-from transformers import AutoModelForCausalLM
 from huggingface_hub import snapshot_download
+
 model_name = "microsoft/phi-2"
 
 
@@ -21,7 +21,7 @@ def download_hf_model(model_name: str) -> str:
     """
     download model from huggingface and return path of saved model
     """
-    
+
     return snapshot_download(model_name)
 
 

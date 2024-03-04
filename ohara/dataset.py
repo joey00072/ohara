@@ -68,7 +68,7 @@ class PreTokenizedDataset(IterableDataset):
             x = next(self.toks_cycle)["input_ids"]
             x = torch.tensor(x, dtype=torch.long)
             x = F.pad(x, (0, self.max_length - x.shape[0]), "constant", value=self.PAD)
-            yield x[:-1], x[1:]
+            yield x[:-1][:self.max_length], x[1:][:self.max_length]
 
 
 class TinyShakespeareDataset(IterableDataset):
@@ -108,7 +108,7 @@ class TinyShakespeareDataset(IterableDataset):
         while True:
             idx = random.randint(0, (self.length - self.max_length - 1))
             x = self.data[idx : idx + self.max_length + 1]
-            yield x[:-1], x[1:]
+            yield x[:-1][:self.max_length], x[1:][:self.max_length]
 
     def download_data(self):
         url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
@@ -122,11 +122,13 @@ class TinyShakespeareDataset(IterableDataset):
             raise Exception(
                 f"Failed to download data. Status code: {response.status_code}"
             )
- 
+
 
 if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained("microsoft/phi-2")
-    dataset = PreTokenizedDataset(dataset_name="roneneldan/TinyStories",tokenizer=tokenizer,cache_dir="hf_cache")
+    dataset = PreTokenizedDataset(
+        dataset_name="roneneldan/TinyStories", tokenizer=tokenizer, cache_dir="hf_cache"
+    )
     dataloder = DataLoader(dataset, batch_size=2)
 
     for data, target in dataloder:

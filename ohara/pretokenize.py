@@ -15,8 +15,8 @@ class DatasetPreprocessor:
         min_length: int = 512,
         max_length: int = 2049,
         splits: list[str] | None = None,
-        revision:str|None=None,
-        num_proc:int=None,
+        revision: str | None = None,
+        num_proc: int | None = None,
         output_dir: Path = Path("./data"),
         hf_cache: Path = Path("./hf_cache"),
     ):
@@ -29,23 +29,25 @@ class DatasetPreprocessor:
         self.splits = splits
         self.output_dir = output_dir
         self.hf_cache = hf_cache
-        self.revision=revision
+        self.revision = revision
 
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.tokenizer.padding_side = "right"
         self.PAD = self.tokenizer.pad_token_id
         self.length = self.tokenizer.vocab_size
 
-        self.num_proc = num_proc if num_proc else max(os.cpu_count()-1, 1)
+        self.num_proc = num_proc if num_proc else max(os.cpu_count() - 1, 1)
 
-    def load_and_preprocess_dataset(self, split,remove_columns=["text"]):
+    def load_and_preprocess_dataset(self, split, remove_columns=None):
+        if remove_columns is None:
+            remove_columns = ["text"]
         dataset = load_dataset(
             self.dataset_name,
             split=split,
             download_mode=DownloadMode.REUSE_CACHE_IF_EXISTS,
             revision=self.revision,
         )
-        
+
         tokenized = (
             dataset.map(
                 self.tokenize_fn,
@@ -75,32 +77,38 @@ class DatasetPreprocessor:
 
         print(f"Dataset saved to {self.output_dir}")
 
-    def process_and_save(self,remove_columns=["text"]):
+    def process_and_save(self, remove_columns=None):
+        if remove_columns is None:
+            remove_columns = ["text"]
         for split in self.splits:
-            tokenized_dataset = self.load_and_preprocess_dataset(split,remove_columns=remove_columns)
+            tokenized_dataset = self.load_and_preprocess_dataset(
+                split, remove_columns=remove_columns
+            )
             self.save_pre_tokenized_dataset(tokenized_dataset, split)
             print(f"{split} Processing and saving completed.")
 
 
 class OpenHermesDatasetPreprocessor(DatasetPreprocessor):
-    
-    def load_and_preprocess_dataset(self, split,remove_columns=["text"]):
+    def load_and_preprocess_dataset(self, split, remove_columns=None):
+        if remove_columns is None:
+            remove_columns = ["text"]
         dataset = load_dataset(
             self.dataset_name,
             split=split,
             download_mode=DownloadMode.REUSE_CACHE_IF_EXISTS,
             revision=self.revision,
         )
+
         def map_hermes_to_chatml_format(item):
-            lst= []
+            lst = []
             for row in item["conversations"]:
                 if row["from"] == "system":
-                    lst.append({"role":"system","content":row["value"]})
+                    lst.append({"role": "system", "content": row["value"]})
                 if row["from"] == "gpt":
-                    lst.append({"role":"assistant","content":row["value"]})
+                    lst.append({"role": "assistant", "content": row["value"]})
                 if row["from"] == "human":
-                    lst.append({"role":"user","content":row["value"]})
-            return {"input_ids":self.tokenizer.apply_chat_template(lst)}
+                    lst.append({"role": "user", "content": row["value"]})
+            return {"input_ids": self.tokenizer.apply_chat_template(lst)}
 
         tokenized = (
             dataset.map(
@@ -114,26 +122,23 @@ class OpenHermesDatasetPreprocessor(DatasetPreprocessor):
         return tokenized
 
     def filter_fn(self, x):
-        return (len(x["input_ids"]) >= self.min_length and len(x["input_ids"]) <= self.max_length)
-
-
+        return (
+            len(x["input_ids"]) >= self.min_length
+            and len(x["input_ids"]) <= self.max_length
+        )
 
 
 if __name__ == "__main__":
     # Example usage
     # preprocessor = DatasetPreprocessor(splits=["test"])
     # preprocessor.process_and_save()
-    
-    
+
     preprocessor = OpenHermesDatasetPreprocessor(
         dataset_name="teknium/OpenHermes-2.5",
         tokenizer_name="philschmid/gemma-tokenizer-chatml",
         revision="f7e624a58ce3642ec50483cb6039468ee8c3c464",
         splits=["train"],
         num_proc=1,
+    )
 
-        )
-    
     preprocessor.process_and_save(remove_columns=None)
-    
-

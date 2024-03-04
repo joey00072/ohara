@@ -1,3 +1,4 @@
-from .tools import BetterCycle,accelerator_device # noqa
-from .info import model_summary
-from .svd import svd_approx
+from .tools import BetterCycle, auto_accelerator  # noqa
+from .info import model_summary  # noqa
+from .svd import svd_approx  # noqa
+from .rand import random_name  # noqa

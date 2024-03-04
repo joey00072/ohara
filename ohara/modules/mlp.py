@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from collections.abc import Callable
 
 
-
 class SwiGLU(nn.Module):
     def __init__(
         self,
@@ -159,9 +158,10 @@ class ReGLU(nn.Module):
         return self.dropout(self.w2(F.relu(self.w1(x)) * self.w3(x)))
 
 
-# This might not me most efficient implementation of MOE 
+# This might not me most efficient implementation of MOE
 # but it is easy to understand
 # TODO: Write a more efficient implementation
+
 
 class GEGLU(nn.Module):
     def __init__(
@@ -186,7 +186,7 @@ class GEGLU(nn.Module):
         self.gate = nn.Linear(dim, hidden_dim, bias=bias)
         self.up = nn.Linear(dim, hidden_dim, bias=bias)
         self.down = nn.Linear(hidden_dim, dim, bias=bias)
-        
+
         self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
 
     def forward(self, x):
