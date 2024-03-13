@@ -1,103 +1,55 @@
+[tool.black]
+line-length = 100
+target-version = ['py311']
+
 [tool.ruff]
+line-length = 100
 select = [
-
-    "E", # pycodestyle errors
-    "W", # pycodestyle warnings
-    "F", # pyflakes
-    # "I",  # isort
-    "C",   # flake8-comprehensions
-    "B",   # flake8-bugbear
-    "W",
-    "C90",
-    "N",
-    "UP",
-    "A",
-    "C4",
-    "RUF",
-
-] # Enable pycodestyle (`E`) and Pyflakes (`F`) codes by default.
-ignore = ["B905","N806","F405"]
-
-# Allow autofix for all enabled rules (when `--fix`) is provided.
-fixable = [
-    "A",
-    "ANN",
-    "ARG",
-    "B",
-    "BLE",
-    "C",
-    "COM",
-    "D",
-    "DTZ",
-    "E",
-    "EM",
-    "ERA",
-    "EXE",
-    "F",
-    "FBT",
-    "G",
-    "I",
-    "ICN",
-    "INP",
-    "ISC",
-    "N",
-    "PD",
-    "PGH",
-    "PIE",
-    "PL",
-    "PT",
-    "PTH",
-    "Q",
-    "RET",
-    "RUF",
-    "S",
-    "SIM",
-    "T",
-    "TCH",
-    "TID",
-    "TRY",
-    "UP",
-    "W",
-    "YTT",
+    "E", "F", "W", "B", "C4", "PIE", "NPY", "PLE",
+    "DTZ003", "DTZ004",
+    "G010",
+    "PLW0120", "PLW0129", "PLW0711", "PLW2101",
+    "SIM101", "SIM110", "SIM201", "SIM202", "SIM222", "SIM223",
+    "S506",
+    "RET501", "RET502",
+    "RUF006", "RUF008", "RUF011", "RUF013", "RUF016", "RUF017", "RUF200",
+    "COM818", "COM819",
+    "ISC001",
+    "PYI016", "PYI018", "PYI025",
+    "PERF102",
+    "UP006", "UP007",
+    "FURB148", "FURB163", "FURB181",
+    "ASYNC100", "ASYNC102",
+    "TID251",
 ]
-
-unfixable = ["B905"]
-
-# Exclude a variety of commonly ignored directories.
-exclude = [
-    ".bzr",
-    ".direnv",
-    ".eggs",
-    ".git",
-    ".hg",
-    ".mypy_cache",
-    ".nox",
-    ".pants.d",
-    ".pytype",
-    ".ruff_cache",
-    ".svn",
-    ".tox",
-    ".venv",
-    "__pypackages__",
-    "_build",
-    "buck-out",
-    "build",
-    "dist",
-    "node_modules",
-    "venv",
+ignore = [
     "B905",
+    "E2",
+    "E402",
+    "E501",
+    "E701",
+    "E711",
+    "E731",
+    "E741",
+    "B011",
+    "C408",
+    "NPY002",
+    "PIE790",
 ]
-per-file-ignores = {}
+unfixable = [
+    "F841",
+    "F601",
+    "F602",
+    "B018",
+    "SIM222",
+    "SIM223",
+    "B006",
+]
 
-# Same as Black.
-line-length = 88
+target-version = "py311"
 
-# Allow unused variables when underscore-prefixed.
-dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+[tool.ruff.lint]
+preview = true
 
-# Assume Python 3.10.
-target-version = "py310"
-
-[tool.ruff.mccabe]
-# Unlike Flake8, default to a complexity level of 10.
-max-complexity = 10
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401", "F403"]
