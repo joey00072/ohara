@@ -28,9 +28,7 @@ class XPos(nn.Module):
             sin = torch.sin(index[:, None] * self.angle[None, :])
             cos = torch.cos(index[:, None] * self.angle[None, :])
             mask = torch.tril(torch.ones(slen, slen).to(self.decay))
-            mask = torch.masked_fill(
-                index[:, None] - index[None, :], ~mask.bool(), float("inf")
-            )
+            mask = torch.masked_fill(index[:, None] - index[None, :], ~mask.bool(), float("inf"))
             mask = torch.exp(mask * self.decay[:, None, None])
             mask = torch.nan_to_num(mask)
             mask = mask / mask.sum(dim=-1, keepdim=True).sqrt()

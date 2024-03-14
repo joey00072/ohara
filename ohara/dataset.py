@@ -68,7 +68,7 @@ class PreTokenizedDataset(IterableDataset):
             x = next(self.toks_cycle)["input_ids"]
             x = torch.tensor(x, dtype=torch.long)
             x = F.pad(x, (0, self.max_length - x.shape[0]), "constant", value=self.PAD)
-            yield x[:-1][:self.max_length], x[1:][:self.max_length]
+            yield x[:-1][: self.max_length], x[1:][: self.max_length]
 
 
 class TinyShakespeareDataset(IterableDataset):
@@ -108,7 +108,7 @@ class TinyShakespeareDataset(IterableDataset):
         while True:
             idx = random.randint(0, (self.length - self.max_length - 1))
             x = self.data[idx : idx + self.max_length + 1]
-            yield x[:-1][:self.max_length], x[1:][:self.max_length]
+            yield x[:-1][: self.max_length], x[1:][: self.max_length]
 
     def download_data(self):
         url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
@@ -119,9 +119,7 @@ class TinyShakespeareDataset(IterableDataset):
             with open(self.data_path, "w", encoding="utf-8") as file:
                 file.write(response.text)
         else:
-            raise Exception(
-                f"Failed to download data. Status code: {response.status_code}"
-            )
+            raise Exception(f"Failed to download data. Status code: {response.status_code}")
 
 
 if __name__ == "__main__":

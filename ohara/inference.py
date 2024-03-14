@@ -1,12 +1,15 @@
 import torch
-from sentencepiece import SentencePieceProcessor
+import torch.nn as nn
 from tqdm import tqdm
 
-import torch.nn as nn
+from torch import Tensor
+from typing import Optional
+
+from transformers import AutoTokenizer
 
 
 class Inference:
-    def __init__(self, model: nn.Module, tokenizer: SentencePieceProcessor, model_args):
+    def __init__(self, model: nn.Module, tokenizer: AutoTokenizer, model_args):
         self.model = model
         self.tokenizer = tokenizer
         self.args = model_args
@@ -40,9 +43,7 @@ class Inference:
         total_len = min(self.args.max_seq_len, max_gen_len + max_prompt_len)
 
         pad_id = self.tokenizer.pad_id()
-        tokens = torch.full(
-            (batch_size, total_len), pad_id, dtype=torch.long, device=device
-        )
+        tokens = torch.full((batch_size, total_len), pad_id, dtype=torch.long, device=device)
         for k, t in enumerate(prompt_tokens):
             tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device=device)
 
@@ -65,14 +66,10 @@ class Inference:
 
             next_token = next_token.reshape(-1)
             # Only replace token if it is a padding token
-            next_token = torch.where(
-                prompt_tokens_mask[:, cur_pos], tokens[:, cur_pos], next_token
-            )
+            next_token = torch.where(prompt_tokens_mask[:, cur_pos], tokens[:, cur_pos], next_token)
             tokens[:, cur_pos] = next_token
             # EOS is reached only if we found an EOS token for a padding position
-            eos_reached |= (~prompt_tokens_mask[:, cur_pos]) & (
-                next_token == self.tokenizer.eos_id
-            )
+            eos_reached |= (~prompt_tokens_mask[:, cur_pos]) & (next_token == self.tokenizer.eos_id)
             if all(eos_reached):
                 break
 
@@ -88,9 +85,7 @@ class Inference:
         return (out_tokens, out_text)
 
     def _sample_top_p(self, probs, p):
-        probs_sort, probs_idx = torch.sort(
-            probs, dim=-1, descending=True
-        )  # (B, vocab_size)
+        probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)  # (B, vocab_size)
 
         probs_sum = torch.cumsum(probs_sort, dim=-1)
 

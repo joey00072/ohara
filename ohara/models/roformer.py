@@ -63,13 +63,9 @@ def apply_rope(k, q, freqs_sin, freqs_cos):
     q_cis = q.float().reshape(
         q.shape[:-1] + (-1, 2)
     )  # (B,T,nhead,C) -> (B,T,nhead,Cc,2) # Cc = C//2
-    k_cis = k.float().reshape(
-        k.shape[:-1] + (-1, 2)
-    )  # (B,T,nhead,C) -> (B,T,nhead,Cc,2)
+    k_cis = k.float().reshape(k.shape[:-1] + (-1, 2))  # (B,T,nhead,C) -> (B,T,nhead,Cc,2)
 
-    xq_r, xq_i = q_cis.unbind(
-        -1
-    )  # (B,T,nhead,Cc,2) -> ((B,T,Cc), (B,T,Cc)) split into two tuple
+    xq_r, xq_i = q_cis.unbind(-1)  # (B,T,nhead,Cc,2) -> ((B,T,Cc), (B,T,Cc)) split into two tuple
     xk_r, xk_i = k_cis.unbind(-1)  # (B,T,nhead,Cc,2) -> ((B,T,Cc), (B,T,Cc))
 
     freqs_cos = reshape_for_broadcast(freqs_cos, xq_r)  # freqs.shape = (1,T,1,Cc)
@@ -82,9 +78,7 @@ def apply_rope(k, q, freqs_sin, freqs_cos):
     # e = (ac-bd) = xq_r * freqs_cos - xq_i * freqs_sin
     # f = (c+di)  = xq_r * freqs_sin + xq_i * freqs_cos
 
-    xq_out_r = (
-        xq_r * freqs_cos - xq_i * freqs_sin
-    )  # (ac-bd)   # shape =  # (B,T,nhead,Cc)
+    xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin  # (ac-bd)   # shape =  # (B,T,nhead,Cc)
     xq_out_i = xq_r * freqs_sin + xq_i * freqs_cos  # (ad+bc) * i
     xk_out_r = xk_r * freqs_cos - xk_i * freqs_sin  # (ac-bd)
     xk_out_i = xk_r * freqs_sin + xk_i * freqs_cos  # (ad+bc) * i
@@ -138,9 +132,7 @@ class Attention(nn.Module):
 
         self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
 
-    def forward(
-        self, x: torch.Tensor, freqs_cos, freqs_sin, mask: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, freqs_cos, freqs_sin, mask: torch.Tensor) -> torch.Tensor:
         batch, seq_len, d_model = x.shape
 
         k: torch.Tensor  # type hint for lsp
@@ -216,14 +208,10 @@ class RoFormer(nn.Module):
         self.word_emb = nn.Embedding(model_args.vocab_size, model_args.d_model)
         self.pos_emb = nn.Embedding(model_args.seq_len, model_args.d_model)
 
-        self.layers = nn.ModuleList(
-            [Block(model_args) for _ in range(model_args.num_layers)]
-        )
+        self.layers = nn.ModuleList([Block(model_args) for _ in range(model_args.num_layers)])
 
         self.norm = nn.LayerNorm(model_args.d_model)
-        self.vocab_proj = nn.Linear(
-            model_args.d_model, model_args.vocab_size, bias=False
-        )
+        self.vocab_proj = nn.Linear(model_args.d_model, model_args.vocab_size, bias=False)
 
         freqs_cos, freqs_sin = precompute_freqs_cis(
             model_args.d_model // model_args.n_heads, model_args.seq_len * 2
@@ -233,9 +221,7 @@ class RoFormer(nn.Module):
 
         if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
             print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
-            mask = torch.full(
-                (1, 1, model_args.seq_len, model_args.seq_len), float("-inf")
-            )
+            mask = torch.full((1, 1, model_args.seq_len, model_args.seq_len), float("-inf"))
             mask = torch.triu(mask, diagonal=1)
             self.register_buffer("mask", mask)
         else:

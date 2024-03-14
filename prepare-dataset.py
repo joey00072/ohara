@@ -2,8 +2,6 @@ from rich import print
 from ohara.pretokenize import DatasetPreprocessor, OpenHermesDatasetPreprocessor
 
 
-
-
 def prepare_openhermes_2_5(
     dataset="teknium/OpenHermes-2.5",
     tokenizer="philschmid/gemma-tokenizer-chatml",
@@ -35,7 +33,6 @@ def tinystories(
 
 
 datasets = {"openhermes": prepare_openhermes_2_5, "tinystories": tinystories}
-
 
 
 if __name__ == "__main__":

@@ -26,9 +26,7 @@ class LoRALinear(nn.Module):
         self.lora_alpha = lora_alpha
         self.merged = False
 
-        self.lora_dropout = (
-            nn.Dropout(p=lora_dropout) if lora_dropout > 0.0 else lambda x: x
-        )
+        self.lora_dropout = nn.Dropout(p=lora_dropout) if lora_dropout > 0.0 else lambda x: x
         self.linear = torch.nn.Linear(in_features, out_features, **kwargs)
 
         if rank > 0:

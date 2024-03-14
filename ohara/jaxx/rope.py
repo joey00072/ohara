@@ -4,9 +4,7 @@ import einops
 from jaxtyping import Array
 
 
-def precompute_freqs_cis(
-    dim: int, end: int, theta: float = 10000.0
-) -> tuple[Array, Array]:
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> tuple[Array, Array]:
     freqs = 1.0 / (10000 ** (jnp.arange(0, dim, 2) / dim))
     freqs = jnp.einsum("i , j -> i j", jnp.arange(end), freqs)
     freqs_cos = jnp.cos(freqs)  # real part

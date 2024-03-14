@@ -31,9 +31,7 @@ def sliding_window_attention(
     return out
 
 
-def sliding_window_attention_with_mask(
-    q: Tensor, k: Tensor, v: Tensor, window_size: int = 16
-):
+def sliding_window_attention_with_mask(q: Tensor, k: Tensor, v: Tensor, window_size: int = 16):
     B, T, C = q.shape
     out = torch.zeros(T, C)
     mask = torch.zeros(T, T)

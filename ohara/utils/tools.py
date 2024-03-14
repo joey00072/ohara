@@ -9,15 +9,15 @@ import torch
 
 def auto_accelerator(device: str = None) -> torch.device:
     """
-    Automatically selects and returns a torch device. If a device is specified, it validates and returns the specified device. 
+    Automatically selects and returns a torch device. If a device is specified, it validates and returns the specified device.
     If no device is specified, it checks for available devices in the order of CUDA, MPS (Apple Silicon GPUs), and defaults to CPU if none are available.
-    
+
     Args:
         device (str, optional): The name of the device to use. Can be 'cpu', 'cuda', 'mps', or None. Defaults to None.
-        
+
     Returns:
         torch.device: The selected torch device.
-        
+
     Raises:
         AssertionError: If the device passed is not None, 'cpu', 'cuda', or 'mps'.
     """
@@ -33,16 +33,18 @@ def auto_accelerator(device: str = None) -> torch.device:
         accelerator = "mps"
     return torch.device(accelerator)
 
+
 @dataclass
 class BetterCycle:
     """
     A data class that implements a better cycle iterator over any iterable. It cycles through the iterable indefinitely.
-    
+
     Attributes:
         iterable (Iterable): The iterable to cycle through.
         idx (int): The current cycle index (how many times the iterable has been cycled through). Defaults to 0.
         _iterator (Iterable, optional): The iterator generated from the iterable. This is used to keep track of the current iteration state. Defaults to None.
     """
+
     iterable: Iterable
     idx: int = 0
     _iterator: Iterable = None

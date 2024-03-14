@@ -122,10 +122,7 @@ class OpenHermesDatasetPreprocessor(DatasetPreprocessor):
         return tokenized
 
     def filter_fn(self, x):
-        return (
-            len(x["input_ids"]) >= self.min_length
-            and len(x["input_ids"]) <= self.max_length
-        )
+        return len(x["input_ids"]) >= self.min_length and len(x["input_ids"]) <= self.max_length
 
 
 if __name__ == "__main__":

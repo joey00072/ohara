@@ -120,14 +120,10 @@ class LLAMA(nn.Module):
 
         self.token_emb = nn.Embedding(model_args.vocab_size, model_args.d_model)
 
-        self.layers = nn.ModuleList(
-            [Block(model_args) for _ in range(model_args.num_layers)]
-        )
+        self.layers = nn.ModuleList([Block(model_args) for _ in range(model_args.num_layers)])
 
         self.norm = nn.LayerNorm(model_args.d_model)
-        self.vocab_proj = nn.Linear(
-            model_args.d_model, model_args.vocab_size, bias=False
-        )
+        self.vocab_proj = nn.Linear(model_args.d_model, model_args.vocab_size, bias=False)
 
         self.token_emb.weight = self.vocab_proj.weight
 
@@ -137,9 +133,7 @@ class LLAMA(nn.Module):
 
         if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
             print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
-            mask = torch.full(
-                (1, 1, model_args.seq_len, model_args.seq_len), float("-inf")
-            )
+            mask = torch.full((1, 1, model_args.seq_len, model_args.seq_len), float("-inf"))
             mask = torch.triu(mask, diagonal=1)
             self.register_buffer("mask", mask)
         else:

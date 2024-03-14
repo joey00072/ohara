@@ -110,9 +110,7 @@ class LLAMA(eqx.Module):
             minval=-1e-4,
             maxval=1e-4,
         )
-        self.blocks = tuple(
-            LlamaBlock(dim, num_heads, seq_len, key=key) for _ in range(num_layers)
-        )
+        self.blocks = tuple(LlamaBlock(dim, num_heads, seq_len, key=key) for _ in range(num_layers))
         self.norm = RMSNorm(dim, key=key)
 
     def __call__(self, x: Array):
