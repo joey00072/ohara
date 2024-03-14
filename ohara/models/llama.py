@@ -23,6 +23,7 @@ class Config:
 
 
 class Attention(nn.Module):
+    # TODO: add GQA
     def __init__(self, model_args: Config):
         super().__init__()
         d_model = model_args.d_model
