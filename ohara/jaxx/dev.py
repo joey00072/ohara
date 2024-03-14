@@ -1,10 +1,7 @@
-from ramen import *
 from transformers import AutoTokenizer
 import jax.numpy as np
 
-tokenizer = AutoTokenizer.from_pretrained(
-    "NeelNanda/gpt-neox-tokenizer-digits", use_fast=True
-)
+tokenizer = AutoTokenizer.from_pretrained("NeelNanda/gpt-neox-tokenizer-digits", use_fast=True)
 tokenizer.padding_side = "right"
 
 

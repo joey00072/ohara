@@ -31,17 +31,13 @@ class PhiConfig:
 
 
 class KVCache:
-    def __init__(
-        self, shape, max_seq_length, idx: int | None = None, device=None, dtype=None
-    ):
+    def __init__(self, shape, max_seq_length, idx: int | None = None, device=None, dtype=None):
         self.idx = idx
         self.key: torch.Tensor = torch.zeros(shape, device=device, dtype=dtype)
         self.value: torch.Tensor = torch.zeros(shape, device=device, dtype=dtype)
         self.max_seq_length = max_seq_length
 
-    def forward(
-        self, keys: Tensor, values: Tensor, start_pos: Tensor
-    ) -> tuple[Tensor, Tensor]:
+    def forward(self, keys: Tensor, values: Tensor, start_pos: Tensor) -> tuple[Tensor, Tensor]:
         bsz, T, _, _ = keys.shape
         # print(f"start_pos={start_pos}, T={T}, bsz={bsz}")
         self.key[:bsz, start_pos : start_pos + T] = keys
@@ -88,9 +84,7 @@ class RoPE(nn.Module):
         rx1 = x1 * costheta - x2 * sintheta
         rx2 = x1 * sintheta + x2 * costheta
 
-        assert (
-            self.dims < x.shape[-1]
-        ), "RoPE doesn't implement partial traditional application"
+        assert self.dims < x.shape[-1], "RoPE doesn't implement partial traditional application"
 
         rx = torch.cat([rx1[..., None], rx2[..., None]], axis=-1)
 
@@ -110,9 +104,7 @@ class RoPE(nn.Module):
             device=x.device,
         )
 
-        rope = (
-            self._compute_traditional_rope if self.traditional else self._compute_rope
-        )
+        rope = self._compute_traditional_rope if self.traditional else self._compute_rope
         rx = rope(costheta, sintheta, x)
 
         return torch.reshape(rx, shape)
@@ -129,21 +121,14 @@ class RoPE(nn.Module):
     ):
         D = D // 2
         positions = torch.arange(offset, N, dtype=dtype, device=device) * scale
-        freqs = torch.exp(
-            -torch.arange(0.0, D, dtype=dtype, device=device) * (math.log(base) / D)
-        )
+        freqs = torch.exp(-torch.arange(0.0, D, dtype=dtype, device=device) * (math.log(base) / D))
         theta = torch.reshape(positions, (-1, 1)) * torch.reshape(freqs, (1, -1))
         return torch.cos(theta), torch.sin(theta)
 
 
 def new_gelu(x: Tensor) -> Tensor:
     return (
-        0.5
-        * x
-        * (
-            1.0
-            + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0)))
-        )
+        0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
     )
 
 
@@ -202,9 +187,7 @@ class PhiMHA(nn.Module):
         if kv_cache is not None:
             k, v = kv_cache.forward(k, v, position_ids)
 
-        k: Tensor = k.transpose(1, 2).to(
-            torch.float32
-        )  # shape = (B, num_heads, seq_len, head_dim)
+        k: Tensor = k.transpose(1, 2).to(torch.float32)  # shape = (B, num_heads, seq_len, head_dim)
         q: Tensor = q.transpose(1, 2).to(torch.float32)
         v: Tensor = v.transpose(1, 2).to(torch.float32)
 
@@ -258,9 +241,7 @@ class Block(nn.Module):
         self.ln = LayerNorm(config.d_model, eps=config.eps)
         self.block_idx = block_idx
 
-        self.mixer = PhiMHA(
-            block_idx, config.d_model, config.num_heads, config.rotary_dim
-        )
+        self.mixer = PhiMHA(block_idx, config.d_model, config.num_heads, config.rotary_dim)
         self.mlp = MLP(config.d_model, config.multiple_of * config.d_model)
 
     def forward(
@@ -280,9 +261,7 @@ class Phi(nn.Module):
         super().__init__()
         self.config = config
         self.wte = nn.Embedding(config.vocab_size, config.d_model)
-        self.layers = nn.ModuleList(
-            [Block(config, i) for i in range(config.num_layers)]
-        )
+        self.layers = nn.ModuleList([Block(config, i) for i in range(config.num_layers)])
 
         self.ln = LayerNorm(config.d_model, eps=config.eps)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size)
@@ -312,9 +291,7 @@ class Phi(nn.Module):
         for idx, layer in enumerate(self.layers):
             if kv_cache is not None:
                 cache = kv_cache[idx]
-            x = layer(
-                x.to(self.wte.weight.dtype), mask, cache, position_ids=position_ids
-            )
+            x = layer(x.to(self.wte.weight.dtype), mask, cache, position_ids=position_ids)
 
         x = self.ln(x)
         x = self.lm_head(x)
@@ -336,9 +313,7 @@ class Phi(nn.Module):
         device = self.wte.weight.device
 
         for idx in range(self.config.num_layers):
-            kv_cache.append(
-                KVCache(shape, self.config.seq_len, idx, device=device, dtype=dtype)
-            )
+            kv_cache.append(KVCache(shape, self.config.seq_len, idx, device=device, dtype=dtype))
         return kv_cache
 
     @staticmethod
@@ -368,9 +343,7 @@ class Phi(nn.Module):
         assert model.lm_head.bias.data.shape == weights["lm_head.bias"].shape
         model.lm_head.bias.data = weights["lm_head.bias"]
 
-        assert (
-            model.ln.weight.data.shape == weights["model.final_layernorm.weight"].shape
-        )
+        assert model.ln.weight.data.shape == weights["model.final_layernorm.weight"].shape
         model.ln.weight.data = weights["model.final_layernorm.weight"]
 
         assert model.ln.bias.data.shape == weights["model.final_layernorm.bias"].shape
@@ -386,8 +359,7 @@ class Phi(nn.Module):
             layer.mlp.fc1.weight.data = weights[f"model.layers.{idx}.mlp.fc1.weight"]
 
             assert (
-                layer.mlp.fc1.bias.data.shape
-                == weights[f"model.layers.{idx}.mlp.fc1.bias"].shape
+                layer.mlp.fc1.bias.data.shape == weights[f"model.layers.{idx}.mlp.fc1.bias"].shape
             )
             layer.mlp.fc1.bias.data = weights[f"model.layers.{idx}.mlp.fc1.bias"]
 
@@ -398,8 +370,7 @@ class Phi(nn.Module):
             layer.mlp.fc2.weight.data = weights[f"model.layers.{idx}.mlp.fc2.weight"]
 
             assert (
-                layer.mlp.fc2.bias.data.shape
-                == weights[f"model.layers.{idx}.mlp.fc2.bias"].shape
+                layer.mlp.fc2.bias.data.shape == weights[f"model.layers.{idx}.mlp.fc2.bias"].shape
             )
             layer.mlp.fc2.bias.data = weights[f"model.layers.{idx}.mlp.fc2.bias"]
 
@@ -407,65 +378,49 @@ class Phi(nn.Module):
                 layer.mixer.q_proj.weight.data.shape
                 == weights[f"model.layers.{idx}.self_attn.q_proj.weight"].shape
             )
-            layer.mixer.q_proj.weight.data = weights[
-                f"model.layers.{idx}.self_attn.q_proj.weight"
-            ]
+            layer.mixer.q_proj.weight.data = weights[f"model.layers.{idx}.self_attn.q_proj.weight"]
 
             assert (
                 layer.mixer.q_proj.bias.data.shape
                 == weights[f"model.layers.{idx}.self_attn.q_proj.bias"].shape
             )
-            layer.mixer.q_proj.bias.data = weights[
-                f"model.layers.{idx}.self_attn.q_proj.bias"
-            ]
+            layer.mixer.q_proj.bias.data = weights[f"model.layers.{idx}.self_attn.q_proj.bias"]
 
             assert (
                 layer.mixer.k_proj.weight.data.shape
                 == weights[f"model.layers.{idx}.self_attn.k_proj.weight"].shape
             )
-            layer.mixer.k_proj.weight.data = weights[
-                f"model.layers.{idx}.self_attn.k_proj.weight"
-            ]
+            layer.mixer.k_proj.weight.data = weights[f"model.layers.{idx}.self_attn.k_proj.weight"]
 
             assert (
                 layer.mixer.k_proj.bias.data.shape
                 == weights[f"model.layers.{idx}.self_attn.k_proj.bias"].shape
             )
-            layer.mixer.k_proj.bias.data = weights[
-                f"model.layers.{idx}.self_attn.k_proj.bias"
-            ]
+            layer.mixer.k_proj.bias.data = weights[f"model.layers.{idx}.self_attn.k_proj.bias"]
 
             assert (
                 layer.mixer.v_proj.weight.data.shape
                 == weights[f"model.layers.{idx}.self_attn.v_proj.weight"].shape
             )
-            layer.mixer.v_proj.weight.data = weights[
-                f"model.layers.{idx}.self_attn.v_proj.weight"
-            ]
+            layer.mixer.v_proj.weight.data = weights[f"model.layers.{idx}.self_attn.v_proj.weight"]
 
             assert (
                 layer.mixer.v_proj.bias.data.shape
                 == weights[f"model.layers.{idx}.self_attn.v_proj.bias"].shape
             )
-            layer.mixer.v_proj.bias.data = weights[
-                f"model.layers.{idx}.self_attn.v_proj.bias"
-            ]
+            layer.mixer.v_proj.bias.data = weights[f"model.layers.{idx}.self_attn.v_proj.bias"]
 
             assert (
                 layer.mixer.dense.weight.data.shape
                 == weights[f"model.layers.{idx}.self_attn.dense.weight"].shape
             )
-            layer.mixer.dense.weight.data = weights[
-                f"model.layers.{idx}.self_attn.dense.weight"
-            ]
+            layer.mixer.dense.weight.data = weights[f"model.layers.{idx}.self_attn.dense.weight"]
 
             assert (
                 layer.mixer.dense.bias.data.shape
                 == weights[f"model.layers.{idx}.self_attn.dense.bias"].shape
             )
-            layer.mixer.dense.bias.data = weights[
-                f"model.layers.{idx}.self_attn.dense.bias"
-            ]
+            layer.mixer.dense.bias.data = weights[f"model.layers.{idx}.self_attn.dense.bias"]
 
             assert (
                 layer.ln.weight.data.shape

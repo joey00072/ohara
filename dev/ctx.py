@@ -36,13 +36,9 @@ def apply_rope(k, q, freq_cis):
     q_cis = q.float().reshape(
         q.shape[:-1] + (-1, 2)
     )  # (B,T,nhead,C) -> (B,T,nhead,Cc,2) # Cc = C//2
-    k_cis = k.float().reshape(
-        k.shape[:-1] + (-1, 2)
-    )  # (B,T,nhead,C) -> (B,T,nhead,Cc,2)
+    k_cis = k.float().reshape(k.shape[:-1] + (-1, 2))  # (B,T,nhead,C) -> (B,T,nhead,Cc,2)
 
-    xq_r, xq_i = q_cis.unbind(
-        -1
-    )  # (B,T,nhead,Cc,2) -> ((B,T,Cc), (B,T,Cc)) split into two tuple
+    xq_r, xq_i = q_cis.unbind(-1)  # (B,T,nhead,Cc,2) -> ((B,T,Cc), (B,T,Cc)) split into two tuple
     xk_r, xk_i = k_cis.unbind(-1)  # (B,T,nhead,Cc,2) -> ((B,T,Cc), (B,T,Cc))
 
     freqs_cos = reshape_for_broadcast(freq_cis[0], xq_r)  # freqs.shape = (1,T,1,Cc)

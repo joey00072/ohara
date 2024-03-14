@@ -15,9 +15,7 @@ class SwiGLU(eqx.Module):
         self.dim = dim
         self.hidden_dim = hidden
         self.w1 = eqx.nn.Linear(dim, hidden, key=key_w1)
-        self.w2 = eqx.nn.Linear(
-            hidden, dim, key=key_w2
-        )  # this is order in meta's llama
+        self.w2 = eqx.nn.Linear(hidden, dim, key=key_w2)  # this is order in meta's llama
         self.w3 = eqx.nn.Linear(dim, hidden, key=key_w3)
 
     def __call__(self, x):

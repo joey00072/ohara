@@ -19,9 +19,7 @@ sys.stderr.echo = so
 ds = load_dataset("JeanKaddour/minipile", split="train")
 ds_val = load_dataset("JeanKaddour/minipile", split="validation")
 
-tokenizer = AutoTokenizer.from_pretrained(
-    "NeelNanda/gpt-neox-tokenizer-digits", use_fast=True
-)
+tokenizer = AutoTokenizer.from_pretrained("NeelNanda/gpt-neox-tokenizer-digits", use_fast=True)
 tokenizer.padding_side = "right"
 
 PAD = tokenizer.pad_token_id
@@ -50,9 +48,9 @@ toks = (
     .shuffle(seed=42)
     .filter(filter_fn, num_proc=128)
 )
-toks_val = ds_val.map(
-    tokenize_fn, batched=True, remove_columns=["text"], num_proc=128
-).filter(filter_fn, num_proc=128)
+toks_val = ds_val.map(tokenize_fn, batched=True, remove_columns=["text"], num_proc=128).filter(
+    filter_fn, num_proc=128
+)
 
 
 @eqx.filter_jit
@@ -76,9 +74,7 @@ seq = jax.random.uniform(random.PRNGKey(0), shape=(B, T), minval=0, maxval=vocab
 logits = jax.vmap(model)(seq)
 exit(0)
 if dtype != jnp.float32:
-    model = jax.tree_util.tree_map(
-        lambda x: x.astype(dtype) if eqx.is_array(x) else x, model
-    )
+    model = jax.tree_util.tree_map(lambda x: x.astype(dtype) if eqx.is_array(x) else x, model)
 
 
 toks_cycle = cycle(toks)
@@ -88,9 +84,7 @@ def get_microbatch():
     microbatch = [next(toks_cycle)["input_ids"] for i in range(microbatch_size)]
     microbatch = [jnp.array(x) for x in microbatch]
     max_len = max([x.shape[0] for x in microbatch])
-    microbatch = [
-        jnp.pad(x, (0, max_len - x.shape[0]), constant_values=PAD) for x in microbatch
-    ]
+    microbatch = [jnp.pad(x, (0, max_len - x.shape[0]), constant_values=PAD) for x in microbatch]
     microbatch = jnp.stack(microbatch)
     return microbatch
 
@@ -121,9 +115,7 @@ def Updater(optimizer):
     return train_step
 
 
-params_count = sum(
-    x.size for x in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_array))
-)
+params_count = sum(x.size for x in jax.tree_util.tree_leaves(eqx.filter(model, eqx.is_array)))
 print(f"{params_count / 1000000}M Parameters")
 
 train_step = Updater(optim)
@@ -140,8 +132,7 @@ def validate(model, toks):
         microbatch = [jnp.array(x) for x in microbatch]
         max_len = max([x.shape[0] for x in microbatch])
         microbatch = [
-            jnp.pad(x, (0, max_len - x.shape[0]), constant_values=PAD)
-            for x in microbatch
+            jnp.pad(x, (0, max_len - x.shape[0]), constant_values=PAD) for x in microbatch
         ]
         microbatch = jnp.stack(microbatch)
         microbatch = jax.device_put(microbatch, shard)

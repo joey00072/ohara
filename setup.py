@@ -7,17 +7,17 @@ setup(
     author="joey00072",
     author_email="00shxf@gmail.com",
     description="A collection of implementations of LLM, papers, and other models.",
-    long_description=open('README.md').read(),
-    long_description_content_type='text/markdown',
+    long_description=open("README.md").read(),
+    long_description_content_type="text/markdown",
     url="https://github.com/joey00072/ohara",
     install_requires=[
         # Add your project dependencies here
-        # TODO: add requirements here 
+        # TODO: add requirements here
     ],
     entry_points={
-        'console_scripts': [
-            'ohara=ohara.main:main',  # Adjust 'ohara.main:main' as necessary
+        "console_scripts": [
+            "ohara=ohara.main:main",  # Adjust 'ohara.main:main' as necessary
         ],
     },
-    python_requires='>=3.6',
+    python_requires=">=3.6",
 )

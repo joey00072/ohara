@@ -4,6 +4,7 @@ import time
 
 from transformers import AutoTokenizer
 from ohara.models.phi import Phi, Block
+from ohara.utils import auto_accelerator
 
 
 import torch
@@ -13,115 +14,152 @@ import torch.nn.functional as F
 
 
 kv = True
-accelerator = "cpu"
-if torch.cuda.is_available():
-    accelerator = "cuda"
-else:
-    accelerator = "mps"
-
-device = torch.device(accelerator)
+device = auto_accelerator()
 
 model_name = "microsoft/phi-2"
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 model: Phi = Phi.from_pretrained(model_name).to(device).eval().to(torch.float16)
-prompt = "def dfs(node):"
 
-inputs = tokenizer.encode(prompt)
 print(kv)
-kv_cache = model.build_kv_cache() if kv == "True" else None
+kv_cache = model.build_kv_cache() if kv == True else None
 
 
-max_tokens = 1000
-input_pos = 0
-inputs = tokenizer.encode(prompt)
+import torch
+from transformers import AutoTokenizer, PreTrainedModel
+from typing import Optional, Union
+import time
 
 
-def distill_model(
-    Teacher: nn.Module,
-    Student: nn.Module,
-    d_model,
-    seq_len=16,
-    batch_size=16,
-    iters=100,
-    log_iter=10,
-):
-    Teacher.eval()
-    Student.train()
+class ModelInference:
+    def __init__(
+        self,
+        model: PreTrainedModel,
+        tokenizer: AutoTokenizer,
+        device: str,
+        temperature: float = 1.0,
+        top_p: float = 0.0,
+        max_tokens: int = 50,
+        use_kv_cache: bool = True,
+    ):
+        self.model = model.to(device).eval()
+        self.tokenizer = tokenizer
+        self.device = device
+        self.default_temperature = temperature
+        self.default_top_p = top_p
+        self.max_tokens = max_tokens
+        self.use_kv_cache = use_kv_cache
+        if use_kv_cache and hasattr(self.model, "build_kv_cache"):
+            self.kv_cache = self.model.build_kv_cache()
+        else:
+            self.kv_cache = None
 
-    Teacher = Teacher.to(device).to(torch.float32).eval()
-    Student = Student.to(device).to(torch.float32)
+    def sampler(self, logits: torch.Tensor, temperature: float, top_p: float) -> torch.Tensor:
+        logits = logits[:, -1]  # Get the last token logits
+        if temperature == 1:
+            return torch.argmax(logits, dim=-1, keepdim=True)
+        logits = logits / temperature
+        probs = torch.softmax(logits, dim=-1)
+        probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)  # Sort probabilities
+        probs_sum = torch.cumsum(probs_sort, dim=-1)  # Cumulative sum
+        mask = probs_sum - probs_sort > top_p  # Create a mask for tokens to exclude
+        probs_sort[mask] = 0.0
+        probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))  # Normalize probabilities
+        next_token = torch.multinomial(probs_sort, num_samples=1)  # Sample a token
+        next_token = torch.gather(probs_idx, -1, next_token)  # Get the original token index
+        return next_token
 
-    optimizer = torch.optim.AdamW(Student.parameters(), lr=4e-3)
+    def generate(
+        self,
+        prompt: str,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+    ):
+        if temperature is None:
+            temperature = self.default_temperature
+        if top_p is None:
+            top_p = self.default_top_p
 
-    avg_loss = 0
-    for it in range(iters):
-        for _ in range(5):
-            inputs = torch.randn((batch_size, seq_len, d_model)).to(device)
-
-            with torch.no_grad():
-                labels = Teacher(inputs)
-
-            pred = Student(inputs)
-
-            loss = F.mse_loss(pred, labels)
-            loss.backward()
-
-            optimizer.step()
-            optimizer.zero_grad()
-
-            avg_loss += loss.item()
-
-        # if it % log_iter == 0:
-        print(f"Iter: {it} Loss: {avg_loss/5}")
-        avg_loss = 0
-
-    return Student
-
-
-class MLP(nn.Module):
-    def __init__(self, d_model=64):
-        super().__init__()
-        hidden = d_model * 5
-        self.up = nn.Linear(d_model, hidden)
-        self.down = nn.Linear(hidden, d_model)
-
-    def forward(self, x):
-        x = F.relu(self.up(x))
-        return self.down(x)
+        inputs = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+        input_pos = 0
+        start_time = time.time()
+        with torch.no_grad():
+            print(self.tokenizer.decode(inputs.tolist()[0]), end="")
+            for _ in range(self.max_tokens):
+                logits = (
+                    self.model(inputs, self.kv_cache, input_pos)
+                    if self.use_kv_cache
+                    else self.model(inputs)
+                )
+                next_token = self.sampler(logits, temperature=temperature, top_p=top_p)
+                inputs = torch.cat((inputs, next_token[:, -1:]), dim=-1)
+                input_pos = inputs.shape[1] - 1
+                print(self.tokenizer.decode(inputs.tolist()[0][-1]), end="", flush=True)
+            end_time = time.time()
+        print(f"\nTime: {end_time - start_time}s")
 
 
-for _idx, layer in enumerate(model.layers):
-    # if idx!=30:
-    #     continue
-    layer: Block
-    S = MLP(d_model=model.config.d_model)
-    T = layer.mlp
-    distill_model(T, S, model.config.d_model)
-    layer.mlp = S.to(torch.float16)
 model = model.to(device)
+
 
 print("=" * 100)
 print(model)
 print("=" * 100)
 
-start: float = time.time()
-model = model.eval()
-with torch.no_grad():
-    inputs = torch.tensor(inputs).reshape(1, -1).to(device)
-    print(tokenizer.decode(inputs.tolist()[0]), end="")
-    for _idx in range(max_tokens):
-        logits = model(inputs, kv_cache, input_pos)
-        max_logits = torch.argmax(logits, dim=-1)
-        # print(f"{idx=} {max_logits.shape}")
-        inputs: torch.Tensor = torch.cat((inputs, max_logits[:, -1:]), dim=-1)
-        input_pos = inputs.shape[1] - 1
-        print(tokenizer.decode(inputs.tolist()[0][-1]), end="", flush=True)
 
-    end: float = time.time()
+def sampler(logits, temperature=1, top_p=0.0) -> torch.Tensor:
+    logits = logits[:, -1]
+    if temperature == 1:
+        return torch.argmax(logits, dim=-1, keepdim=True)
+    logits = logits / temperature
 
-print(f"Time: {end-start}")
+    probs = torch.softmax(logits, dim=-1)
+
+    probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)  # (B, vocab_size)
+
+    probs_sum = torch.cumsum(probs_sort, dim=-1)
+
+    mask = probs_sum - probs_sort > top_p
+
+    probs_sort[mask] = 0.0
+
+    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
+
+    next_token = torch.multinomial(probs_sort, num_samples=1)
+
+    next_token = torch.gather(probs_idx, -1, next_token)
+    return next_token
+
+
+for _ in range(100):
+    max_tokens = 50
+    input_pos = 0
+    prompt = "Once Upon a Time, There was a girl named"
+    temperature = float(input("Temperature: "))
+    top_p = float(input("Top p: "))
+
+    inputs = tokenizer.encode(prompt)
+    inputs = tokenizer.encode(prompt)
+    kv_cache = model.build_kv_cache()
+    start: float = time.time()
+    model = model.eval()
+    with torch.no_grad():
+        inputs = torch.tensor(inputs).reshape(1, -1).to(device)
+        print(tokenizer.decode(inputs.tolist()[0]), end="")
+        for _idx in range(max_tokens):
+            logits = model(inputs, kv_cache, input_pos)
+            max_logits = sampler(logits, temperature=temperature, top_p=top_p)
+            # print(f"{idx=} {max_logits.shape}")
+            inputs: torch.Tensor = torch.cat((inputs, max_logits[:, -1:]), dim=-1)
+            input_pos = inputs.shape[1] - 1
+            print(tokenizer.decode(inputs.tolist()[0][-1]), end="", flush=True)
+
+        end: float = time.time()
+
+    print(f"\nTime: {end-start}")
+    print("-" * 100)
+    temperature += 0.5
 
 
 print(tokenizer.decode(inputs.tolist()[0]))

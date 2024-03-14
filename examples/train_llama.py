@@ -63,32 +63,30 @@ device = auto_accelerator()  # auto chose device (cuda, mps)
 
 @dataclass
 class TrainerConfig:
-    # Initial variables that are not fields of the dataclass but are used in __post_init__
+    def __init__(self, **kwargs):
+        self.wandb_project_name: str = "Ohara-LLAMA"
+        self.wandb_run_name: str = random_name()
 
-    # logger and wandb
-    wandb_project_name: str = "Ohara-LLAMA"
-    wandb_run_name: str = field(default_factory=random_name)
+        self.learning_rate: float = 5e-4
+        self.min_learning_rate: float = 0.0
+        self.warmup_iters: int = 1000
+        self.max_iters: int = 100000
+        self.batch_size: int = 32
+        self.micro_batch: int = 4
+        self.eval_iters: int = 100
+        self.d_model: int = 1024 // 16
+        self.seq_len: int = 256
+        self.num_layers: int = 4
+        self.num_heads: int = 4
+        self.multiple_of: int = 4
+        self.dataset_name: str = "roneneldan/TinyStories"
+        self.tokenizer_name: str = "microsoft/phi-2"
+        self.compile_model: bool = not sys.platform == "darwin"
+        self.device: str = auto_accelerator()
 
-    learning_rate: float = 5e-4
-    min_learning_rate: float = 0.0
-    warmup_iters: int = 1000
-    max_iters: int = 100000
-    batch_size: int = 32
-    micro_batch: int = 4
-    eval_iters: int = 100
-    d_model: int = 1024 // 16
-    seq_len: int = 256
-    num_layers: int = 4
-    num_heads: int = 4
-    multiple_of: int = 4
-    dataset_name: str = "roneneldan/TinyStories"
-    tokenizer_name: str = "microsoft/phi-2"
-    compile_model: bool = field(default_factory=lambda: not sys.platform == "darwin")
-    device: str = field(default_factory=auto_accelerator)
+        self.kwargs = kwargs
 
-    kwargs: Dict[str, Any] = None
-
-    def __post_init__(self):
+    def __init__kwargs__(self):
         if self.kwargs is not None:
             for key, value in self.kwargs.items():
                 setattr(self, key, value)

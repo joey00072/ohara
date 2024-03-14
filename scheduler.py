@@ -19,9 +19,7 @@ class CosineWithWarmupLR:
             return self.min_lr
 
         # 3) In between, use cosine decay down to min learning rate
-        decay_ratio = (it - self.warmup_iters) / (
-            self.lr_decay_iters - self.warmup_iters
-        )
+        decay_ratio = (it - self.warmup_iters) / (self.lr_decay_iters - self.warmup_iters)
         assert 0 <= decay_ratio <= 1
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
         return self.min_lr + coeff * (self.learning_rate - self.min_lr)

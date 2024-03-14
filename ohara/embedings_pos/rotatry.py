@@ -38,9 +38,7 @@ class RotatryEmbedding(nn.Module):
         return x_embed
 
     def forward(self, x, position_ids=None):
-        return self.apply_rotary_pos_emb(
-            x, self.cos, self.sin, position_ids=position_ids
-        )
+        return self.apply_rotary_pos_emb(x, self.cos, self.sin, position_ids=position_ids)
 
     @staticmethod
     def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
@@ -102,13 +100,9 @@ def apply_rope(k, q, cis):
     q_cis = q.float().reshape(
         q.shape[:-1] + (-1, 2)
     )  # (B,T,nhead,C) -> (B,T,nhead,Cc,2) # Cc = C//2
-    k_cis = k.float().reshape(
-        k.shape[:-1] + (-1, 2)
-    )  # (B,T,nhead,C) -> (B,T,nhead,Cc,2)
+    k_cis = k.float().reshape(k.shape[:-1] + (-1, 2))  # (B,T,nhead,C) -> (B,T,nhead,Cc,2)
 
-    xq_r, xq_i = q_cis.unbind(
-        -1
-    )  # (B,T,nhead,Cc,2) -> ((B,T,Cc), (B,T,Cc)) split into two tuple
+    xq_r, xq_i = q_cis.unbind(-1)  # (B,T,nhead,Cc,2) -> ((B,T,Cc), (B,T,Cc)) split into two tuple
     xk_r, xk_i = k_cis.unbind(-1)  # (B,T,nhead,Cc,2) -> ((B,T,Cc), (B,T,Cc))
 
     freqs_cos = reshape_for_broadcast(freqs_cos, xq_r)  # freqs.shape = (1,T,1,Cc)
@@ -121,9 +115,7 @@ def apply_rope(k, q, cis):
     # e = (ac-bd) = xq_r * freqs_cos - xq_i * freqs_sin
     # f = (c+di)  = xq_r * freqs_sin + xq_i * freqs_cos
 
-    xq_out_r = (
-        xq_r * freqs_cos - xq_i * freqs_sin
-    )  # (ac-bd)   # shape =  # (B,T,nhead,Cc)
+    xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin  # (ac-bd)   # shape =  # (B,T,nhead,Cc)
     xq_out_i = xq_r * freqs_sin + xq_i * freqs_cos  # (ad+bc) * i
     xk_out_r = xk_r * freqs_cos - xk_i * freqs_sin  # (ac-bd)
     xk_out_i = xk_r * freqs_sin + xk_i * freqs_cos  # (ad+bc) * i
@@ -196,9 +188,7 @@ class RoPE(nn.Module):
         rx2 = x1 * sintheta + x2 * costheta
 
         if self.dims < x.shape[-1]:
-            raise NotImplementedError(
-                "RoPE doesn't implement partial traditional application"
-            )
+            raise NotImplementedError("RoPE doesn't implement partial traditional application")
 
         rx = torch.cat([rx1[..., None], rx2[..., None]], axis=-1)
 
@@ -212,9 +202,7 @@ class RoPE(nn.Module):
             N, self.dims, offset=offset, base=self.base, scale=self.scale, dtype=x.dtype
         )
 
-        rope = (
-            self._compute_traditional_rope if self.traditional else self._compute_rope
-        )
+        rope = self._compute_traditional_rope if self.traditional else self._compute_rope
         rx = rope(costheta, sintheta, x)
 
         return torch.reshape(rx, shape)
