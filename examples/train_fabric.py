@@ -16,6 +16,7 @@ import torch.optim as optim
 from ohara.models.llama import LLAMA, Config
 from ohara.lr_scheduler import CosineScheduler
 from ohara.dataset import PreTokenizedDataset
+from ohara.utils import BetterCycle
 
 from ohara.utils import auto_accelerator, random_name, model_summary
 
@@ -23,21 +24,23 @@ from ohara.utils import auto_accelerator, random_name, model_summary
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
-import wandb
+
 from rich import print, traceback
 
+import lightning as L
+from lightning.pytorch.loggers import WandbLogger
 
 traceback.install()
 
 
 ### CONFIGS
-wandb_project_name = "Ohara-LLAMA"
+wandb_project_name = "Ohara-LLAMA-Fabric"
 wandb_run_name = random_name()
 
 learning_rate: float = 5e-4
 min_learning_rate: float = 0.0
 
-wornup_iters: int = 1000
+warmup_iters: int = 1000
 max_iters: int = 100_000
 batch_size: int = 32
 micro_batch: int = 4
@@ -60,19 +63,23 @@ tokenizer_name = "microsoft/phi-2"
 ### Setup
 device = auto_accelerator()  # auto chose device (cuda, mps)
 
+# for restarting training from last checkout
+resume_traning = False
+
 @torch.no_grad()
 def validate(
+    fabric: L.Fabric,
     model: nn.Module,
     dataloader: DataLoader,
     max_iters: int,
     ignore_index: int = -1,
     device=None,
 ) -> int:
+    fabric.barrier()
     model.eval()
     with torch.no_grad():
         losses = torch.zeros(max_iters, device=device)
         for idx, (data, target) in enumerate(dataloader):
-            data, target = data.to(device), target.to(device)
             if idx >= max_iters:
                 break
             logits: torch.Tensor = model(data)
@@ -85,11 +92,13 @@ def validate(
         val_loss = losses.mean()
 
     model.train()
+    fabric.barrier()
     return val_loss
 
 
 def train(
-    model,
+    fabric: L.Fabric,
+    model: nn.Module,
     optimizer: optim.Optimizer,
     micro_batch: int,
     train_dataloader,
@@ -97,20 +106,20 @@ def train(
     eval_iters: int,
     get_lr,
     ignore_index=-1,
-    logger=None,
 ):
-    model.to(device)
-
+    fabric.launch()
     ignore_index = ignore_index if ignore_index else -1
-
     # sanity test
-    validate(model, val_dataloader, 5, device=device)
-
-    (data, target) = next(iter(train_dataloader))
+    validate(fabric,model, val_dataloader, 5, device=device)
+    # cyclining loder so you can runit indefinitely
+    train_dataloader = BetterCycle(iter(train_dataloader))
+    val_dataloader = BetterCycle(iter(val_dataloader))
+    (data, target) = next(val_dataloader)
     tokerns_per_iter = int(math.prod(data.shape) * micro_batch)
-
-    micro_batch_loss = 0
-    idx = 0
+    
+    start_time:float= time.perf_counter()
+    micro_batch_loss:float = 0
+    idx:int = 0
     while True:
         micro_batch_loss = 0
         if idx >= max_iters:
@@ -120,35 +129,38 @@ def train(
         lr = get_lr(idx)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
-
+        #...
         for _ in range(micro_batch):
-            (data, target) = next(iter(train_dataloader))
-            data, target = data.to(device), target.to(device)
-
-            logits: torch.Tensor = model(data)
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                target.view(-1),
-                ignore_index=ignore_index,
-            )
-            loss = loss / micro_batch
-            loss.backward()
-            micro_batch_loss += loss.item()
+            (data, target) = next(train_dataloader)
+            with fabric.no_backward_sync(model, enabled=micro_batch==1):
+                logits: torch.Tensor = model(data)
+                loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)),
+                    target.view(-1),
+                    ignore_index=ignore_index,
+                )
+                loss = loss / micro_batch
+                micro_batch_loss += loss.item()
+                fabric.backward(loss)
 
         optimizer.step()
         optimizer.zero_grad()
 
-        print(f"iter: {idx} | loss: {micro_batch_loss:.4f} | lr: {lr:e} ")
+        curr_time:float = time.perf_counter()
+        elapsed_time:float = curr_time - start_time
+        print(f"iter: {idx} | loss: {micro_batch_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s")
 
         if idx % eval_iters == 0:
-            val_loss = validate(model, val_dataloader, 100, device=device)
+            val_loss = validate(fabric,model, val_dataloader, 100, device=device)
             try:
-                logger.log(
+                fabric.log_dict(
                     {
-                        "traning_loss": micro_batch_loss / micro_batch,
+                        "traning_loss": micro_batch_loss,
                         "test_loss": val_loss,
                         "iter": idx,
                         "tokens": idx * tokerns_per_iter,
+                        "lr": lr,
+                        "time": elapsed_time
                     },
                     step=idx,
                 )
@@ -157,8 +169,28 @@ def train(
 
 
 def main():
-    wandb.init(project=wandb_project_name)
-    # wandb=None
+    hyper_params = {
+        "learning_rate": learning_rate,
+        "min_learning_rate": min_learning_rate,
+        "warmup_iters": warmup_iters,
+        "max_iters": max_iters,
+        "eval_iters": eval_iters,
+        "batch_size": batch_size,
+        "micro_batch": micro_batch,
+        "d_model": d_model,
+        "seq_len": seq_len,
+        "num_layers": num_layers,
+        "num_heads": num_layers,
+        "multiple_of": multiple_of,
+        "compile_model": compile_model,
+        "tokenizer_name": tokenizer_name,
+        "dataset_name": dataset_name,
+        "resume_traning": resume_traning
+    }
+    # fabric init
+    logger = WandbLogger(project=wandb_project_name, resume=resume_traning)
+    fabric = L.Fabric(loggers=[logger])
+    fabric.logger.log_hyperparams(hyper_params)
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
@@ -170,9 +202,6 @@ def main():
         num_heads=num_layers,
         multiple_of=multiple_of,
     )
-
-    # loss should be close to cross_entropy before traning
-    print(f"{tokenizer.vocab_size=} CrossEntropy={-math.log(1/tokenizer.vocab_size)} ")
 
     train_ds = PreTokenizedDataset(
         dataset_name=dataset_name,
@@ -189,8 +218,10 @@ def main():
 
     train_dataloader = DataLoader(train_ds, batch_size=batch_size)
     test_dataloader = DataLoader(test_ds, batch_size=batch_size)
+    train_dataloader,test_dataloader = fabric.setup_dataloaders(train_dataloader,test_dataloader)
 
-    model = LLAMA(config).to(device)
+    model = LLAMA(config)
+    model: L.LightningModule = fabric.setup(model)
 
     if compile_model:
         model = torch.compile(model)
@@ -201,14 +232,16 @@ def main():
     get_lr = CosineScheduler(
         learning_rate=learning_rate,
         min_lr=min_learning_rate,
-        warmup_iters=wornup_iters,
+        warmup_iters=warmup_iters,
         max_iters=max_iters,
     )
 
     # inputs = torch.tensor(tokenizer.encode("The")).unsqueeze(0).clone().detach()
     optimzer = optim.AdamW(model.parameters(), lr=get_lr(0))
-
+    optimzer = fabric.setup_optimizers(optimzer)
+    # Lets GO!!
     train(
+        fabric,
         model,
         optimzer,
         micro_batch=micro_batch,
@@ -217,9 +250,9 @@ def main():
         eval_iters=eval_iters,
         get_lr=get_lr,
         ignore_index=tokenizer.pad_token_id,
-        logger=wandb,
     )
 
+    # TODO: Replace this inference 
     start: float = time.time()
     max_tokens = 200
     model = model.eval()
