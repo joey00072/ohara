@@ -70,6 +70,9 @@ If you look into [docs](./docs/) you can find some written things. this are most
 - [ ] DPO 
 - [ ] make is py modele so I can create expriment folder and put all this in it
 
+## Fund My Caffeine Addiction 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/R6R8KQTZ5)
+
 
 ### contribution guidelines
 - be nice, 
