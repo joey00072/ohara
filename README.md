@@ -7,20 +7,22 @@ this is attempt to make it eveything in one place <br>
 This lib is for runing/copying code for expriments
 
 
-###  The lib to maximize FAFO
-papaers and theory is on one side but `code is truth`, in the end things that matter that works (runs)<br>
-If you look into [docs](./docs/) you can find some written things. this are mostly copied from my obsidian notes
-
 
 ```bash
-## Will and things soon
+## download and pretokenize
+python examples/prepare-dataset.py
 
-python pretokenize.py 
 ## train 
 ## look at train.py its fairly easy
-python train.py
+python examples/train_llama.py
 
+# lighting fabric verison is also avalible (recommanded)
+python examples/train_llama_fabric.py 
 ```
+![alt text](./docs/src/image.png)
+
+llama-20M trained on tinystores for 1.7B
+
 inferance on phi2
 ```zsh
 ## this will download model from hf and run it in torch.flaot16
@@ -30,6 +32,13 @@ python phi_inference.py
 ## look at files and you can impliment rest of things easily, 
 ## I belive in you 😉
 ```
+
+
+###  The lib to maximize FAFO
+papaers and theory is on one side but `code is truth`, in the end things that matter that works (runs)<br>
+If you look into [docs](./docs/) you can find some written things. this are mostly copied from my obsidian notes
+
+
 ### WORK IS PROGESS (always)
 
 ### papers
