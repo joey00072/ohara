@@ -43,13 +43,9 @@ If you look into [docs](./docs/) you can find some written things. this are most
 
 ### papers
 1. [SwiGLU](./ohara/models/mlp.py) | [md](./docs/glu/GLU%20Variants%20Improve%20Transformer.md)
-    - ![swilgu](./docs/glu/GLU.svg)
 2. [Alibi Embeddings](./ohara/embedings_pos/alibi.py) | [md](./ohara/embedings_pos/alibi/alibi.md)
-    - ![alibi](./docs/alibi/image.png)
 3. [Rotary Embeddings](./ohara/embedings_pos/rotatry.py) | [md](./docs/RoFormer.md) 
-    - ![rope](./docs/rope/mtx.png)
 4. [LoRA ](./ohara/adaptor/lora.py)
-    - ![rope](./docs/lora/lora.png)
 5. [LLAMA](./ohara/llama/llama.py) | [md](./docs/llama/llama.md)
 6. [XPOS](./ohara/embedings_pos/xpos.py)
 7. [GPT](./ohara/models/gpt.py) | [md](./docs/gpt/gpt.md)
