@@ -29,6 +29,7 @@ from rich import print, traceback
 
 import lightning as L
 from lightning.pytorch.loggers import WandbLogger
+from lightning.fabric.loggers import TensorBoardLogger
 
 from bitnet import apply_bitlinear
 
@@ -50,7 +51,7 @@ eval_iters: int = 100
 save_ckpt_iters: int = 1000
 
 multiple_of: int = 4
-d_model: int = 1024 // 16
+d_model: int = 1024 // 8
 hidden_dim = int(d_model * multiple_of)
 seq_len: int = 256
 num_layers: int = 4
@@ -202,7 +203,8 @@ def main():
         "save_ckpt_iters": save_ckpt_iters,
     }
     # fabric init
-    logger = WandbLogger(project=wandb_project_name, resume=resume_traning)
+    # logger = WandbLogger(project=wandb_project_name, resume=resume_traning)
+    logger = TensorBoardLogger(root_dir="./logs", name=wandb_project_name)
     fabric = L.Fabric(loggers=[logger])
     fabric.logger.log_hyperparams(hyper_params)
 
@@ -235,14 +237,16 @@ def main():
     train_dataloader, test_dataloader = fabric.setup_dataloaders(train_dataloader, test_dataloader)
 
     model = LLAMA(config)
-    # model = apply_bitlinear(model)
+    target_layers = ["key", "value", "query","proj", "w1", "w2", "w3"]
+    # model = apply_bitlinear(model,target_layers=target_layers)
     model: L.LightningModule = fabric.setup(model)
-
+    print("="*100)
     if compile_model:
         model = torch.compile(model)
 
     print(model)
     print(model_summary(model))
+    exit(0)
 
     get_lr = CosineScheduler(
         learning_rate=learning_rate,
