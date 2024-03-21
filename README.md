@@ -5,8 +5,13 @@ I hand lot of fragmented code of implimention of diffrent model
 
 this is attempt to make it eveything in one place <br>
 This lib is for runing/copying code for expriments
-
-
+<br>
+install with
+```bash
+git clone https://github.com/joey00072/ohara.git
+pip install -e .
+```
+then
 
 ```bash
 ## download and pretokenize

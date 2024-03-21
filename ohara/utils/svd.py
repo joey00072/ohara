@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 
+
 def svd_approx(
     W: torch.Tensor, r: int | None = None
 ) -> tuple[torch.Tensor, torch.Tensor, int, torch.Tensor]:

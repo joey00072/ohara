@@ -15,6 +15,7 @@ class Config:
     vocab_size: int = 65
     seq_len: int = 64
     d_model: int = 128
+    hidden_dim: int = 256
     num_heads: int = 4
     num_layers: int = 4
     dropout: int = 0.2
@@ -99,7 +100,7 @@ class Block(nn.Module):
         self.attn = Attention(model_args)
         self.ff = SwiGLU(
             dim=model_args.d_model,
-            multiple_of=model_args.multiple_of,
+            hidden_dim=model_args.hidden_dim,
             dropout=model_args.dropout,
         )
 

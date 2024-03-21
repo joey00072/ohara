@@ -13,6 +13,11 @@ setup(
     install_requires=[
         # Add your project dependencies here
         # TODO: add requirements here
+        "lightning",
+        "transformers",
+        "datasets",
+        "torch",
+        "wandb",
     ],
     entry_points={
         "console_scripts": [
