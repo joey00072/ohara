@@ -30,6 +30,8 @@ from rich import print, traceback
 import lightning as L
 from lightning.pytorch.loggers import WandbLogger
 
+from bitnet import apply_bitlinear
+
 traceback.install()
 
 
@@ -47,11 +49,13 @@ micro_batch: int = 4
 eval_iters: int = 100
 save_ckpt_iters: int = 1000
 
+multiple_of: int = 4
 d_model: int = 1024 // 16
+hidden_dim = int(d_model * multiple_of)
 seq_len: int = 256
 num_layers: int = 4
 num_heads: int = 4
-multiple_of: int = 4
+
 
 assert d_model % num_heads == 0
 
@@ -120,10 +124,10 @@ def train(
     (data, target) = next(val_dataloader)
     tokerns_per_iter = int(math.prod(data.shape) * micro_batch)
 
+    start_time: float = time.perf_counter()
     micro_batch_loss: float = 0
     idx: int = 0
     while True:
-        start_time: float = time.perf_counter()
         micro_batch_loss = 0
         if idx >= max_iters:
             break
@@ -231,6 +235,7 @@ def main():
     train_dataloader, test_dataloader = fabric.setup_dataloaders(train_dataloader, test_dataloader)
 
     model = LLAMA(config)
+    # model = apply_bitlinear(model)
     model: L.LightningModule = fabric.setup(model)
 
     if compile_model:

@@ -60,6 +60,7 @@ tokenizer_name = "microsoft/phi-2"
 ### Setup
 device = auto_accelerator()  # auto chose device (cuda, mps)
 
+
 @torch.no_grad()
 def validate(
     model: nn.Module,

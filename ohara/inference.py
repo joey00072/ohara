@@ -32,7 +32,6 @@ class Inference:
         else:
             self.kv_cache = None
 
-
     @staticmethod
     @torch.inference_mode()
     def sampler(logits, temperature=1, top_p=0.0) -> torch.Tensor:

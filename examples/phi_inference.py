@@ -44,4 +44,3 @@ while True:
     if prompt == "exit":
         break
     print(infer.generate(prompt, temperature=1.1, top_p=0.2, stream=True))
-
