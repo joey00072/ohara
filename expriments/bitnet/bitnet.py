@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -68,20 +70,21 @@ def _get_bitlinear(linear: nn.Linear):
 
 def apply_bitlinear(
     model: nn.Module,
+    target_layers: list[str] | None = None,
 ):
     if isinstance(model, nn.Linear):
         return _get_bitlinear(model)
 
     if isinstance(model, (nn.Module, nn.ModuleDict)):
         for key, value in model._modules.items():
-            if isinstance(value, nn.Linear):
+            if isinstance(value, nn.Linear) and (target_layers is None or key in target_layers):
                 model._modules[key] = _get_bitlinear(value)
             else:
                 apply_bitlinear(value)
 
-    if isinstance(model, (nn.ModuleList, nn.Sequential)):
+    if isinstance(model, (nn.ModuleList, nn.Sequential)) :
         for sub_model in model:
-            if isinstance(sub_model, nn.Linear):
+            if isinstance(sub_model, nn.Linear) and (target_layers is None or sub_model in target_layers):
                 sub_model = _get_bitlinear(sub_model)
             else:
                 apply_bitlinear(sub_model)

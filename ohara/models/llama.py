@@ -20,7 +20,7 @@ class Config:
     num_layers: int = 4
     dropout: int = 0.2
     multiple_of: int = 4
-    bias: int = True
+    bias: int = False
 
 
 class Attention(nn.Module):
@@ -31,10 +31,10 @@ class Attention(nn.Module):
         self.num_heads = model_args.num_heads
         self.head_dim = model_args.d_model // model_args.num_heads
 
-        self.key = nn.Linear(d_model, d_model)
-        self.query = nn.Linear(d_model, d_model)
-        self.value = nn.Linear(d_model, d_model)
-        self.proj = nn.Linear(d_model, d_model)
+        self.key = nn.Linear(d_model, d_model,model_args.bias)
+        self.query = nn.Linear(d_model, d_model,model_args.bias)
+        self.value = nn.Linear(d_model, d_model,model_args.bias)
+        self.proj = nn.Linear(d_model, d_model,model_args.bias)
 
         self.attn_dropout = nn.Dropout(model_args.dropout)
         self.res_dropout = nn.Dropout(model_args.dropout)
@@ -102,6 +102,7 @@ class Block(nn.Module):
             dim=model_args.d_model,
             hidden_dim=model_args.hidden_dim,
             dropout=model_args.dropout,
+            bias=model_args.bias,
         )
 
         self.norm1 = nn.LayerNorm(model_args.d_model)
