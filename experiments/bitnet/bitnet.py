@@ -16,18 +16,17 @@ class RMSNorm(nn.Module):
         Paper: https://arxiv.org/abs/1910.07467
         """
         self.eps = eps
-        # self.weight = nn.Parameter(torch.ones(dim))
-        # if you uncomment this model size will increase a lot
+        self.weight = nn.Parameter(torch.ones(dim))
 
     def _norm(self, x: Tensor):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
         output = self._norm(x.float()).type_as(x)
-        return output  # * self.weight
+        return output * self.weight
 
 
-@torch.jit.script  # https://colab.research.google.com/drive/1B_-PfHKzSmuwF3TETx_ZMlFSE5PNcr1k?usp=sharing
+@torch.jit.script  # jit speedup https://colab.research.google.com/drive/1B_-PfHKzSmuwF3TETx_ZMlFSE5PNcr1k?usp=sharing
 def activation_quant(x: Tensor) -> Tensor:
     scale: Tensor = 127.0 / x.abs().max(dim=1, keepdim=True).values.clamp(min=1e-5)
     y: Tensor = (x * scale).round().clamp(-128, 127) / scale

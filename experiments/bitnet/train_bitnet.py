@@ -37,7 +37,7 @@ traceback.install()
 
 
 ### CONFIGS
-wandb_project_name = "Ohara-LLAMA-Fabric"
+wandb_project_name = "Ohara-Bitnet"
 wandb_run_name = random_name()
 
 learning_rate: float = 5e-4
@@ -51,11 +51,11 @@ eval_iters: int = 100
 save_ckpt_iters: int = 1000
 
 multiple_of: int = 4
-d_model: int = 1024 // 8
+d_model: int = 1024 // 4
 hidden_dim = int(d_model * multiple_of)
 seq_len: int = 256
-num_layers: int = 4
-num_heads: int = 4
+num_layers: int = 8
+num_heads: int = 8
 
 
 assert d_model % num_heads == 0
@@ -125,7 +125,7 @@ def train(
     (data, target) = next(val_dataloader)
     tokerns_per_iter = int(math.prod(data.shape) * micro_batch)
 
-    start_time: float = time.perf_counter()
+    
     micro_batch_loss: float = 0
     idx: int = 0
     while True:
@@ -133,6 +133,7 @@ def train(
         if idx >= max_iters:
             break
         idx += 1
+        start_time: float = time.perf_counter()
 
         lr = get_lr(idx)
         for param_group in optimizer.param_groups:
@@ -203,8 +204,8 @@ def main():
         "save_ckpt_iters": save_ckpt_iters,
     }
     # fabric init
-    # logger = WandbLogger(project=wandb_project_name, resume=resume_traning)
-    logger = TensorBoardLogger(root_dir="./logs", name=wandb_project_name)
+    logger = WandbLogger(project=wandb_project_name, resume=resume_traning)
+    # logger = TensorBoardLogger(root_dir="./logs", name=wandb_project_name)
     fabric = L.Fabric(loggers=[logger])
     fabric.logger.log_hyperparams(hyper_params)
 
@@ -238,15 +239,14 @@ def main():
 
     model = LLAMA(config)
     target_layers = ["key", "value", "query","proj", "w1", "w2", "w3"]
-    # model = apply_bitlinear(model,target_layers=target_layers)
+    model = apply_bitlinear(model,target_layers=target_layers)  # comment this to train og llama
     model: L.LightningModule = fabric.setup(model)
     print("="*100)
     if compile_model:
-        model = torch.compile(model)
+        model = torch.compile(model,mode="max-autotune")
 
     print(model)
     print(model_summary(model))
-    exit(0)
 
     get_lr = CosineScheduler(
         learning_rate=learning_rate,
