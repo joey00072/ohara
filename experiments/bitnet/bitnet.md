@@ -3,23 +3,22 @@
 Paper: [arxiv.org/abs/2402.17764](arxiv.org/abs/2402.17764)
 
 ![alt text](image.png)
-(ever wondered why they didn't showed loss curve in paper)
+(ever wondered why they didn't show the loss curve in the paper)
 
-### It kind of works but Don't Get hyped up
-This is one more of quanzied aware traning rather than somthing radically new. there is room for kernel fusion and cuda magic optimizion becasue hypothesis is storing weight matrix contain only 1,0,-1 that means we only need ADD,SUB operation which are better than expensive MUL. while at inferce type we can achive carzy speed up am not sure that can be dont at traning time. because we need smooth changes in optimizer grident movementum.
+### It kind of works but Don't Get Hyped Up
+This is one more of quantized-aware training rather than something radically new. There is room for kernel fusion and CUDA magic optimization because the hypothesis is storing weight matrix contain only 1,0,-1 that means we only need ADD,SUB operation which are better than expensive MUL. While at inference type we can achieve crazy speed up I am not sure that can be done at training time. Because we need smooth changes in optimizer gradient momentum.
 
-For questions/corrections reach me over [twitter/x](https://twitter.com/shxf0072) or `00shxf@gmail.com`. I build code in midst of chaos so if you find something to correct let me know.
 
-Here is [code](https://github.com/joey00072/ohara/tree/master/expriments/bitnet) 
- if you are just interested in it
+For questions or corrections, reach me at [twitter/x](https://twitter.com/shxf0072) or `00shxf@gmail.com`. I build code amidst chaos, so if you find something to correct, let me know.
 
-## Impimentation details
-this is a bitnet implementation based on offically shared [pdf](https://github.com/microsoft/unilm/blob/master/bitnet/The-Era-of-1-bit-LLMs__Training_Tips_Code_FAQ.pdf) by authers.
+Here is the [code](https://github.com/joey00072/ohara/tree/master/experiments/bitnet) if you are just interested in it.
 
+## Implementation Details
+This is a Bitnet implementation based on the officially shared [PDF](https://github.com/microsoft/unilm/blob/master/bitnet/The-Era-of-1-bit-LLMs__Training_Tips_Code_FAQ.pdf) by the authors.
 ![alt text](image-1.png)
 
-### Weight Quatization
-Note for current expriment all weight store in fp32/16 and quaztized in forward process.
+### Weight Quantization
+Note for the current experiment all weights are stored in fp32/16 and quantized in the forward process.
 ![alt text](image-2.png)
 Here $\gamma$ = scale and $\widetilde{W}$ = w_quant
 ```python
@@ -35,10 +34,10 @@ def weight_quant(w: Tensor) -> tuple[Tensor, Tensor]:
 
 ```
 
-w_quant is matrics of 1,0,-1 
+w_quant is matrices of 1,0,-1 
 
-### Activation Quatization
-This is from precusror paper https://arxiv.org/pdf/2310.11453.pdf
+### Activation Quantization
+This is from a precursor paper https://arxiv.org/pdf/2310.11453.pdf
 ![alt text](activation_quant.png)
 ```python
 from torch import Tensor
@@ -50,7 +49,7 @@ def activation_quant(x: Tensor) -> Tensor:
 ```
 
 ### BitLinear
-Now this two functions we can impliment BitLinear this layer is drop in replacement for nn.Linear. There it lot room for optimization with kernel fusion, manully writing backwork pass etc etc.
+Now these two functions implement BitLinear; this layer is a drop-in replacement for nn.Linear. There is a lot of room for optimization with kernel fusion, manually writing backward pass, etc.
 
 ```python
 import torch
@@ -75,21 +74,19 @@ class BitLinear(nn.Linear):
 
 
 
-### Traning code
+### Training code
 
-You can find my pytorch implementation 
-here https://github.com/joey00072/ohara/tree/master/expriments/bitnet.
+You can find my PyTorch implementation 
+here https://github.com/joey00072/ohara/tree/master/experiments/bitnet.
 
-I trained it 15.5M llama and 15.6M bitnet llama (bitnet rmsnorm extra 0.1M). You can check loss curve bitnet is worse than llama (and I am pretty sure 2bit quatization aware traning will be better or same). 
-
+I trained it with 15.5M llama and 15.6M bitnet llama (bitnet RMSNorm extra 0.1M). You can check the loss curve; bitnet is worse than llama (and I am pretty sure 2-bit quantization-aware training will be better or the same). 
 ![alt text](image.png)
-Right now bitnet is pretty usesless for inference on current hardware, it much better to train model in bfloat16 and use quatized version if you need it. To get to crazy speed-up, 
+Right now, BitNet is pretty useless for inference on current hardware; it's much better to train the model in bfloat16 and use the quantized version if you need it. To achieve a significant speed-up, 
 
-pre requisite for bitnet1.5 are big.
-we need someone to create special chip that have mixed precision with 2-bit. So big assumption is we will use 2 bit model for inferace so someone will spend lot of (a lot) money to build chip, software and train quantization aware llm. Not to mention the fact the we dont know if scaling laws hold same for 1.5bit (its 2 bit ) quantiztion traning as they do for normal. Unless someone is ready to shit ton of money. 
+the prerequisites for BitNet 1.5 are substantial.
+We need someone to create a special chip that supports mixed precision with 2-bit. So, the big assumption is we will use a 2-bit model for inference, meaning someone will have to spend a lot (a lot) of money to build the chip, software, and train quantization-aware LLM. Not to mention the fact that we don't know if scaling laws hold the same for 1.5bit (it's 2 bit) quantization training as they do for normal. Unless someone is ready to spend a ton of money.
 
 so, BITNET NGMI
-
 
 ---
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/R6R8KQTZ5)
