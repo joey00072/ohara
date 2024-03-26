@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import torch
 
 
-def auto_accelerator(device: str = None) -> torch.device:
+def auto_accelerator(device: str | None = None) -> torch.device:
     """
     Automatically selects and returns a torch device. If a device is specified, it validates and returns the specified device.
     If no device is specified, it checks for available devices in the order of CUDA, MPS (Apple Silicon GPUs), and defaults to CPU if none are available.
@@ -32,6 +32,23 @@ def auto_accelerator(device: str = None) -> torch.device:
     if torch.backends.mps.is_built():
         accelerator = "mps"
     return torch.device(accelerator)
+
+
+def build_mask(seq_len, sliding_window_attention=False, window_size=1):
+    mask = torch.full((seq_len, seq_len), float("-inf"))
+
+    assert window_size != 0, "window_size cannot be 0"
+    if not sliding_window_attention:
+        window_size = seq_len
+
+    row_indices = torch.arange(seq_len).unsqueeze(-1)
+    col_indices = torch.arange(seq_len)
+    distance = row_indices - col_indices
+
+    mask[(distance >= 0) & (distance <= (window_size - 1))] = 0
+
+    mask = mask.unsqueeze(0).unsqueeze(0)
+    return mask
 
 
 @dataclass
@@ -73,3 +90,6 @@ if __name__ == "__main__":
         print(f"{idx}: {item}")
         if idx == 7:
             break
+        seq_len = 7
+    # mask = build_mask(seq_len, sliding_window_attention=True, window_size=1)
+    # print(mask)

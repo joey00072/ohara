@@ -81,9 +81,11 @@ def apply_bitlinear(
             else:
                 apply_bitlinear(value)
 
-    if isinstance(model, (nn.ModuleList, nn.Sequential)) :
+    if isinstance(model, (nn.ModuleList, nn.Sequential)):
         for sub_model in model:
-            if isinstance(sub_model, nn.Linear) and (target_layers is None or sub_model in target_layers):
+            if isinstance(sub_model, nn.Linear) and (
+                target_layers is None or sub_model in target_layers
+            ):
                 sub_model = _get_bitlinear(sub_model)
             else:
                 apply_bitlinear(sub_model)

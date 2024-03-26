@@ -125,7 +125,6 @@ def train(
     (data, target) = next(val_dataloader)
     tokerns_per_iter = int(math.prod(data.shape) * micro_batch)
 
-    
     micro_batch_loss: float = 0
     idx: int = 0
     while True:
@@ -238,12 +237,12 @@ def main():
     train_dataloader, test_dataloader = fabric.setup_dataloaders(train_dataloader, test_dataloader)
 
     model = LLAMA(config)
-    target_layers = ["key", "value", "query","proj", "w1", "w2", "w3"]
-    model = apply_bitlinear(model,target_layers=target_layers)  # comment this to train og llama
+    target_layers = ["key", "value", "query", "proj", "w1", "w2", "w3"]
+    model = apply_bitlinear(model, target_layers=target_layers)  # comment this to train og llama
     model: L.LightningModule = fabric.setup(model)
-    print("="*100)
+    print("=" * 100)
     if compile_model:
-        model = torch.compile(model,mode="max-autotune")
+        model = torch.compile(model, mode="max-autotune")
 
     print(model)
     print(model_summary(model))

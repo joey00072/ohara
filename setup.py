@@ -18,6 +18,7 @@ setup(
         "datasets",
         "torch",
         "wandb",
+        "rich",
     ],
     entry_points={
         "console_scripts": [

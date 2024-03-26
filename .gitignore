@@ -27,3 +27,4 @@ MANIFEST
 .vscode/
 runs/
 logs/
+hf_cache/

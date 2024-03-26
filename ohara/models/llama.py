@@ -31,10 +31,10 @@ class Attention(nn.Module):
         self.num_heads = model_args.num_heads
         self.head_dim = model_args.d_model // model_args.num_heads
 
-        self.key = nn.Linear(d_model, d_model,model_args.bias)
-        self.query = nn.Linear(d_model, d_model,model_args.bias)
-        self.value = nn.Linear(d_model, d_model,model_args.bias)
-        self.proj = nn.Linear(d_model, d_model,model_args.bias)
+        self.key = nn.Linear(d_model, d_model, model_args.bias)
+        self.query = nn.Linear(d_model, d_model, model_args.bias)
+        self.value = nn.Linear(d_model, d_model, model_args.bias)
+        self.proj = nn.Linear(d_model, d_model, model_args.bias)
 
         self.attn_dropout = nn.Dropout(model_args.dropout)
         self.res_dropout = nn.Dropout(model_args.dropout)

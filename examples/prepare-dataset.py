@@ -1,6 +1,8 @@
 from rich import print
 from ohara.pretokenize import DatasetPreprocessor, OpenHermesDatasetPreprocessor
 
+from pathlib import Path
+
 
 def prepare_openhermes_2_5(
     dataset="teknium/OpenHermes-2.5",
@@ -28,6 +30,7 @@ def tinystories(
         dataset_name=dataset,
         tokenizer_name=tokenizer,
         splits=["train", "validation"],
+        hf_cache=Path("./hf_cache"),
     )
     preprocessor.process_and_save()
 

@@ -95,8 +95,8 @@ class GemmaAttention(nn.Module):
 
         # Grouped Query Attention
         if self.num_kv_heads != self.num_heads:
-            key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=2)
-            value = torch.repeat_interleave(value, self.num_queries_per_kv, dim=2)
+            key = torch.repeat_interleave(k, self.num_queries_per_kv, dim=2)
+            value = torch.repeat_interleave(v, self.num_queries_per_kv, dim=2)
 
         q = q.transpose(1, 2)
         k = key.transpose(1, 2)
