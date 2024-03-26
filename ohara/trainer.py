@@ -7,17 +7,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+
 from torch import Tensor
+from typing import Any
+
 
 from ohara.models.llama import LLAMA, Config
 from ohara.lr_scheduler import CosineScheduler
 from ohara.dataset import PreTokenizedDataset
-
-from ohara.utils import auto_accelerator, random_name, model_summary
-
+from ohara.utils import auto_accelerator, random_name, model_summary, BetterCycle
 
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
+
+import lightning as L
+from lightning.pytorch.loggers import WandbLogger
+from lightning.fabric.loggers import TensorBoardLogger
+
 
 import wandb
 from rich import print, traceback

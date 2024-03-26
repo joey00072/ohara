@@ -1,131 +1,116 @@
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
 from ohara.modules.pscan import pscan
 
 torch.manual_seed(0)
-# def scan(x: Tensor, h: Tensor) -> Tensor:
-#     # mamba uses B,L,D,N
-#     # we have B,L,D. thats why this squeezy ness
-#     # TODO: use mambas offical cuda scan to make gpu go burr
-#     return pscan(x.unsqueeze(-1), h.unsqueeze(-1)).squeeze(-1)
 
 
-class RG_LRU(nn.Module):
-    def __init__(self, dim):
-        self.input_proj = nn.Linear(dim, dim)
-        self.gate_proj = nn.Linear(dim, dim)
-        self.forget_lambda = nn.Parameter(torch.linspace(-4.323, -9, dim))
-
-        # Why this Constant is 8 Paper offer no explaintion
-        self.C = 8
-        with torch.no_grad():
-            self.input_proj.weight.normal_(std=dim**-0.5)
-            self.gate_proj.weight.normal_(std=dim**-0.5)
-
-    def forward(self, x):
-        input_gate: torch.Tensor = self.input_proj(x)
-        recurrence_gate: torch.Tensor = self.gate_proj(x)
-
-        # ℎ𝑡    =  𝛼(𝑟𝑡)ℎ𝑡−1 + 𝛽(𝑟𝑡)𝑥𝑡             ...1
-        # xbeta =  𝛽(𝑟𝑡)𝑥𝑡                        ...2
-        # rest recurrace will calcuate with scan
-        # h(t) = parallel_scan( a(rt), xbeta )   ...3
-        alpha = (-self.C * F.softplus(self.forget_lambda) * recurrence_gate.sigmoid()).exp()
-
-        beta = (1 - alpha**2 + 1e-6).sqrt()
-        xbeta: Tensor = beta * input_gate.sigmoid() * x
-
-        h = pscan(alpha.mT.contiguous(), xbeta.mT.contiguous()).mT
-        return h
+def scan(a: Tensor, b: Tensor):
+    return pscan(a.unsqueeze(-1), b.unsqueeze(-1)).squeeze(-1)
 
 
-class RetNext(nn.Module):
-    def __init__(self, dim):
-        self.key = nn.Linear(dim, dim)
-        self.query = nn.Linear(dim, dim)
-        self.value = nn.Linear(dim, dim)
+def build_mask(seq_len, sliding_window_attention=False, window_size=1):
+    mask = torch.full((seq_len, seq_len), float("-inf"))
 
-        self.num_heads = 4
-        self.head_dim = dim // self.num_heads
+    assert window_size != 0, "window_size cannot be 0"
+    if not sliding_window_attention:
+        window_size = seq_len
 
-    def forward(self, x):
-        bsz, seq_len, x_dim = x.shape
-        k = self.key(x)
-        q = self.query(x)
-        v = self.value(x)
+    row_indices = torch.arange(seq_len).unsqueeze(-1)
+    col_indices = torch.arange(seq_len)
+    distance = row_indices - col_indices
 
-        k: Tensor = k.view(bsz, seq_len, self.num_heads, self.head_dim)
-        q: Tensor = q.view(bsz, seq_len, self.num_heads, self.head_dim)
-        v: Tensor = v.view(bsz, seq_len, self.num_heads, self.head_dim)
+    mask[(distance >= 0) & (distance <= (window_size - 1))] = 0
 
-        k = k.transpose(1, 2)
-        q = q.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        states = k.mT @ v
-        out = q @ states
-        return out
+    mask = mask.unsqueeze(0).unsqueeze(0)
+    return mask
 
 
-def retation(
-    k: Tensor, q: Tensor, v: Tensor, num_heads: int, gamma: float = 0.9, state: Tensor = None
-):
-    bsz, x_dim = k.shape
-    head_dim = x_dim // num_heads
-
-    k = k.view(bsz, num_heads, head_dim).unsqueeze(-2)
-    q = q.view(bsz, num_heads, head_dim).unsqueeze(-2)
-    v = v.view(bsz, num_heads, head_dim).unsqueeze(-2)
-
-    new_state = ((k.mT @ v) / head_dim) + gamma * state
-    out = q @ new_state
-
-    return out.reshape(bsz, x_dim), new_state
-
-
-def parallel_retation(k: Tensor, q: Tensor, v: Tensor, num_heads: int, gamma: float = 0.9):
-    bsz, seq_len, x_dim = k.shape
-    head_dim = x_dim // num_heads
-
-    k = k.view(bsz, seq_len, num_heads, head_dim).unsqueeze(-2)
-    q = q.view(bsz, seq_len, num_heads, head_dim).unsqueeze(-2)
-    v = v.view(bsz, seq_len, num_heads, head_dim).unsqueeze(-2)
-
-    print(f"{k.shape=} , {v.shape=} {(k.mT@v).shape=}")
-
-    new_state = (k.mT @ v) / head_dim
-
-    gammas = torch.ones_like(new_state) * gamma
-    new_state = pscan(gammas, new_state)
-    out = q @ new_state
-
-    print(f"{k.shape=} , {new_state.shape=} , {out.shape=}")
-
-    return out.reshape(bsz, seq_len, x_dim).float()
-
-
-B, T, C = 1, 3, 4
-num_heads = 2
+B, T, C = 1, 8, 2
 
 x = torch.randn(B, T, C)
+y = torch.randn(B, T, C)
+h = torch.zeros(B, 1, C)
 
-k = q = v = x
+hs = []
 
-head_dim = C // num_heads
-state = torch.zeros(B, head_dim, head_dim)
+for idx in range(T):
+    h = h * x[:, idx] + y[:, idx]
+    hs.append(h)
 
-outs = []
-for i in range(T):
-    out, state = retation(k[:, i], q[:, i], v[:, i], num_heads, 0.9, state)
-    outs.append(out)
+print(torch.stack(hs, dim=1).squeeze(-1))
 
-result = torch.stack(outs, dim=1)
-print(result)
+print(scan(x, y).half())
 
-print("=" * 100)
+import torch.nn as nn
 
-out = parallel_retation(k, q, v, num_heads, 0.9)
-print(out)
+resolve_ffn_act_fn = lambda x: F.silu
+
+
+class DbrxExpertGLU(nn.Module):
+    def __init__(
+        self, hidden_size: int, ffn_hidden_size: int, moe_num_experts: int, ffn_act_fn: dict
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.ffn_hidden_size = ffn_hidden_size
+        self.moe_num_experts = moe_num_experts
+
+        self.w1 = nn.Parameter(torch.empty(moe_num_experts * ffn_hidden_size, hidden_size))
+        self.v1 = nn.Parameter(torch.empty(moe_num_experts * ffn_hidden_size, hidden_size))
+        self.w2 = nn.Parameter(torch.empty(moe_num_experts * ffn_hidden_size, hidden_size))
+        self.activation_fn = resolve_ffn_act_fn(ffn_act_fn)
+
+    def forward(self, x: torch.Tensor, expert_idx: int) -> torch.Tensor:
+        expert_w1 = self.w1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size)[
+            expert_idx
+        ]
+        expert_v1 = self.v1.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size)[
+            expert_idx
+        ]
+        expert_w2 = self.w2.view(self.moe_num_experts, self.ffn_hidden_size, self.hidden_size)[
+            expert_idx
+        ]
+
+        x1 = x.matmul(expert_w1.t())
+        x2 = x.matmul(expert_v1.t())
+        x1 = self.activation_fn(x1)
+        x1 = x1 * x2
+        x1 = x1.matmul(expert_w2)
+        return x1
+
+
+class HydraLora(nn.Module):
+    def __init__(self, moe_num_experts, ffn_hidden_size, hidden_size, rank):
+        super().__init__()
+        self.moe_num_experts = moe_num_experts
+        self.ffn_hidden_size = ffn_hidden_size
+        self.hidden_size = hidden_size
+        self.rank = rank
+
+        self.w1 = nn.Parameter(torch.empty(moe_num_experts * ffn_hidden_size, hidden_size))
+        self.lora_a = nn.Parameter(torch.empty(moe_num_experts * ffn_hidden_size, rank))
+        self.lora_b = nn.Parameter(torch.empty(rank, hidden_size))
+
+    def forward(self, x: Tensor, expert_idx: int) -> Tensor:
+        expert_w1 = self.w1.view(
+            self.moe_num_experts,
+            self.ffn_hidden_size,
+            self.hidden_size,
+        )[expert_idx]
+        expert_lora_a = self.lora_a.view(
+            self.moe_num_experts,
+            self.ffn_hidden_size,
+            self.rank,
+        )[expert_idx]
+        expert_lora_b = self.lora_b.view(
+            self.moe_num_experts,
+            self.rank,
+            self.hidden_size,
+        )[expert_idx]
+
+        wx = x.matmul(expert_w1.t())
+        lora = x.matmul(expert_lora_a.t()).matmul(expert_lora_b.t())
+        return wx + lora

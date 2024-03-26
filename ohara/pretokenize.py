@@ -46,6 +46,7 @@ class DatasetPreprocessor:
             split=split,
             download_mode=DownloadMode.REUSE_CACHE_IF_EXISTS,
             revision=self.revision,
+            cache_dir=self.hf_cache,
         )
 
         tokenized = (

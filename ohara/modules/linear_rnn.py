@@ -14,7 +14,7 @@ def scan(x: Tensor, h: Tensor) -> Tensor:
 
 
 class RG_LRU(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, dim: int):
         self.input_proj = nn.Linear(dim, dim)
         self.gate_proj = nn.Linear(dim, dim)
         self.forget_lambda = nn.Parameter(torch.linspace(-4.323, -9, dim))
@@ -25,7 +25,7 @@ class RG_LRU(nn.Module):
             self.input_proj.weight.normal_(std=dim**-0.5)
             self.gate_proj.weight.normal_(std=dim**-0.5)
 
-    def forward(self, x):
+    def forward(self, x: Tensor, *args, **kwargs) -> Tensor:
         input_gate: torch.Tensor = self.input_proj(x)
         recurrence_gate: torch.Tensor = self.gate_proj(x)
 
@@ -37,13 +37,13 @@ class RG_LRU(nn.Module):
 
         beta = (1 - alpha**2 + 1e-6).sqrt()
         xbeta: Tensor = beta * input_gate.sigmoid() * x
-
         h = scan(alpha.mT.contiguous(), xbeta.mT.contiguous()).mT
+        # TODO: wirte recurrence for inference
         return h
 
 
 class Hawk(nn.Module):
-    def __init__(self, *, dim=1024, expansion_factor=1.5, kernel_size=4):
+    def __init__(self, *, dim: int = 1024, expansion_factor: float = 1.5, kernel_size: int = 4):
         super().__init__()
         hidden = int(dim * expansion_factor)
         self.proj = nn.Linear(dim, 2 * hidden, bias=False)
@@ -62,7 +62,7 @@ class Hawk(nn.Module):
             self.proj.weight.normal_(std=dim**-0.5)
             self.output.weight.normal_(std=hidden**-0.5)
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         B, T, C = x.shape
         # So linear rnn + conv can gets you close to transformer
         # to ssm hippo theory required :)
