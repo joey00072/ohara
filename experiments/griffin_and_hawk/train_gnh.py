@@ -209,7 +209,7 @@ class FabricTrainer:
             eval_iters=self.params["eval_iters"],
             save_ckpt_iters=self.params["save_ckpt_iters"],
             get_lr=self.get_lr,
-            model_name=self.params["wandb_run_name"],
+            model_name=self.params["wandb_project_name"],
             max_iters=self.params["max_iters"],
             ignore_index=self.params["ignore_index"],
         )
