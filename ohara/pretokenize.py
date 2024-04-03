@@ -56,7 +56,7 @@ class DatasetPreprocessor:
                 remove_columns=remove_columns,
                 num_proc=self.num_proc,
             )
-            .shuffle(seed=42)
+            .shuffle(seed=31415)
             .filter(self.filter_fn, num_proc=self.num_proc)
         )
 

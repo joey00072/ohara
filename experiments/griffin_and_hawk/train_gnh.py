@@ -37,6 +37,16 @@ from griffin_and_hawk import HawkAndGriffin, HnGConfig, ModelType
 traceback.install()
 
 
+############################ Warning ##################################
+#
+# something is worng with MQA, or tinystories dataset Idk what is it
+# I dont even know if its model problem or data problem
+# Will fix it soon
+# https://wandb.ai/joey00072/Ohara-Hawk_and_Griffin?nw=nwuserjoey00072
+# train loss shoun't be that low
+# ###################################################################
+
+
 ### CONFIGS
 wandb_project_name = "Ohara-Bitnet"
 wandb_run_name = random_name()
@@ -62,9 +72,15 @@ num_layers: int = 16
 num_heads: int = 16
 num_kv_heads: int = 4
 weight_tying = True
-window_size = min(max(128, seq_len // 2),1024) # 1024 is swa size in paper
-
+window_size = min(max(128, seq_len // 2), 1024)  # 1024 is swa size in paper
+precision = "32-true" # "32-true", "16-mixed", "16-true", "bf16-mixed", "bf16-true"
 assert d_model % num_heads == 0
+
+compile_model = False
+
+### Dataset and Tokenizer
+dataset_name = "JeanKaddour/minipile"  # run pretokeinze first
+tokenizer_name = "EleutherAI/gpt-neo-125m"
 
 
 @dataclass
@@ -116,6 +132,7 @@ def get_params(model_type: str, model_size: ModelSize, **custom_args):
         "resume_traning": resume_traning,
         "save_ckpt_iters": save_ckpt_iters,
         "weight_tying": weight_tying,
+        "precision": precision,
         "ignore_index": -1,
     }
     # ik i should use enums but for class ModelSize but...
@@ -130,12 +147,6 @@ def get_params(model_type: str, model_size: ModelSize, **custom_args):
     params.update(custom_args)
     return params
 
-
-compile_model = not bool(sys.platform == "darwin")
-
-### Dataset and Tokenizer
-dataset_name = "roneneldan/TinyStories"  # run pretokeinze first
-tokenizer_name = "microsoft/phi-2"
 
 ### Setup
 device = auto_accelerator()  # auto chose device (cuda, mps)
@@ -182,7 +193,7 @@ class FabricTrainer:
 
         if params.get("compile_model"):
             self.fabric.print("Compiling model")
-            self.model = torch.compile(self.model,mode="reduce-overhead")
+            self.model = torch.compile(self.model, mode="reduce-overhead")
 
         if lr_scheduler is None:
             self.get_lr = CosineScheduler(
@@ -353,6 +364,7 @@ def start_run(model_size, model_type):
     #     "resume_traning": resume_traning,
     #     "save_ckpt_iters": save_ckpt_iters,
     #     "weight_tying": weight_tying,
+    #      "precision": "32-true",
     #     "ignore_index": -1,
     # }
 
@@ -408,7 +420,7 @@ def start_run(model_size, model_type):
         val_dataloader=test_dataloader,
         optimizer=optimzer,
         scheduler=get_lr,
-        
+        precision=params["precision"],
     )
 
     trainer.fit()

@@ -140,6 +140,7 @@ class CasualMultiQueryAttention(nn.Module):
         idx: int | None = None,
     ) -> None:
         super().__init__()
+        print(f"{num_kv_heads=}")
         self.num_heads: int = num_heads
         self.head_dim: int = dim // num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is None else num_heads
@@ -189,7 +190,6 @@ class CasualMultiQueryAttention(nn.Module):
             v = torch.repeat_interleave(v, self.num_queries_per_kv, dim=2)
             print(f"{self.idx=} {k.shape=} {q.shape=} {v.shape=}")
             exit(0)
-            
 
         k = k.transpose(1, 2)  # shape = (B, num_heads, seq_len, head_dim)
         q = q.transpose(1, 2)
