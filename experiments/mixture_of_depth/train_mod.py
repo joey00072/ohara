@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import sys
 import time
 import math
@@ -31,19 +32,15 @@ from rich import print, traceback
 import lightning as L
 from lightning.pytorch.loggers import WandbLogger
 from lightning.fabric.loggers import TensorBoardLogger
+from lightning.fabric.utilities.throughput import ThroughputMonitor, measure_flops
 
-from griffin_and_hawk import HawkAndGriffin, HnGConfig, ModelType
+from mixture_of_depth import ModelingMixtureOfDepth, Config
 
 traceback.install()
 
 
-############################ Warning ##################################
-# psan wont work with torch.compile. I'll do triton impl soon
-# ###################################################################
-
-
 ### CONFIGS
-wandb_project_name = "Ohara-Bitnet"
+wandb_project_name = "Ohara-MOD"
 wandb_run_name = random_name()
 
 hf_username = "joey00072"
@@ -52,30 +49,62 @@ learning_rate: float = 5e-4
 min_learning_rate: float = 0.0
 
 warmup_iters: int = 1000
-max_iters: int = 100_000
-batch_size: int = 8
+max_iters: int = 30_000
+batch_size: int = 32
 micro_batch: int = 4
 eval_iters: int = 100
 save_ckpt_iters: int = 1000
 
 multiple_of: int = 4
 d_model: int = 128 * 4  # 512
-exponantion_factor = 3 / 2
+exponantion_factor = 4
 hidden_dim = int(d_model * exponantion_factor)
-seq_len: int = 256
+seq_len: int = 512
 num_layers: int = 16
 num_heads: int = 16
 num_kv_heads: int = 4
 weight_tying = True
-window_size = min(max(128, seq_len // 2), 1024)  # 1024 is swa size in paper
-precision = "32-true"  # "32-true", "16-mixed", "16-true", "bf16-mixed", "bf16-true"
+window_size = seq_len
+
+moe_num_experts: int = 4
+moe_num_experts_per_tok: int = 2
+
+precision = "16-mixed"  # "32-true", "16-mixed", "16-true", "bf16-mixed", "bf16-true"
 assert d_model % num_heads == 0
 
 compile_model = False
 
 ### Dataset and Tokenizer
+
+# dataset_name = "roneneldan/TinyStories"  # run pretokeinze first
+# tokenizer_name = "microsoft/phi-2"
+
+
 dataset_name = "JeanKaddour/minipile"  # run pretokeinze first
 tokenizer_name = "EleutherAI/gpt-neo-125m"
+
+
+@dataclass
+class ModelType:
+    Baseline = {
+        "mixture_of_depth": False,
+        "name": "Baseline",
+    }
+
+    Moe = {
+        "mixture_of_depth": False,
+        "name": "mixture of expert",
+    }
+
+    Mod = {
+        "mixture_of_depth": True,
+        "name": "mixture of depth",
+    }
+
+    Mode = {
+        "mixture_of_depth": True,
+        "name": "mixture of depth and expert",
+    }
 
 
 @dataclass
@@ -103,13 +132,15 @@ class ModelSize:
     }
 
 
-def get_params(model_type: str, model_size: ModelSize, **custom_args):
+def get_params(model_type: str, model_size: ModelSize, vocab_size: int = False, **custom_args):
     """
     This will give you roughly same size of models
     """
+    assert vocab_size, "Please provide vocab size"
     params = {
         "model_type": model_type,
-        "wandb_project_name": random_name(),
+        "vocab_size": vocab_size,
+        "wandb_project_name": wandb_project_name,
         "learning_rate": learning_rate,
         "min_learning_rate": min_learning_rate,
         "warmup_iters": warmup_iters,
@@ -128,18 +159,24 @@ def get_params(model_type: str, model_size: ModelSize, **custom_args):
         "save_ckpt_iters": save_ckpt_iters,
         "weight_tying": weight_tying,
         "precision": precision,
+        "mixture_of_expert": False,
+        "moe_num_experts": moe_num_experts,
+        "moe_num_experts_per_tok": moe_num_experts_per_tok,
         "ignore_index": -1,
     }
     # ik i should use enums but for class ModelSize but...
     params["model_name"] = model_size["name"]
     params["d_model"] = model_size["d_model"]
-    if model_type == ModelType.MQA:
-        params["hidden_dim"] = model_size["d_model"] * 3
-    elif model_type == ModelType.Hawk:
-        params["hidden_dim"] = int(model_size["d_model"] * 1.457903)
-    elif model_type == ModelType.Griffin:
-        params["hidden_dim"] = int(model_size["d_model"] * 1.0973999)
-    params.update(custom_args)
+    params["hidden_dim"] = int(model_size["d_model"] * exponantion_factor)
+    params["mixture_of_depth"] = False
+    params["mixture_of_expert"] = False
+    if model_type == ModelType.Moe or model_type == ModelType.Mode:
+        params["hidden_dim"] = model_size["d_model"] * 1
+        params["mixture_of_expert"] = True
+
+    if model_type == ModelType.Mod or model_type == ModelType.Mode:
+        params["mixture_of_depth"] = True
+
     return params
 
 
@@ -161,6 +198,8 @@ class FabricTrainer:
         lr_scheduler: CosineScheduler = None,
         accelerator: str | None = None,
         precision: str | None = None,  # "32-true", "16-mixed", "16-true", "bf16-mixed", "bf16-true"
+        model_class: nn.Module = None,
+        model_config=None,
         strategy: str = "auto",
         **kwargs,
     ):
@@ -170,7 +209,8 @@ class FabricTrainer:
         self.val_dataloader = val_dataloader
         self.optimizer = optimizer
         self.accelerator = accelerator
-
+        self.flops = None
+        self.throughput = None
         loggers = []
         # wandb_logger = WandbLogger(project=params["wandb_project_name"], resume=params["resume_traning"])
         # loggers.append(wandb_logger)
@@ -201,6 +241,17 @@ class FabricTrainer:
         optimzer = optimizer if optimizer else optim.AdamW(model.parameters(), lr=self.get_lr(100))
         self.optimzer = self.fabric.setup_optimizers(optimzer)
 
+        if model_class is not None and model_config is not None:
+            # note flops utilization is slightly different since not calculated for aux loss
+            try:
+                self.flops = self.calc_flops(
+                    model_class=model_class, config=model_config, params=params
+                )
+                self.throughput = ThroughputMonitor(self.fabric)
+            except Exception as e:
+                print("Error calcuting flops | Throughput will not be logged")
+                print(str(e))
+
     def fit(self):
         self.fabric.logger.log_hyperparams(self.params)
         print(model_summary(self.model))
@@ -217,6 +268,8 @@ class FabricTrainer:
             get_lr=self.get_lr,
             model_name=self.params["wandb_project_name"],
             max_iters=self.params["max_iters"],
+            measured_flops=self.flops,
+            throughput=self.throughput,
             ignore_index=self.params["ignore_index"],
         )
         return self
@@ -262,6 +315,8 @@ class FabricTrainer:
         get_lr,
         max_iters,
         model_name: str = "model",
+        measured_flops=0,
+        throughput: ThroughputMonitor = None,
         ignore_index=-1,
     ):
         fabric.launch()
@@ -272,8 +327,24 @@ class FabricTrainer:
         train_dataloader = BetterCycle(iter(train_dataloader))
         val_dataloader = BetterCycle(iter(val_dataloader))
         (data, target) = next(val_dataloader)
-        tokerns_per_iter = int(math.prod(data.shape) * micro_batch)
+        batch_size, seq_len = data.shape
+        tokerns_per_iter = int(batch_size * seq_len * micro_batch)
 
+        # for torch.compile to do trace
+        cstart = time.perf_counter()
+        logits, aux_loss = model(data, auxiliary_loss=True)
+        loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            target.view(-1),
+            ignore_index=ignore_index,
+        )
+        (loss + aux_loss).backward()
+        optimizer.zero_grad()
+        print(f"Compile trace time: {time.perf_counter()-cstart}")
+
+        if throughput:
+            fabric.print(f"Measured TFLOPs: {measured_flops * fabric.world_size / 1e12:.2f}")
+        t0 = time.perf_counter()
         micro_batch_loss: float = 0
         idx: int = 0
         while True:
@@ -290,7 +361,7 @@ class FabricTrainer:
             for _ in range(micro_batch):
                 (data, target) = next(train_dataloader)
                 with fabric.no_backward_sync(model, enabled=micro_batch == 1):
-                    logits: torch.Tensor = model(data)
+                    logits, aux_loss = model(data, auxiliary_loss=True)
                     loss = F.cross_entropy(
                         logits.view(-1, logits.size(-1)),
                         target.view(-1),
@@ -298,7 +369,7 @@ class FabricTrainer:
                     )
                     loss = loss / micro_batch
                     micro_batch_loss += loss.item()
-                    fabric.backward(loss)
+                    fabric.backward((loss + aux_loss))
 
             optimizer.step()
             optimizer.zero_grad()
@@ -311,16 +382,27 @@ class FabricTrainer:
 
             if idx % eval_iters == 0:
                 val_loss = FabricTrainer.validate(fabric, model, val_dataloader, 100)
+                metrics = {
+                    "traning_loss": micro_batch_loss,
+                    "test_loss": val_loss,
+                    "iter": idx,
+                    "tokens": idx * tokerns_per_iter,
+                    "lr": lr,
+                    "time_per_iter": elapsed_time,
+                    "time_total": curr_time - t0,
+                }
+                if throughput is not None:
+                    throughput.update(
+                        time=(curr_time - t0),
+                        flops=(measured_flops * eval_iters),
+                        batches=idx,
+                        samples=(idx * micro_batch),
+                        lengths=(idx * micro_batch * seq_len),
+                    )
+                    metrics.update(throughput.compute())
                 try:
                     fabric.log_dict(
-                        {
-                            "traning_loss": micro_batch_loss,
-                            "test_loss": val_loss,
-                            "iter": idx,
-                            "tokens": idx * tokerns_per_iter,
-                            "lr": lr,
-                            "time": elapsed_time,
-                        },
+                        metrics=metrics,
                         step=idx,
                     )
                 except Exception as e:
@@ -329,6 +411,23 @@ class FabricTrainer:
             if idx % save_ckpt_iters == 0:
                 state = {"model": model, "optimizer": optimizer, "idx": idx, "lr": lr}
                 fabric.save(f"./ckpt/{model_name}/model.pt", state)
+
+    @staticmethod
+    def calc_flops(model_class, config: Config, params: dict):
+        with torch.device("meta"):
+            x = torch.randint(
+                0,
+                1,
+                (params["batch_size"] * params["micro_batch"], params["seq_len"]),
+                device="meta",
+            )
+            model = model_class(config)
+            model_fwd = lambda: model(x)
+            model_loss = lambda y: F.cross_entropy(y.view(-1, y.size(-1)), x.view(-1))
+            measured_flops = measure_flops(model, model_fwd, model_loss)
+            del model, x
+            gc.collect()
+            return measured_flops
 
 
 def start_run(model_size, model_type):
@@ -364,21 +463,26 @@ def start_run(model_size, model_type):
     # }
 
     params = get_params(model_type, model_size, vocab_size=tokenizer.vocab_size)
-    config = HnGConfig(
+    config = Config(
         model_type=params["model_type"],
         vocab_size=params["vocab_size"],
-        dim=params["d_model"],
+        d_model=params["d_model"],
         hidden_dim=params["hidden_dim"],
         seq_len=params["seq_len"],
         num_layers=params["num_layers"],
         num_heads=params["num_heads"],
         multiple_of=params["multiple_of"],
         weight_tying=params["weight_tying"],
+        mixture_of_depth=params["mixture_of_depth"],
+        mixture_of_expert=params["mixture_of_expert"],
+        moe_num_experts=params["moe_num_experts"],
+        moe_num_experts_per_tok=params["moe_num_experts_per_tok"],
     )
 
     # with torch.device("meta"):
     print(model_type)
-    model = HawkAndGriffin(config)
+    model = ModelingMixtureOfDepth(config)
+    print(model)
     summary = model_summary(model)
 
     print("-" * 150)
@@ -408,6 +512,8 @@ def start_run(model_size, model_type):
 
     optimzer = optim.AdamW(model.parameters(), lr=get_lr(314))
 
+    print(next(iter(train_dataloader))[0].shape, "XX")
+
     trainer = FabricTrainer(
         params=params,
         model=model,
@@ -416,6 +522,8 @@ def start_run(model_size, model_type):
         optimizer=optimzer,
         scheduler=get_lr,
         precision=params["precision"],
+        model_class=ModelingMixtureOfDepth,
+        model_config=config,
     )
 
     trainer.fit()
@@ -443,8 +551,9 @@ def start_run(model_size, model_type):
 
 
 def main():
-    model_size = ModelSize.Microraptor
-    model_type = ModelType.MQA
+    model_size = ModelSize.TRex
+    model_type = ModelType.Mod
+
     start_run(model_size, model_type)
 
 
