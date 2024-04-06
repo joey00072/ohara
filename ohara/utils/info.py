@@ -33,11 +33,12 @@ def convert_int_to_shortened_string(num):
         return f"{num / 1000000000000:.1f}T"
 
 
-def model_summary(model: nn.Module):
+def model_summary(model: nn.Module, print_summary=False):
     "conver normal model to lightning model and print model summary"
     model = Model(model)
     summary = ModelSummary(model)
-    print(summary)
+    if print_summary:
+        print(summary)
     return {
         "summary": summary,
         "total_parameters": convert_int_to_shortened_string(summary.total_parameters),

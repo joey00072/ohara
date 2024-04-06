@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from mlp import MLP_MAP
+from .mlp import MLP_MAP
 
 
 # This might not me most efficient implementation of MOE
