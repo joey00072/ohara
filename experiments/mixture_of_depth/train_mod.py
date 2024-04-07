@@ -32,18 +32,13 @@ import lightning as L
 from lightning.pytorch.loggers import WandbLogger
 from lightning.fabric.loggers import TensorBoardLogger
 
-from griffin_and_hawk import HawkAndGriffin, HnGConfig, ModelType
+from mixture_of_depth import ModelingMixtureOfDepth,Config
 
 traceback.install()
 
 
-############################ Warning ##################################
-# psan wont work with torch.compile. I'll do triton impl soon
-# ###################################################################
-
-
 ### CONFIGS
-wandb_project_name = "Ohara-Bitnet"
+wandb_project_name = "Ohara-MOD"
 wandb_run_name = random_name()
 
 hf_username = "joey00072"
@@ -60,14 +55,18 @@ save_ckpt_iters: int = 1000
 
 multiple_of: int = 4
 d_model: int = 128 * 4  # 512
-exponantion_factor = 3 / 2
+exponantion_factor = 4
 hidden_dim = int(d_model * exponantion_factor)
 seq_len: int = 256
 num_layers: int = 16
 num_heads: int = 16
 num_kv_heads: int = 4
 weight_tying = True
-window_size = min(max(128, seq_len // 2), 1024)  # 1024 is swa size in paper
+window_size = seq_len
+
+moe_num_experts: int = 4
+moe_num_experts_per_tok: int = 2
+
 precision = "32-true"  # "32-true", "16-mixed", "16-true", "bf16-mixed", "bf16-true"
 assert d_model % num_heads == 0
 
@@ -77,6 +76,28 @@ compile_model = False
 dataset_name = "JeanKaddour/minipile"  # run pretokeinze first
 tokenizer_name = "EleutherAI/gpt-neo-125m"
 
+@dataclass
+class ModelType:
+    Baseline = {
+        "mixture_of_depth": False,
+        "name": "Baseline",
+    }
+    
+    Moe = {
+        "mixture_of_depth": False,
+        "name": "mixture of expert",
+        
+    }
+    
+    Mod = {
+        "mixture_of_depth": True,
+        "name": "mixture of depth",
+    }
+    
+    Mode = {
+        "mixture_of_depth": True,
+        "name": "mixture of depth and expert",
+    }
 
 @dataclass
 class ModelSize:
@@ -103,12 +124,14 @@ class ModelSize:
     }
 
 
-def get_params(model_type: str, model_size: ModelSize, **custom_args):
+def get_params(model_type: str, model_size: ModelSize, vocab_size: int=False,**custom_args):
     """
     This will give you roughly same size of models
     """
+    assert vocab_size, "Please provide vocab size"
     params = {
         "model_type": model_type,
+        "vocab_size": vocab_size,
         "wandb_project_name": random_name(),
         "learning_rate": learning_rate,
         "min_learning_rate": min_learning_rate,
@@ -128,18 +151,18 @@ def get_params(model_type: str, model_size: ModelSize, **custom_args):
         "save_ckpt_iters": save_ckpt_iters,
         "weight_tying": weight_tying,
         "precision": precision,
+        "mixture_of_expert":False,
+        "moe_num_experts": moe_num_experts,
+        "moe_num_experts_per_tok": moe_num_experts_per_tok,
         "ignore_index": -1,
     }
     # ik i should use enums but for class ModelSize but...
     params["model_name"] = model_size["name"]
     params["d_model"] = model_size["d_model"]
-    if model_type == ModelType.MQA:
-        params["hidden_dim"] = model_size["d_model"] * 3
-    elif model_type == ModelType.Hawk:
-        params["hidden_dim"] = int(model_size["d_model"] * 1.457903)
-    elif model_type == ModelType.Griffin:
-        params["hidden_dim"] = int(model_size["d_model"] * 1.0973999)
-    params.update(custom_args)
+    params["hidden_dim"] = int(model_size["d_model"] * exponantion_factor)
+    if model_type == ModelType.Moe or model_type == ModelType.Mode:
+        params["hidden_dim"] = model_size["d_model"] * 1
+        params["mixture_of_expert"]= True
     return params
 
 
@@ -364,21 +387,25 @@ def start_run(model_size, model_type):
     # }
 
     params = get_params(model_type, model_size, vocab_size=tokenizer.vocab_size)
-    config = HnGConfig(
+    config = Config(
         model_type=params["model_type"],
         vocab_size=params["vocab_size"],
-        dim=params["d_model"],
+        d_model=params["d_model"],
         hidden_dim=params["hidden_dim"],
         seq_len=params["seq_len"],
         num_layers=params["num_layers"],
         num_heads=params["num_heads"],
         multiple_of=params["multiple_of"],
         weight_tying=params["weight_tying"],
+        mixture_of_expert=params["mixture_of_expert"],
+        moe_num_experts = params["moe_num_experts"],
+        moe_num_experts_per_tok = params["moe_num_experts_per_tok"],
     )
 
     # with torch.device("meta"):
     print(model_type)
-    model = HawkAndGriffin(config)
+    model = ModelingMixtureOfDepth(config)
+    print(model)
     summary = model_summary(model)
 
     print("-" * 150)
@@ -444,7 +471,8 @@ def start_run(model_size, model_type):
 
 def main():
     model_size = ModelSize.Microraptor
-    model_type = ModelType.MQA
+    model_type = ModelType.Mod
+    
     start_run(model_size, model_type)
 
 

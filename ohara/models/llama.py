@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import math
 from dataclasses import dataclass
 from ..modules.mlp import SwiGLU
+from ..modules.norm import RMSNorm
 
 from ohara.embedings_pos.rotatry import precompute_freqs_cis
 from ohara.embedings_pos.rotatry import apply_rope
@@ -17,6 +18,7 @@ class Config:
     d_model: int = 128
     hidden_dim: int = 256
     num_heads: int = 4
+    num_kv_heads: int = 0
     num_layers: int = 4
     dropout: int = 0.2
     multiple_of: int = 4
@@ -24,16 +26,20 @@ class Config:
 
 
 class Attention(nn.Module):
-    # TODO: add GQA
     def __init__(self, model_args: Config):
         super().__init__()
         d_model = model_args.d_model
         self.num_heads = model_args.num_heads
         self.head_dim = model_args.d_model // model_args.num_heads
+        self.num_kv_heads = (
+            model_args.num_heads if model_args.num_kv_heads == 0 else model_args.num_kv_heads
+        )
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        self.key = nn.Linear(d_model, d_model, model_args.bias)
-        self.query = nn.Linear(d_model, d_model, model_args.bias)
-        self.value = nn.Linear(d_model, d_model, model_args.bias)
+        self.key = nn.Linear(d_model, self.head_dim * self.num_heads)
+        self.query = nn.Linear(d_model, self.head_dim * self.num_kv_heads)
+        self.value = nn.Linear(d_model, self.head_dim * self.num_kv_heads)
         self.proj = nn.Linear(d_model, d_model, model_args.bias)
 
         self.attn_dropout = nn.Dropout(model_args.dropout)
@@ -60,8 +66,10 @@ class Attention(nn.Module):
 
         q, k = apply_rope(q, k, freqs_cis)
 
-        # xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        # xv = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+        # Grouped Query Attention
+        if self.num_kv_heads != self.num_heads:
+            k = torch.repeat_interleave(k, self.num_queries_per_kv, dim=2)
+            v = torch.repeat_interleave(v, self.num_queries_per_kv, dim=2)
 
         k = k.transpose(1, 2)  # shape = (B, num_heads, seq_len, head_dim)
         q = q.transpose(1, 2)
@@ -105,8 +113,8 @@ class Block(nn.Module):
             bias=model_args.bias,
         )
 
-        self.norm1 = nn.LayerNorm(model_args.d_model)
-        self.norm2 = nn.LayerNorm(model_args.d_model)
+        self.norm1 = RMSNorm(model_args.d_model)
+        self.norm2 = RMSNorm(model_args.d_model)
 
     def forward(self, x, mask, freqs_cis):
         x = x + self.attn(self.norm1(x), mask, freqs_cis)
@@ -124,7 +132,7 @@ class LLAMA(nn.Module):
 
         self.layers = nn.ModuleList([Block(model_args) for _ in range(model_args.num_layers)])
 
-        self.norm = nn.LayerNorm(model_args.d_model)
+        self.norm = RMSNorm(model_args.d_model)
         self.vocab_proj = nn.Linear(model_args.d_model, model_args.vocab_size, bias=False)
 
         self.token_emb.weight = self.vocab_proj.weight
