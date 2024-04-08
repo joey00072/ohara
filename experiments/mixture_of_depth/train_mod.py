@@ -50,7 +50,7 @@ min_learning_rate: float = 0.0
 
 warmup_iters: int = 1000
 max_iters: int = 100_000
-batch_size: int = 128
+batch_size: int = 64
 micro_batch: int = 4
 eval_iters: int = 100
 save_ckpt_iters: int = 1000
@@ -192,8 +192,9 @@ class FabricTrainer:
         lr_scheduler: CosineScheduler = None,
         accelerator: str | None = None,
         precision: str | None = None,  # "32-true", "16-mixed", "16-true", "bf16-mixed", "bf16-true"
+        model_class:nn.Module = None,
+        model_config = None,
         strategy: str = "auto",
-        flops=0,
         **kwargs,
     ):
         self.params = params
@@ -202,8 +203,7 @@ class FabricTrainer:
         self.val_dataloader = val_dataloader
         self.optimizer = optimizer
         self.accelerator = accelerator
-        self.flops = flops
-
+        self.flops = None
         loggers = []
         # wandb_logger = WandbLogger(project=params["wandb_project_name"], resume=params["resume_traning"])
         # loggers.append(wandb_logger)
@@ -233,6 +233,12 @@ class FabricTrainer:
 
         optimzer = optimizer if optimizer else optim.AdamW(model.parameters(), lr=self.get_lr(100))
         self.optimzer = self.fabric.setup_optimizers(optimzer)
+        
+        if model_class is not None and model_config is not None:
+            # note flops utilization is slightly different since not calculated for aux loss
+            self.flops = self.calc_flops(
+                model_class=model_class, config=model_config, params=params
+            )
 
     def fit(self):
         self.fabric.logger.log_hyperparams(self.params)
@@ -297,6 +303,7 @@ class FabricTrainer:
         max_iters,
         model_name: str = "model",
         measured_flops=0,
+        throughput:ThroughputMonitor=None,
         ignore_index=-1,
     ):
         fabric.launch()
@@ -308,7 +315,9 @@ class FabricTrainer:
         val_dataloader = BetterCycle(iter(val_dataloader))
         (data, target) = next(val_dataloader)
         tokerns_per_iter = int(math.prod(data.shape) * micro_batch)
+        
         fabric.print(f"Measured TFLOPs: {measured_flops * fabric.world_size / 1e12:.2f}")
+        t0 = time.perf_counter()
         micro_batch_loss: float = 0
         idx: int = 0
         while True:
@@ -346,16 +355,27 @@ class FabricTrainer:
 
             if idx % eval_iters == 0:
                 val_loss = FabricTrainer.validate(fabric, model, val_dataloader, 100)
-                try:
-                    fabric.log_dict(
-                        {
+                metrics = {
                             "traning_loss": micro_batch_loss,
                             "test_loss": val_loss,
                             "iter": idx,
                             "tokens": idx * tokerns_per_iter,
+                            
                             "lr": lr,
                             "time": elapsed_time,
-                        },
+                }
+                if throughput is not None:
+                    throughput.update(
+                        time=(curr_time - t0),
+                        flops=(measured_flops * eval_iters),
+                        batches=state["iter_num"],
+                        samples=(state["iter_num"] * micro_batch),
+                        lengths=(state["iter_num"] * micro_batch * seq_len),
+                    )   
+                    metrics.update(throughput.compute())
+                try:
+                    fabric.log_dict(
+                        metrics=metrics,
                         step=idx,
                     )
                 except Exception as e:
@@ -366,18 +386,19 @@ class FabricTrainer:
                 fabric.save(f"./ckpt/{model_name}/model.pt", state)
 
 
-def calc_flops(model_class, config: Config, params: dict):
-    with torch.device("meta"):
-        x = torch.randint(
-            0, 1, (params["batch_size"] * params["micro_batch"], params["seq_len"]), device="meta"
-        )
-        model = model_class(config)
-        model_fwd = lambda: model(x)
-        model_loss = lambda y: F.cross_entropy(y.view(-1, y.size(-1)), x.view(-1))
-        measured_flops = measure_flops(model, model_fwd, model_loss)
-        del model, x
-        gc.collect()
-        return measured_flops
+    @staticmethod
+    def calc_flops(model_class, config: Config, params: dict):
+        with torch.device("meta"):
+            x = torch.randint(
+                0, 1, (params["batch_size"] * params["micro_batch"], params["seq_len"]), device="meta"
+            )
+            model = model_class(config)
+            model_fwd = lambda: model(x)
+            model_loss = lambda y: F.cross_entropy(y.view(-1, y.size(-1)), x.view(-1))
+            measured_flops = measure_flops(model, model_fwd, model_loss)
+            del model, x
+            gc.collect()
+            return measured_flops
 
 
 def start_run(model_size, model_type):
@@ -461,9 +482,7 @@ def start_run(model_size, model_type):
 
     optimzer = optim.AdamW(model.parameters(), lr=get_lr(314))
 
-    flops_per_micro_batch = calc_flops(
-        model_class=ModelingMixtureOfDepth, config=config, params=params
-    )
+    
 
     trainer = FabricTrainer(
         params=params,
@@ -473,7 +492,8 @@ def start_run(model_size, model_type):
         optimizer=optimzer,
         scheduler=get_lr,
         precision=params["precision"],
-        flops=flops_per_micro_batch,
+        model_class=ModelingMixtureOfDepth,
+        model_config=config,
     )
 
     trainer.fit()
@@ -501,7 +521,7 @@ def start_run(model_size, model_type):
 
 
 def main():
-    model_size = ModelSize.TRex
+    model_size = ModelSize.Microraptor
     model_type = ModelType.Mod
 
     start_run(model_size, model_type)
