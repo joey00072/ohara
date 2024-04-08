@@ -24,13 +24,13 @@ class Config(llama.Config):
     capacity_factor: float = 0.12
 
     ffn: str = "swiglu"  # mlp, swiglu
-    mixture_of_expert:bool = False
+    mixture_of_expert: bool = False
     moe_num_experts: int = 4
     moe_num_experts_per_tok: int = 2
-    
+
     mixture_of_depth: bool = True
-    
-    model_type:bool = "mixture_of_depth"
+
+    model_type: bool = "mixture_of_depth"
     sliding_window_attention = False
     window_size: int = 128
     weight_tying: bool = True
@@ -60,10 +60,10 @@ class Block(nn.Module):
         if cfg.ffn == "swiglu":
             return SwiGLU(cfg.d_model, cfg.hidden_dim, cfg.dropout)
 
-    def forward(self, x, mask, freqs_cis):
+    def forward(self, x, mask, freqs_cis, **kwargs):
         x = x + self.attn(self.norm1(x), mask, freqs_cis)
         x = x + self.ff(self.norm2(x))
-        return x
+        return x, None
 
 
 class MoD(nn.Module):
@@ -81,14 +81,16 @@ class MoD(nn.Module):
         self.router = nn.Linear(self.dim, 1, bias=False)
         self.aux_router = nn.Linear(self.dim, 1, bias=False)
 
-    def forward(self, x: Tensor, mode="train", *args, **kwargs):
-        batch_size, S, dim = x.shape
+    def forward(
+        self, x: Tensor, mask, freqs_cis, mode="train", auxiliary_loss=False, *args, **kwargs
+    ):
+        batch_size, seq_len, dim = x.shape
 
-        if mode == "inference":
-            return self.inference(x, *args, **kwargs)
+        # if mode == "inference":
+        #     return self.inference(x, *args, **kwargs)
         # S = seq_len, C = capacity  , C = int(seq_length * capacity_factor)
         #  page 6 above eq 1 | ( C<S ) | here top_k = beta
-        top_k = int(S * self.capacity_factor)  # may be i should use math.ceil
+        top_k = int(seq_len * self.capacity_factor)  # may be i should use math.ceil
 
         # eq1 page 6
         # scaler weights for each token
@@ -107,34 +109,41 @@ class MoD(nn.Module):
         r_weights = torch.gather(token_weights, dim=1, index=index)
 
         # select idx for copying for original tensor
-        indices_expanded = selected_tokens.expand(-1, -1, C)
+        indices_expanded = selected_tokens.expand(-1, -1, dim)
 
         # This are fillted topk tokens with capactiy C
         filtered_x = torch.gather(input=x, dim=1, index=indices_expanded)  # -> batch, capacity, dim
 
-        x_out = self.transformer_decoder_block(filtered_x)
+        x_out, _ = self.transformer_decoder_block(filtered_x, mask, freqs_cis)
 
         # muliply by router weights, this add router in gradient stream
-        xw_out = token_weights * x_out
+        xw_out = F.sigmoid(r_weights) * x_out
 
         # batch_indices = torch.arange(batch_size).unsqueeze(-1).expand(-1, top_k)
-        # # https://discuss.pytorch.org/t/when-inplace-operation-are-allowed-and-when-not/169583/2
+        # # # https://discuss.pytorch.org/t/when-inplace-operation-are-allowed-and-when-not/169583/2
         # out = x.clone()
         # # add back to resuidal strean
         # out[batch_indices, selected_tokens.squeeze(-1),: ] += xw_out
-        # ^ this can be done with torch.scatter_add
-        out = torch.scatter_add(input=x, dim=1, index=selected_tokens, src=xw_out)
-        return out, self.aux_loss(x, router_logits, selected_tokens)
+        # # ^ this can be done with torch.scatter_add
+        out = torch.scatter_add(input=x, dim=1, index=indices_expanded, src=xw_out)
+
+        if auxiliary_loss:
+            aux_loss = self.aux_loss(x, router_logits, selected_tokens)
+            return out, aux_loss
+        return out, _
 
     def aux_loss(self, x: Tensor, router_logits: Tensor, selected_tokens: Tensor):
+        batch_size, seq_len, dim = x.shape
         # Page 7, Section 3.5 sampling
         router_targets = torch.zeros_like(router_logits).view(
             -1
         )  # i think torch to scatter will work here TODO
         router_targets[selected_tokens.view(-1)] = 1.0
-        aux_router_logits = self.aux_router(x.detach().view(B * T, -1))
-        aux_router_logits = F.sigmoid(aux_router_logits)  # keep output in range [0,1)
-        return F.binary_cross_entropy(aux_router_logits.view(-1), router_targets)
+        aux_router_logits = self.aux_router(x.detach().view(batch_size * seq_len, -1))
+        # aux_router_logits = F.sigmoid(aux_router_logits)  # keep output in range [0,1)
+        # RuntimeError: torch.nn.functional.binary_cross_entropy and torch.nn.BCELoss are unsafe to autocast.
+        # so binary_cross_entropy_with_logits == sigmoid + bce_loss
+        return F.binary_cross_entropy_with_logits(aux_router_logits.view(-1), router_targets)
 
     def inference(self, x: Tensor, *args, **kwargs):
         assert False, "TODO: will implement inference soon"
@@ -147,12 +156,12 @@ class TranformerDecoder(nn.Module):
         self.config = cfg
 
         self.token_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
-        
+
         if cfg.mixture_of_depth:
             DecoderBlock = MoD
         else:
             DecoderBlock = Block
-            
+
         self.layers = nn.ModuleList([DecoderBlock(cfg) for _ in range(cfg.num_layers)])
 
         self.norm = RMSNorm(cfg.d_model)
@@ -172,17 +181,20 @@ class TranformerDecoder(nn.Module):
 
         self.apply(self._init_weights)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, auxiliary_loss: bool = False, *args, **kwargs):
         batch, seqlen = x.shape
         x = self.token_emb(x)
         device = self.token_emb.weight.device
         freqs_cis = self.cis[0][:seqlen].to(device), self.cis[1][:seqlen].to(device)
-
+        aux_loss = torch.tensor(0.0).to(x.device)
         for layer in self.layers:
-            x = layer(x, self.mask, freqs_cis)
-
+            x, aloss = layer(x, self.mask, freqs_cis, auxiliary_loss=auxiliary_loss)
+            if aloss is not None:
+                aux_loss += aloss
         x = self.norm(x)
         x = self.vocab_proj(x)
+        if auxiliary_loss:
+            return x, aux_loss/self.config.num_layers
         return x
 
     def _init_weights(self, module):
@@ -194,17 +206,18 @@ class TranformerDecoder(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
 
-class ModelingMixtureOfDepth(PyTorchModelHubMixin,L.LightningModule):
+class ModelingMixtureOfDepth(PyTorchModelHubMixin, L.LightningModule):
     def __init__(self, cfg: Config, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.config = cfg
         self.model = TranformerDecoder(cfg)
 
-    def forward(self, x: torch.Tensor, mode: str):
+    def forward(self, x: torch.Tensor, mode: str = "train",**kwargs) -> torch.Tensor:
         if mode == "inference":
             return self.model.inference(x)
         else:
-            return self.model(x)
+            return self.model(x,**kwargs)
+
 
 if __name__ == "__main__":
     B, T, C = 1, 10, 4

@@ -93,8 +93,10 @@ def apply_rope(k, q, cis):
     # restack
     # x'+iy' -> [x',y',x1',y1'...]
     # you roated vector in chunks of two lfg!!!
+    _, seq_len, _, _ = q.shape
 
-    freqs_sin, freqs_cos = cis
+    freqs_cos, freqs_sin = cis
+    freqs_cos, freqs_sin = freqs_cos[:seq_len], freqs_sin[:seq_len]
 
     #  rehsape a shape (...,n )-> (..., n//2,2)
     q_cis = q.float().reshape(
