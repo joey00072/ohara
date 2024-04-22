@@ -43,7 +43,7 @@ This is from a precursor paper https://arxiv.org/pdf/2310.11453.pdf
 from torch import Tensor
 
 def activation_quant(x: Tensor) -> Tensor:
-    scale: Tensor = 127.0 / x.abs().max(dim=1, keepdim=True).values.clamp(min=1e-5)
+    scale: Tensor = 127.0 / x.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-5)
     y: Tensor = (x * scale).round().clamp(-128, 127) / scale
     return x + (y - x).detach()
 ```
