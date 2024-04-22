@@ -28,7 +28,7 @@ class RMSNorm(nn.Module):
 
 @torch.jit.script  # jit speedup https://colab.research.google.com/drive/1B_-PfHKzSmuwF3TETx_ZMlFSE5PNcr1k?usp=sharing
 def activation_quant(x: Tensor) -> Tensor:
-    scale: Tensor = 127.0 / x.abs().max(dim=1, keepdim=True).values.clamp(min=1e-5)
+    scale: Tensor = 127.0 / x.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-5)
     y: Tensor = (x * scale).round().clamp(-128, 127) / scale
     return x + (y - x).detach()
 
