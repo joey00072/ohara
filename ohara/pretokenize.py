@@ -74,7 +74,8 @@ class DatasetPreprocessor:
         fpath = str(
             f"{self.dataset_name.replace('/','-')}--{self.tokenizer.name_or_path.replace('/','-')}"
         )
-        dataset.save_to_disk(self.output_dir.joinpath(fpath).joinpath(split))
+        fpath = str(self.output_dir.joinpath(fpath).joinpath(split))
+        dataset.save_to_disk(fpath)
 
         print(f"Dataset saved to {self.output_dir}")
 

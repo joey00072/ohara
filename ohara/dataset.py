@@ -58,7 +58,7 @@ class PreTokenizedDataset(IterableDataset):
             fpath = str(
                 f"{self.dataset_name.replace('/','-')}--{self.tokenizer.name_or_path.replace('/','-')}"
             )
-            fpath = path.joinpath(fpath).joinpath(split)
+            fpath = str(path.joinpath(fpath).joinpath(split))
 
         self.ds = load_from_disk(fpath)
         self.toks_cycle = cycle(self.ds)
