@@ -13,13 +13,13 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 
-from ohara.models.llama import LLAMA, Config
+from model import GPTLM, Config
 from ohara.lr_scheduler import CosineScheduler
 from ohara.dataset import PreTokenizedDataset
 from ohara.utils import BetterCycle
 
 from ohara.utils import auto_accelerator, random_name, model_summary
-
+from ohara.inference import Inference
 
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
@@ -37,27 +37,28 @@ traceback.install()
 wandb_project_name = "Ohara-LLAMA-Fabric"
 wandb_run_name = random_name()
 
-learning_rate: float = 5e-4
+learning_rate: float = 3e-4
 min_learning_rate: float = 0.0
 
 warmup_iters: int = 1000
-max_iters: int = 100_000
+max_iters: int = 10_000
 total_batch_size = 524288
-batch_size: int = 8
+batch_size: int = 8*2
 micro_batch: int = 4
 eval_iters: int = 100
 save_ckpt_iters: int = 1000
 
-d_model: int = 768 
-seq_len: int = 1024
-num_layers: int = 12
-num_heads: int = 12
+d_model: int = 128
+ffn_hidden_dim:int = 128 *4
+seq_len: int = 256
+num_layers: int = 8
+num_heads: int = 8
 multiple_of: int = 4
 weight_tying = True
 
 assert d_model % num_heads == 0, f"{d_model=} {num_heads=} {d_model%num_heads}"
 
-compile_model = True
+compile_model = False
 compile_mode = "reduce-overhead"
 torch.set_float32_matmul_precision('high') #'medium' 
 
@@ -80,7 +81,7 @@ precision:str = "bf16-mixed"  # "32-true", "16-mixed", "16-true", "bf16-mixed", 
 # for restarting training from last checkout
 resume_traning = False
 
-
+tokenizer = None
 @torch.no_grad()
 def validate(
     fabric: L.Fabric,
@@ -183,6 +184,12 @@ def train(
                     },
                     step=idx,
                 )
+                model = model.eval()
+                
+                pipline = Inference(model=model,tokenizer=tokenizer,device="cuda",use_kv_cache=False,max_tokens=100)
+                text = pipline.generate("the",temperature=1.1, top_p=0.2, stream=True)
+                print(text)
+                model = model.train()
             except Exception as e:
                 print(f"Error logging: {e}")
 
@@ -192,6 +199,7 @@ def train(
 
 
 def main():
+    global tokenizer
     hyper_params = {
         "learning_rate": learning_rate,
         "min_learning_rate": min_learning_rate,
@@ -201,6 +209,7 @@ def main():
         "batch_size": batch_size,
         "micro_batch": micro_batch,
         "d_model": d_model,
+        "ffn_hidden_dim":ffn_hidden_dim,
         "seq_len": seq_len,
         "num_layers": num_layers,
         "num_heads": num_layers,
@@ -224,6 +233,7 @@ def main():
     config = Config(
         vocab_size=tokenizer.vocab_size,
         d_model=d_model,
+        hidden_dim=ffn_hidden_dim,
         seq_len=seq_len,
         num_layers=num_layers,
         num_heads=num_layers,
@@ -248,7 +258,7 @@ def main():
     test_dataloader = DataLoader(test_ds, batch_size=batch_size)
     train_dataloader, test_dataloader = fabric.setup_dataloaders(train_dataloader, test_dataloader)
 
-    model = LLAMA(config)
+    model = GPTLM(config)
     model: L.LightningModule = fabric.setup(model)
 
     if compile_model:
@@ -285,16 +295,10 @@ def main():
     start: float = time.time()
     max_tokens = 200
     model = model.eval()
-    inputs = tokenizer.encode("Once")
-    with torch.no_grad():
-        inputs = torch.tensor(inputs).reshape(1, -1).to(device).clone().detach()
-        for _idx in range(max_tokens):
-            logits = model(inputs)
-            max_logits = torch.argmax(logits, dim=-1)
-            inputs: torch.Tensor = torch.cat((inputs, max_logits[:, -1:]), dim=-1)
-            inputs.shape[1] - 1
-            print(tokenizer.decode(inputs.tolist()[0][-1]), end="", flush=True)
-
+    
+    pipline = Inference(model=model,tokenizer=tokenizer)
+    text = pipline.generate("The cat")
+    print(text)
     end: float = time.time()
 
     print(f"Time: {end-start}")

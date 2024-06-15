@@ -31,8 +31,8 @@ traceback.install()
 
 
 ### CONFIGS
-wandb_project_name = "Ohara-LLAMA"
-wandb_run_name = random_name()
+wandb_project_name = "Ohara_LLAMA"
+wandb_run_name = "xoxoxox" #random_name()
 
 learning_rate: float = 5e-4
 min_learning_rate: float = 0.0
@@ -54,8 +54,13 @@ assert d_model % num_heads == 0
 compile_model = not bool(sys.platform == "darwin")
 
 ### Dataset and Tokenizer
-dataset_name = "roneneldan/TinyStories"  # run pretokeinze first
-tokenizer_name = "microsoft/phi-2"
+# dataset_name = "roneneldan/TinyStories"  # run pretokeinze first
+# tokenizer_name = "microsoft/phi-2"
+
+dataset_name = "JeanKaddour/minipile"  # run pretokeinze first
+tokenizer_name = "EleutherAI/gpt-neo-125m"
+
+
 
 ### Setup
 device = auto_accelerator()  # auto chose device (cuda, mps)

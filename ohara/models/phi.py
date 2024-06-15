@@ -319,7 +319,8 @@ class Phi(nn.Module):
     @staticmethod
     def from_pretrained(name: str) -> nn.Module:
         config = PhiConfig()
-        model = Phi(config)
+        with torch.device("cuda"):
+            model = Phi(config).half()
         # return model
 
         path_name = download_hf_model(name)

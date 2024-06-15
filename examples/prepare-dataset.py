@@ -54,5 +54,5 @@ datasets = {"openhermes": prepare_openhermes_2_5, "tinystories": tinystories, "m
 
 
 if __name__ == "__main__":
-    # minipile()
-    tinystories()
+    minipile()
+    # tinystories()

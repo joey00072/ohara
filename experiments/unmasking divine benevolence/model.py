@@ -4,12 +4,13 @@ import torch.nn.functional as F
 
 import math
 from dataclasses import dataclass
-from ..modules.mlp import SwiGLU
-from ..modules.norm import RMSNorm
+from ohara.modules.mlp import SwiGLU
+from ohara.modules.norm import RMSNorm
 
 from ohara.embedings_pos.rotatry import precompute_freqs_cis
 from ohara.embedings_pos.rotatry import apply_rope
 
+from typing import Callable
 
 @dataclass
 class Config:
@@ -25,6 +26,62 @@ class Config:
     bias: int = False
     weight_tying: bool = False
 
+
+def squared_relu(x):
+    x = F.relu(x)
+    return x**2
+
+MAP = {
+        "silu": F.silu,
+        "relu": F.relu,
+        "squared_relu": squared_relu,
+      }   
+
+class GLU(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int | None = None,
+        dropout: float | None = None,
+        activation:str = "silu",
+        bias: bool = False,
+    ):
+        super().__init__()
+
+        self.w1 = nn.Linear(dim, hidden_dim, bias=bias)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=bias)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=bias)
+        self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
+        
+        self.activation = MAP[activation]
+
+    def forward(self, x):
+        return self.dropout(self.w2(self.activation(self.w1(x)) * self.w3(x)))
+
+
+class MLP(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int | None = None,
+        multiple_of: int = 4,
+        dropout: float | None = None,
+        activation:str = "silu",
+        bias: bool = True,
+    ):
+        super().__init__()
+        self.w1 = nn.Linear(dim, hidden_dim, bias=bias)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=bias)
+        self.activation = MAP[activation]
+
+        self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
+
+    def forward(self, x):
+        x = self.w1(x)
+        x = self.activation_fn(x)
+        x = self.w2(x)
+        x = self.dropout(x)
+        return x
 
 class Attention(nn.Module):
     def __init__(self, model_args: Config):
@@ -123,7 +180,7 @@ class Block(nn.Module):
         return x
 
 
-class LLAMA(nn.Module):
+class GPTLM(nn.Module):
     def __init__(self, model_args: Config, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
