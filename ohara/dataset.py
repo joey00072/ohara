@@ -49,7 +49,7 @@ class PreTokenizedDataset(IterableDataset):
         self.microbatch_size = microbatch_size
         self.vocab_size = len(tokenizer)
         self.min_length = min_length
-        self.max_length = max_length
+        self.max_length = max_length +1
         self.cache_dir = cache_dir
         self.dataset_name = dataset_name
 

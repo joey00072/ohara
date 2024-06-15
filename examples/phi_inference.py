@@ -19,11 +19,11 @@ from ohara.inference import Inference
 kv = True
 device = auto_accelerator()
 
-model_name = "cognitivecomputations/dolphin-2_6-phi-2"
+model_name = "microsoft/phi-2"
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-model: Phi = Phi.from_pretrained(model_name).to(device).eval().to(torch.float16)
+model: Phi = Phi.from_pretrained(model_name).to(device).eval().half()
 
 print(kv)
 kv_cache = model.build_kv_cache() if kv == True else None
