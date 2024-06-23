@@ -10,8 +10,8 @@ from ohara.utils import auto_accelerator
 
 from bitnet import BitLinear, apply_bitlinear
 
-#Linear = nn.Linear
-Linear = BitLinear
+Linear = nn.Linear
+#Linear = BitLinear
 
 class Net(nn.Module):
     def __init__(self):
@@ -152,9 +152,6 @@ def main():
 
     for epoch in range(1, args.epochs + 1):
         train(args, model, device, train_loader, optimizer, epoch)
-        for module in model.named_modules():
-            if isinstance(module,BitLinear):
-                module.bit_mode = "bitlinear"
         test(args, model, device, test_loader)
 
     # if (args.save_model):

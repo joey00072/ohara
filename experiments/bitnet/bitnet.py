@@ -95,6 +95,62 @@ def apply_bitlinear(
     return model
 
 
+
+def wx_quant(w: Tensor) -> tuple[Tensor, Tensor]:
+    scale: Tensor = w.abs().mean(dim=-1,keepdims=True).clamp(min=1e-5)
+    quant: Tensor = (w * (1/scale)).round().clamp(-1, 1) * scale
+    w_quant: Tensor = w + (quant - w).detach()
+    w_quant = w_quant/scale
+    return w_quant, scale.t()
+
+
+class BitX(nn.Linear):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def forward(self, x: Tensor) -> Tensor:
+        w = self.weight
+        x_quant = activation_quant(x)
+        w_quant, scale = wx_quant(w)
+        output = nn.functional.linear(x_quant, w_quant)
+        return output * scale
+
+def _get_bitx(linear: nn.Linear):
+    return BitX(
+        in_features=linear.in_features,
+        out_features=linear.out_features,
+        bias=linear.bias is not None,
+    )
+
+
+def apply_bitx(
+    model: nn.Module,
+    target_layers: list[str] | None = None,
+):
+    if isinstance(model, nn.Linear):
+        return _get_bitx(model)
+
+    if isinstance(model, (nn.Module, nn.ModuleDict)):
+        for key, value in model._modules.items():
+            if isinstance(value, nn.Linear) and (target_layers is None or key in target_layers):
+                model._modules[key] = _get_bitx(value)
+            else:
+                apply_bitx(value)
+
+    if isinstance(model, (nn.ModuleList, nn.Sequential)):
+        for sub_model in model:
+            if isinstance(sub_model, nn.Linear) and (
+                target_layers is None or sub_model in target_layers
+            ):
+                sub_model = _get_bitx(sub_model)
+            else:
+                apply_bitx(sub_model)
+
+    for name, param in model.named_parameters():
+        param.requires_grad = True
+    return model
+
+
 if __name__ == "__main__":
     # Create a sample input tensor of shape (n, d)
     # For example, let n = batch size and d = features dimension

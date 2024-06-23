@@ -31,7 +31,7 @@ import lightning as L
 from lightning.pytorch.loggers import WandbLogger
 from lightning.fabric.loggers import TensorBoardLogger
 
-from bitnet import apply_bitlinear
+from bitnet import apply_bitlinear,apply_bitx
 
 traceback.install()
 
@@ -51,20 +51,22 @@ eval_iters: int = 100
 save_ckpt_iters: int = 1000
 
 multiple_of: int = 4
-d_model: int = 1024 // 4
+d_model: int = 1024 // 8
 hidden_dim = int(d_model * multiple_of)
 seq_len: int = 256
 num_layers: int = 8
 num_heads: int = 8
-
+torch.set_float32_matmul_precision('high')
 
 assert d_model % num_heads == 0
 
-compile_model = not bool(sys.platform == "darwin")
+compile_model = True
+
 
 ### Dataset and Tokenizer
 dataset_name = "roneneldan/TinyStories"  # run pretokeinze first
 tokenizer_name = "microsoft/phi-2"
+
 
 ### Setup
 device = auto_accelerator()  # auto chose device (cuda, mps)
@@ -238,8 +240,10 @@ def main():
 
     model = LLAMA(config)
     target_layers = ["key", "value", "query", "proj", "w1", "w2", "w3"]
-    model = apply_bitlinear(model, target_layers=target_layers)  # comment this to train og llama
+    # model = apply_bitlinear(model, target_layers=target_layers)  # comment this to train og llama
+    model = apply_bitx(model, target_layers=target_layers)
     model: L.LightningModule = fabric.setup(model)
+    
     print("=" * 100)
     if compile_model:
         model = torch.compile(model, mode="max-autotune")

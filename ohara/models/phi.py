@@ -16,6 +16,113 @@ from ohara.utils.load import download_hf_model
 from tqdm import tqdm
 
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+
+from ohara.utils import auto_accelerator, random_name, model_summary
+from torch import Tensor
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-5):
+        super().__init__()
+        """
+        Paper: https://arxiv.org/abs/1910.07467
+        """
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def _norm(self, x: Tensor):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float()).type_as(x)
+        return output * self.weight
+
+
+@torch.jit.script  # jit speedup https://colab.research.google.com/drive/1B_-PfHKzSmuwF3TETx_ZMlFSE5PNcr1k?usp=sharing
+def activation_quant(x: Tensor) -> Tensor:
+    scale: Tensor = 127.0 / x.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-5)
+    y: Tensor = (x * scale).round().clamp(-128, 127) / scale
+    return x + (y - x).detach()
+
+@torch.jit.script
+def xweight_quant(w: Tensor) -> tuple[Tensor, Tensor]:
+    scale: Tensor = 1.0 / w.abs().mean().clamp(min=1e-5)
+    quant: Tensor = (w * scale).round().clamp(-1, 1) / scale
+    w_quant: Tensor = w + (quant - w).detach()
+    scale = abs(w_quant).max().detach()
+    w_quant = w_quant / scale
+    return w_quant, scale
+
+
+def weight_quant(w: Tensor) -> tuple[Tensor, Tensor]:
+    scale: Tensor = w.abs().mean(dim=-1,keepdims=True).clamp(min=1e-5)
+    quant: Tensor = (w * (1/scale)).round().clamp(-1, 1) * scale
+    w_quant: Tensor = w + (quant - w).detach()
+    w_quant = w_quant/scale
+    return w_quant, scale.t()
+
+class BitLinear(nn.Linear):
+    def __init__(self, *args, **kwargs):
+        super(BitLinear, self).__init__(*args, **kwargs)
+        self.rms_norm = RMSNorm(self.in_features)
+        self.bit_mode="bitlinear"
+
+    def forward(self, x: Tensor) -> Tensor:
+        w = self.weight
+        x_norm = x #self.rms_norm(x)
+
+        x_quant = activation_quant(x_norm)
+        w_quant, scale = weight_quant(w)
+        print("AJAHAHAHAH")
+
+        output = nn.functional.linear(x_quant, w_quant)
+        return output * scale
+
+
+def _get_bitlinear(linear: nn.Linear):
+    return BitLinear(
+        in_features=linear.in_features,
+        out_features=linear.out_features,
+        bias=linear.bias is not None,
+    )
+
+
+def apply_bitlinear(
+    model: nn.Module,
+    target_layers: list[str] | None = None,
+):
+    if isinstance(model, nn.Linear):
+        return _get_bitlinear(model)
+
+    if isinstance(model, (nn.Module, nn.ModuleDict)):
+        for key, value in model._modules.items():
+            if isinstance(value, nn.Linear) and (target_layers is None or key in target_layers):
+                model._modules[key] = _get_bitlinear(value)
+            else:
+                apply_bitlinear(value)
+
+    if isinstance(model, (nn.ModuleList, nn.Sequential)):
+        for sub_model in model:
+            if isinstance(sub_model, nn.Linear) and (
+                target_layers is None or sub_model in target_layers
+            ):
+                sub_model = _get_bitlinear(sub_model)
+            else:
+                apply_bitlinear(sub_model)
+
+    for name, param in model.named_parameters():
+        param.requires_grad = True
+    return model
+
+
+
+#==============================
+
+
 @dataclass
 class PhiConfig:
     vocab_size: int = 51200
@@ -135,8 +242,8 @@ def new_gelu(x: Tensor) -> Tensor:
 class MLP(nn.Module):
     def __init__(self, dim, hidden):
         super().__init__()
-        self.fc1 = nn.Linear(dim, hidden)
-        self.fc2 = nn.Linear(hidden, dim)
+        self.fc1 = BitLinear(dim, hidden)
+        self.fc2 = BitLinear(hidden, dim)
 
     def forward(self, x: torch.Tensor):
         x = self.fc1(x)
@@ -160,10 +267,10 @@ class PhiMHA(nn.Module):
         self.head_dim = dim // num_heads
         self.layer_idx = layer_idx
 
-        self.k_proj = nn.Linear(dim, dim)
-        self.q_proj = nn.Linear(dim, dim)
-        self.v_proj = nn.Linear(dim, dim)
-        self.dense = nn.Linear(dim, dim)
+        self.k_proj = BitLinear(dim, dim)
+        self.q_proj = BitLinear(dim, dim)
+        self.v_proj = BitLinear(dim, dim)
+        self.dense = BitLinear(dim, dim)
 
         self.rope = RoPE(int(rotary_dim * self.head_dim), traditional=False)
 
@@ -264,7 +371,7 @@ class Phi(nn.Module):
         self.layers = nn.ModuleList([Block(config, i) for i in range(config.num_layers)])
 
         self.ln = LayerNorm(config.d_model, eps=config.eps)
-        self.lm_head = nn.Linear(config.d_model, config.vocab_size)
+        self.lm_head = BitLinear(config.d_model, config.vocab_size)
         self.loss_fn = nn.CrossEntropyLoss()
 
         mask = torch.full((1, 1, config.seq_len, config.seq_len), float("-inf"))

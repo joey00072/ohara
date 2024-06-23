@@ -36,6 +36,7 @@ print(model)
 print("=" * 100)
 
 infer = Inference(model, tokenizer, device)
+temperature = 1
 
 while True:
     prompt = input("Prompt: ")
@@ -43,4 +44,4 @@ while True:
         continue
     if prompt == "exit":
         break
-    print(infer.generate(prompt, temperature=1.1, top_p=0.2, stream=True))
+    print(infer.generate(prompt, temperature=temperature, stream=True))
