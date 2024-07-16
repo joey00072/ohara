@@ -19,6 +19,7 @@ setup(
         "torch",
         "wandb",
         "rich",
+        "tensorboard",
     ],
     entry_points={
         "console_scripts": [
