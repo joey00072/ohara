@@ -23,7 +23,7 @@ select = [
     "PERF102",
     "UP006", "UP007",
     "FURB148", "FURB163", "FURB181",
-    "ASYNC100", "ASYNC102",
+    "ASYNC100",
     "TID251",
 ]
 ignore = [
