@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from transformers import AutoTokenizer
 from itertools import cycle
-from datasets import load_from_disk
+from datasets import load_from_disk,load_dataset
 
 import torch
 import torch.nn.functional as F
@@ -39,6 +39,7 @@ class PreTokenizedDataset(IterableDataset):
         microbatch_size: int = 32,
         min_length: int = 512,
         max_length: int = 2048,
+        hf=False,
         cache_dir=None,
     ):
         self.tokenizer = tokenizer
@@ -59,8 +60,10 @@ class PreTokenizedDataset(IterableDataset):
                 f"{self.dataset_name.replace('/','-')}--{self.tokenizer.name_or_path.replace('/','-')}"
             )
             fpath = str(path.joinpath(fpath).joinpath(split))
-
-        self.ds = load_from_disk(fpath)
+        if hf:
+            self.ds = load_dataset(dataset_name)
+        else:
+            self.ds = load_from_disk(fpath)
         self.toks_cycle = cycle(self.ds)
 
     def __iter__(self) -> torch.Tensor:

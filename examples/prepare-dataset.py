@@ -25,6 +25,8 @@ def prepare_openhermes_2_5(
 def tinystories(
     dataset="roneneldan/TinyStories",
     tokenizer="microsoft/phi-2",
+    push:bool=False,
+    hf_username:str="joey00072",
 ):
     print(f"Pretokenizing {dataset=} with {tokenizer=}")
     preprocessor = DatasetPreprocessor(
@@ -33,12 +35,14 @@ def tinystories(
         splits=["train", "validation"],
         hf_cache=Path("./hf_cache"),
     )
-    preprocessor.process_and_save()
+    preprocessor.process_and_save(push=push,hf_username=hf_username)
 
 
 def minipile(
     dataset="JeanKaddour/minipile",
     tokenizer="EleutherAI/gpt-neo-125m",
+    push:bool=False,
+    hf_username:str="joey00072",
 ):
     print(f"Pretokenizing {dataset=} with {tokenizer=}")
     preprocessor = DatasetPreprocessor(
@@ -47,12 +51,13 @@ def minipile(
         splits=["train", "validation"],
         hf_cache=Path("./hf_cache"),
     )
-    preprocessor.process_and_save()
+    preprocessor.process_and_save(push=push,hf_username=hf_username)
+    
 
 
 datasets = {"openhermes": prepare_openhermes_2_5, "tinystories": tinystories, "minipile": minipile}
 
 
 if __name__ == "__main__":
-    minipile()
-    # tinystories()
+    minipile(push=True,hf_username="joey00072")
+    # tinystories(push=True,hf_username="joey00072")
