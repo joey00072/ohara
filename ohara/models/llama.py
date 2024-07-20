@@ -167,7 +167,15 @@ class LLAMA(nn.Module):
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            # with torch.no_grad():
+            #     w = module.weight
+            #     norm = w.square().sum(dim=-1,keepdim=True)
+            #     module.weight.data = (w/norm).data * 0.2
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            # with torch.no_grad():
+            #     w = module.weight
+            #     norm = w.square().sum(dim=-1,keepdim=True) 
+            #     module.weight.data = (w/norm).data * 0.2

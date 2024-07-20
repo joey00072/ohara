@@ -61,7 +61,7 @@ class PreTokenizedDataset(IterableDataset):
             )
             fpath = str(path.joinpath(fpath).joinpath(split))
         if hf:
-            self.ds = load_dataset(dataset_name)
+            self.ds = load_dataset(dataset_name)[split]
         else:
             self.ds = load_from_disk(fpath)
         self.toks_cycle = cycle(self.ds)
