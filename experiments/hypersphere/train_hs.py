@@ -30,7 +30,7 @@ from rich import print, traceback
 import lightning as L
 from lightning.pytorch.loggers import WandbLogger
 from lightning.fabric.loggers import TensorBoardLogger
-
+from hs import monkey_patch_model
 
 traceback.install()
 
@@ -199,8 +199,8 @@ def main():
         "save_ckpt_iters": save_ckpt_iters,
     }
     # fabric init
-    # logger = WandbLogger(project=wandb_project_name, resume=resume_traning)
-    logger = TensorBoardLogger(root_dir="./logs", name=wandb_project_name)
+    logger = WandbLogger(project=wandb_project_name, resume=resume_traning)
+    #logger = TensorBoardLogger(root_dir="./logs", name=wandb_project_name)
     fabric = L.Fabric(loggers=[logger],precision="bf16-mixed")
     fabric.logger.log_hyperparams(hyper_params)
 
@@ -235,14 +235,17 @@ def main():
     train_dataloader, test_dataloader = fabric.setup_dataloaders(train_dataloader, test_dataloader)
 
     model = LLAMA(config)
+    target_layers = ["key", "value", "query", "proj","w1","w2","w3"]
+
+    monkey_patch_model(model,target_layers)
     model: L.LightningModule = fabric.setup(model)
     print("=" * 100)
     if compile_model:
         model = torch.compile(model)
     # model.gradient_checkpointing_enable()
+    print(model)
     print(model_summary(model))
     import time
-    time.sleep(100)
     # exit()
     get_lr = CosineScheduler(
         learning_rate=learning_rate,
@@ -289,6 +292,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-        # norm = x.square().sum(dim=-1,keepdim=True)
-        # x = x/norm
