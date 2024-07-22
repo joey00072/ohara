@@ -30,7 +30,7 @@ from rich import print, traceback
 import lightning as L
 from lightning.pytorch.loggers import WandbLogger
 from lightning.fabric.loggers import TensorBoardLogger
-from hs import monkey_patch_model
+from q_sparse import monkey_patch_model
 
 traceback.install()
 
@@ -51,11 +51,11 @@ eval_iters: int = 100
 save_ckpt_iters: int = 1000
 
 multiple_of: int = 4
-d_model: int = 1024 * 2 // 4
+d_model: int = 1024 * 2 // 16
 hidden_dim = int(d_model * multiple_of)
 seq_len: int = 256
-num_layers: int = 32  # 44
-num_heads: int = 32
+num_layers: int = 4#32  # 44
+num_heads: int = 4#32
 
 
 assert d_model % num_heads == 0
@@ -72,6 +72,11 @@ device = auto_accelerator()  # auto chose device (cuda, mps)
 # for restarting training from last checkout
 resume_traning = False
 
+
+### Sparcity
+
+sparsity = 0.7
+K = int(sparsity * d_model)
 
 @torch.no_grad()
 def validate(
@@ -235,8 +240,7 @@ def main():
 
     model = LLAMA(config)
     target_layers = ["key", "value", "query", "proj", "w1", "w2", "w3"]
-
-    monkey_patch_model(model, target_layers)
+    monkey_patch_model(model,K, target_layers)
     model: L.LightningModule = fabric.setup(model)
     print("=" * 100)
     if compile_model:
