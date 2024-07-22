@@ -79,7 +79,7 @@ def apply_bitlinear(
             if isinstance(value, nn.Linear) and (target_layers is None or key in target_layers):
                 model._modules[key] = _get_bitlinear(value)
             else:
-                apply_bitlinear(value)
+                apply_bitlinear(value,target_layers=target_layers)
 
     if isinstance(model, (nn.ModuleList, nn.Sequential)):
         for sub_model in model:
@@ -88,7 +88,7 @@ def apply_bitlinear(
             ):
                 sub_model = _get_bitlinear(sub_model)
             else:
-                apply_bitlinear(sub_model)
+                apply_bitlinear(sub_model,target_layers=target_layers)
 
     for name, param in model.named_parameters():
         param.requires_grad = True
