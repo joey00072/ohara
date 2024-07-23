@@ -52,14 +52,14 @@ eval_iters: int = 100
 save_ckpt_iters: int = 2000
 
 multiple_of: int = 4
-d_model: int = 1024 * 2 // 16
+d_model: int = 1024 * 2 // 4
 hidden_dim = int(d_model * multiple_of)
 seq_len: int = 256
-num_layers: int = 4  # 32  # 44
-num_heads: int = 4  # 32
+num_layers: int =  32  # 44
+num_heads: int =  32
 
 QSPARSE:float|None = None # 0.7
-model_name = f"joey00072/q_sparse_{"Baseline" if QSPARSE is None else str(QSPARSE) }"
+model_name = f"joey00072/q_sparse_{'Baseline' if QSPARSE is None else str(QSPARSE) }"
 
 
 assert d_model % num_heads == 0
