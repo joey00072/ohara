@@ -12,8 +12,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-
-from ohara.models.llama import LLAMA, Config
 from ohara.lr_scheduler import CosineScheduler
 from ohara.dataset import PreTokenizedDataset
 from ohara.utils import BetterCycle
@@ -30,7 +28,10 @@ from rich import print, traceback
 import lightning as L
 from lightning.pytorch.loggers import WandbLogger
 from lightning.fabric.loggers import TensorBoardLogger
+
+from model import ModelingLM, Config
 from q_sparse import monkey_patch_model
+
 
 traceback.install()
 
@@ -45,17 +46,20 @@ min_learning_rate: float = 0.0
 
 warmup_iters: int = 1000
 max_iters: int = 10_000
-batch_size: int = 16
+batch_size: int = 8
 micro_batch: int = 4
 eval_iters: int = 100
-save_ckpt_iters: int = 1000
+save_ckpt_iters: int = 2000
 
 multiple_of: int = 4
 d_model: int = 1024 * 2 // 16
 hidden_dim = int(d_model * multiple_of)
 seq_len: int = 256
-num_layers: int = 4#32  # 44
-num_heads: int = 4#32
+num_layers: int = 4  # 32  # 44
+num_heads: int = 4  # 32
+
+QSPARSE:float|None = None # 0.7
+model_name = f"joey00072/q_sparse_{"Baseline" if QSPARSE is None else str(QSPARSE) }"
 
 
 assert d_model % num_heads == 0
@@ -77,6 +81,7 @@ resume_traning = False
 
 sparsity = 0.7
 K = int(sparsity * d_model)
+
 
 @torch.no_grad()
 def validate(
@@ -180,6 +185,8 @@ def train(
         if idx % save_ckpt_iters == 0:
             state = {"model": model, "optimizer": optimizer, "idx": idx, "lr": lr}
             fabric.save("./ckpt/model.pt", state)
+            model.config.ckpt_iter = idx
+            model.push_to_hub(model_name, commit_message=f"checkpoint iter: {idx}")
 
 
 def main():
@@ -212,11 +219,17 @@ def main():
 
     config = Config(
         vocab_size=tokenizer.vocab_size,
-        d_model=d_model,
         seq_len=seq_len,
+        d_model=d_model,
+        hidden_dim=hidden_dim,
+        num_heads=num_heads,
+        num_kv_heads=0,
         num_layers=num_layers,
-        num_heads=num_layers,
-        multiple_of=multiple_of,
+        dropout=0.2,
+        bias=False,
+        weight_tying=True,
+        activation="relu_squared",
+        mlp="GLU",
     )
 
     train_ds = PreTokenizedDataset(
@@ -238,9 +251,10 @@ def main():
     test_dataloader = DataLoader(test_ds, batch_size=batch_size)
     train_dataloader, test_dataloader = fabric.setup_dataloaders(train_dataloader, test_dataloader)
 
-    model = LLAMA(config)
-    target_layers = ["key", "value", "query", "proj", "w1", "w2", "w3"]
-    monkey_patch_model(model,K, target_layers)
+    model = ModelingLM(config)
+    if QSPARSE is not None:
+        target_layers = ["key", "value", "query", "proj", "w1", "w2", "w3"]
+        monkey_patch_model(model, target_layers, pct=QSPARSE)
     model: L.LightningModule = fabric.setup(model)
     print("=" * 100)
     if compile_model:
@@ -250,7 +264,6 @@ def main():
     print(model_summary(model))
     import time
 
-    # exit()
     get_lr = CosineScheduler(
         learning_rate=learning_rate,
         min_lr=min_learning_rate,
