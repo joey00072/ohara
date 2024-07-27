@@ -210,8 +210,8 @@ def main():
         "ffn": MLP,
     }
     # fabric init
-    # logger = WandbLogger(project=wandb_project_name, resume=resume_traning)
-    logger = TensorBoardLogger(root_dir="./logs", name=wandb_project_name)
+    logger = WandbLogger(project=wandb_project_name, resume=resume_traning)
+    # logger = TensorBoardLogger(root_dir="./logs", name=wandb_project_name)
     fabric = L.Fabric(loggers=[logger], precision="bf16-mixed")
     fabric.logger.log_hyperparams(hyper_params)
 
