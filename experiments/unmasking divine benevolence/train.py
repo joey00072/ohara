@@ -30,6 +30,7 @@ from rich import print, traceback
 import lightning as L
 from lightning.pytorch.loggers import WandbLogger
 from lightning.fabric.loggers import TensorBoardLogger
+
 traceback.install()
 
 
@@ -43,13 +44,13 @@ min_learning_rate: float = 0.0
 warmup_iters: int = 1000
 max_iters: int = 10_000
 total_batch_size = 524288
-batch_size: int = 8*2
+batch_size: int = 8 * 2
 micro_batch: int = 4
 eval_iters: int = 100
 save_ckpt_iters: int = 1000
 
 d_model: int = 128
-ffn_hidden_dim:int = 128 *4
+ffn_hidden_dim: int = 128 * 4
 seq_len: int = 256
 num_layers: int = 8
 num_heads: int = 8
@@ -60,7 +61,7 @@ assert d_model % num_heads == 0, f"{d_model=} {num_heads=} {d_model%num_heads}"
 
 compile_model = False
 compile_mode = "reduce-overhead"
-torch.set_float32_matmul_precision('high') #'medium' 
+torch.set_float32_matmul_precision("high")  #'medium'
 
 ### Dataset and Tokenizer
 # dataset_name = "roneneldan/TinyStories"  # run pretokeinze first
@@ -76,12 +77,14 @@ device = auto_accelerator()  # auto chose device (cuda, mps)
 
 # fabric
 strategy: str = "auto"
-precision:str = "bf16-mixed"  # "32-true", "16-mixed", "16-true", "bf16-mixed", "bf16-true"
+precision: str = "bf16-mixed"  # "32-true", "16-mixed", "16-true", "bf16-mixed", "bf16-true"
 
 # for restarting training from last checkout
 resume_traning = False
 
 tokenizer = None
+
+
 @torch.no_grad()
 def validate(
     fabric: L.Fabric,
@@ -185,9 +188,15 @@ def train(
                     step=idx,
                 )
                 model = model.eval()
-                
-                pipline = Inference(model=model,tokenizer=tokenizer,device="cuda",use_kv_cache=False,max_tokens=100)
-                text = pipline.generate("the",temperature=1.1, top_p=0.2, stream=True)
+
+                pipline = Inference(
+                    model=model,
+                    tokenizer=tokenizer,
+                    device="cuda",
+                    use_kv_cache=False,
+                    max_tokens=100,
+                )
+                text = pipline.generate("the", temperature=1.1, top_p=0.2, stream=True)
                 print(text)
                 model = model.train()
             except Exception as e:
@@ -209,7 +218,7 @@ def main():
         "batch_size": batch_size,
         "micro_batch": micro_batch,
         "d_model": d_model,
-        "ffn_hidden_dim":ffn_hidden_dim,
+        "ffn_hidden_dim": ffn_hidden_dim,
         "seq_len": seq_len,
         "num_layers": num_layers,
         "num_heads": num_layers,
@@ -262,7 +271,7 @@ def main():
     model: L.LightningModule = fabric.setup(model)
 
     if compile_model:
-        model = torch.compile(model,mode=compile_mode)
+        model = torch.compile(model, mode=compile_mode)
 
     print(model)
     print(model_summary(model))
@@ -295,8 +304,8 @@ def main():
     start: float = time.time()
     max_tokens = 200
     model = model.eval()
-    
-    pipline = Inference(model=model,tokenizer=tokenizer)
+
+    pipline = Inference(model=model, tokenizer=tokenizer)
     text = pipline.generate("The cat")
     print(text)
     end: float = time.time()

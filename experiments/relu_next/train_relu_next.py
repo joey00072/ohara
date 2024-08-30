@@ -164,18 +164,18 @@ def train(
         )
 
         log_dict = {
-                "traning_loss": micro_batch_loss,
-                # "test_loss": val_loss,
-                "iter": idx,
-                "tokens": idx * tokerns_per_iter,
-                "lr": lr,
-                "time": elapsed_time,
-            }
+            "traning_loss": micro_batch_loss,
+            # "test_loss": val_loss,
+            "iter": idx,
+            "tokens": idx * tokerns_per_iter,
+            "lr": lr,
+            "time": elapsed_time,
+        }
 
         if idx % eval_iters == 0:
             val_loss = validate(fabric, model, val_dataloader, 5, device=device)
             log_dict["test_loss"] = val_loss
-            
+
         fabric.log_dict(
             log_dict,
             step=idx,

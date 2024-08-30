@@ -16,6 +16,7 @@ from huggingface_hub import PyTorchModelHubMixin
 
 from collections import OrderedDict
 
+
 @dataclass
 class Config(OrderedDict):
     vocab_size: int
@@ -25,16 +26,16 @@ class Config(OrderedDict):
     hidden_dim: int
 
     num_heads: int
-    num_kv_heads:int = 0
+    num_kv_heads: int = 0
 
-    num_layers:int = 4
+    num_layers: int = 4
 
-    dropout:float = 0.2
-    bias:bool = False
-    weight_tying:bool = False
+    dropout: float = 0.2
+    bias: bool = False
+    weight_tying: bool = False
 
-    activation:Callable = "silu" # "relu", "gelu", "silu" etc
-    mlp:str = "GLU"  # MLP or GLU
+    activation: Callable = "silu"  # "relu", "gelu", "silu" etc
+    mlp: str = "GLU"  # MLP or GLU
 
 
 MLP_BLOCK = {"MLP": MLP, "GLU": GLU}
@@ -216,11 +217,11 @@ if __name__ == "__main__":
 
     model = ModelingLM(config).eval()
     print(model)
-    hf_name ="joey00072/test_001"
+    hf_name = "joey00072/test_001"
     model.push_to_hub(hf_name)
-    x = torch.arange(10).reshape(1,10)
+    x = torch.arange(10).reshape(1, 10)
     print(model(x).sum(dim=-1))
     new_model = ModelingLM.from_pretrained(hf_name).eval()
     print(new_model(x).sum(dim=-1))
-    
+
     # assert torch.isclose(model.model.vocab_proj.weight, new_model.model.vocab_proj.weight)

@@ -78,20 +78,19 @@ class DatasetPreprocessor:
         dataset.save_to_disk(fpath)
 
         print(f"Dataset saved to {self.output_dir}")
-    
-    def push_pre_tokenized_dataset(self, dataset,split,hf_username):
+
+    def push_pre_tokenized_dataset(self, dataset, split, hf_username):
         if not self.output_dir.exists():
             self.output_dir.mkdir(parents=True, exist_ok=True)
         fpath = str(
             f"{hf_username}/pretokenized__{self.dataset_name.replace('/','_')}__{self.tokenizer.name_or_path.replace('/','__')}"
         )
         # fpath = str(self.output_dir.joinpath(fpath).joinpath(split))
-        dataset.push_to_hub(fpath,split=split)
+        dataset.push_to_hub(fpath, split=split)
 
         print(f"Dataset Pused to hf {fpath}")
 
-
-    def process_and_save(self, remove_columns=None,push=False,hf_username=None):
+    def process_and_save(self, remove_columns=None, push=False, hf_username=None):
         if remove_columns is None:
             remove_columns = ["text"]
         for split in self.splits:
@@ -102,9 +101,7 @@ class DatasetPreprocessor:
             print(f"{split} Processing and saving completed.")
             if push:
                 assert hf_username is not None
-                self.push_pre_tokenized_dataset(tokenized_dataset,split,hf_username)
-                
-                
+                self.push_pre_tokenized_dataset(tokenized_dataset, split, hf_username)
 
 
 class OpenHermesDatasetPreprocessor(DatasetPreprocessor):

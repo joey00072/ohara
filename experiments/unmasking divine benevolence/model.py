@@ -12,6 +12,7 @@ from ohara.embedings_pos.rotatry import apply_rope
 
 from typing import Callable
 
+
 @dataclass
 class Config:
     vocab_size: int = 65
@@ -31,11 +32,13 @@ def squared_relu(x):
     x = F.relu(x)
     return x**2
 
+
 MAP = {
-        "silu": F.silu,
-        "relu": F.relu,
-        "squared_relu": squared_relu,
-      }   
+    "silu": F.silu,
+    "relu": F.relu,
+    "squared_relu": squared_relu,
+}
+
 
 class GLU(nn.Module):
     def __init__(
@@ -43,7 +46,7 @@ class GLU(nn.Module):
         dim: int,
         hidden_dim: int | None = None,
         dropout: float | None = None,
-        activation:str = "silu",
+        activation: str = "silu",
         bias: bool = False,
     ):
         super().__init__()
@@ -52,7 +55,7 @@ class GLU(nn.Module):
         self.w2 = nn.Linear(hidden_dim, dim, bias=bias)
         self.w3 = nn.Linear(dim, hidden_dim, bias=bias)
         self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
-        
+
         self.activation = MAP[activation]
 
     def forward(self, x):
@@ -66,7 +69,7 @@ class MLP(nn.Module):
         hidden_dim: int | None = None,
         multiple_of: int = 4,
         dropout: float | None = None,
-        activation:str = "silu",
+        activation: str = "silu",
         bias: bool = True,
     ):
         super().__init__()
@@ -82,6 +85,7 @@ class MLP(nn.Module):
         x = self.w2(x)
         x = self.dropout(x)
         return x
+
 
 class Attention(nn.Module):
     def __init__(self, model_args: Config):
@@ -99,7 +103,7 @@ class Attention(nn.Module):
         self.query = nn.Linear(d_model, self.head_dim * self.num_kv_heads)
         self.value = nn.Linear(d_model, self.head_dim * self.num_kv_heads)
         self.proj = nn.Linear(d_model, d_model, model_args.bias)
-            
+
         self.attn_dropout = nn.Dropout(model_args.dropout)
         self.res_dropout = nn.Dropout(model_args.dropout)
 
@@ -196,11 +200,11 @@ class GPTLM(nn.Module):
         if model_args.weight_tying:
             self.token_emb.weight = self.vocab_proj.weight
 
-        cos,isin = precompute_freqs_cis(
+        cos, isin = precompute_freqs_cis(
             model_args.d_model // model_args.num_heads, model_args.seq_len * 2
         )
-        self.register_buffer("freq_cos",cos)
-        self.register_buffer("freq_sin",isin)
+        self.register_buffer("freq_cos", cos)
+        self.register_buffer("freq_sin", isin)
 
         if not hasattr(torch.nn.functional, "scaled_dot_product_attention"):
             print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
@@ -217,7 +221,7 @@ class GPTLM(nn.Module):
         x = self.token_emb(x)
         device = self.token_emb.weight.device
         freqs_cis = self.freq_cos[:seqlen], self.freq_sin[:seqlen]
-        
+
         for layer in self.layers:
             x = layer(x, self.mask, freqs_cis)
 
