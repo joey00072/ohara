@@ -4,6 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from collections.abc import Callable
 from ohara.modules.activations import ACT2FN
+
+
 class SwiGLU(nn.Module):
     def __init__(
         self,
@@ -16,8 +18,6 @@ class SwiGLU(nn.Module):
         """
         GLU Variants Improve Transformer
         https://arxiv.org/abs/2002.05202v1
-
-        order in which W1,W2,W3 are multiplied is as per llama (for compatiblity)
         """
         super().__init__()
 
@@ -26,13 +26,13 @@ class SwiGLU(nn.Module):
             hidden_dim = int(2 * hidden_dim / 3)
             hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = nn.Linear(dim, hidden_dim, bias=bias)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=bias)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=bias)
+        self.up = nn.Linear(dim, hidden_dim, bias=bias)
+        self.down = nn.Linear(hidden_dim, dim, bias=bias)
+        self.gate = nn.Linear(dim, hidden_dim, bias=bias)
         self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
 
     def forward(self, x):
-        return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
+        return self.dropout(self.down(F.silu(self.gate(x)) * self.up(x)))
 
 
 class MLP(nn.Module):
@@ -54,7 +54,7 @@ class MLP(nn.Module):
 
         self.up = nn.Linear(dim, hidden_dim, bias=bias)
         self.down = nn.Linear(hidden_dim, dim, bias=bias)
-        self.activation_fn = ACT2FN[activation_fn] 
+        self.activation_fn = ACT2FN[activation_fn]
 
         self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
 

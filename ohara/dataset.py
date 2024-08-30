@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from transformers import AutoTokenizer
 from itertools import cycle
-from datasets import load_from_disk,load_dataset
+from datasets import load_from_disk, load_dataset
 
 import torch
 import torch.nn.functional as F
@@ -50,7 +50,7 @@ class PreTokenizedDataset(IterableDataset):
         self.microbatch_size = microbatch_size
         self.vocab_size = len(tokenizer)
         self.min_length = min_length
-        self.max_length = max_length +1
+        self.max_length = max_length + 1
         self.cache_dir = cache_dir
         self.dataset_name = dataset_name
 

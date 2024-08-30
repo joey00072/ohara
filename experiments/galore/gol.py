@@ -3,6 +3,7 @@ import os
 import random
 import matplotlib.pyplot as plt
 
+
 class GameOfLife:
     def __init__(self, grid_size=6, live_probability=0.2):
         self.grid_size = grid_size
@@ -10,10 +11,13 @@ class GameOfLife:
         self.grid = self.random_grid()
 
     def random_grid(self):
-        return [[1 if random.random() < self.live_probability else 0 for _ in range(self.grid_size)] for _ in range(self.grid_size)]
+        return [
+            [1 if random.random() < self.live_probability else 0 for _ in range(self.grid_size)]
+            for _ in range(self.grid_size)
+        ]
 
     def print_grid(self):
-        os.system('cls' if os.name == 'nt' else 'clear')
+        os.system("cls" if os.name == "nt" else "clear")
         print(self.get_board())
 
     def next_generation(self):
@@ -41,7 +45,7 @@ class GameOfLife:
         self.grid = self.random_grid()
 
     def get_board(self):
-        return '\n'.join(' '.join('*' if cell else '.' for cell in row) for row in self.grid)
+        return "\n".join(" ".join("*" if cell else "." for cell in row) for row in self.grid)
 
     def run(self):
         while True:
@@ -49,14 +53,15 @@ class GameOfLife:
             self.next_generation()
             time.sleep(0.1)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     grid_size = 10
     p = 0.4  # Set the initial probability for cells being alive
     game = GameOfLife(grid_size=grid_size, live_probability=p)
     game.reinit(p=0.4)
     plst = []
     NUM_GAMES = 1000
-    for p_idx in range(1,20):
+    for p_idx in range(1, 20):
         p = 0.05 * p_idx
         tot = 0
         for _ in range(NUM_GAMES):
@@ -66,7 +71,7 @@ if __name__ == '__main__':
                 # os.system('cls' if os.name == 'nt' else 'clear')
                 state = game.get_board()
                 # print(state)
-                
+
                 game.next_generation()
                 if state in lst:
                     lst.append(state)
@@ -75,10 +80,10 @@ if __name__ == '__main__':
                 # time.sleep(0.1)
             # print(lst)
             tot += len(lst)
-        print(p_idx,tot/NUM_GAMES)
-        if p_idx%10 == 0:
+        print(p_idx, tot / NUM_GAMES)
+        if p_idx % 10 == 0:
             time.sleep(1)
-        plst.append(tot/NUM_GAMES)
+        plst.append(tot / NUM_GAMES)
     print(plst)
     plt.plot(plst)
     plt.show()

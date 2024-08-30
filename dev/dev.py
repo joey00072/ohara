@@ -1,205 +1,231 @@
-from __future__ import print_function
-import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
-from torchvision import datasets, transforms
+
+import math
+from dataclasses import dataclass
+from ohara.modules.mlp import GLU, MLP
+from ohara.modules.norm import RMSNorm
+
+from ohara.embedings_pos.rotatry import precompute_freqs_cis
+from ohara.embedings_pos.rotatry import apply_rope
+
+from typing import Callable
+
+from huggingface_hub import PyTorchModelHubMixin
+
+from collections import OrderedDict
+
+import lightning as L
 
 
-class ReGLU(nn.Module):
-    def __init__(self, dim, hidden_dim) -> None:
+@dataclass
+class Config(OrderedDict):
+    vocab_size: int
+    seq_len: int
+
+    d_model: int
+    hidden_dim: int
+
+    num_heads: int
+    num_kv_heads: int = 0
+
+    num_layers: int = 4
+
+    dropout: float = 0.2
+    bias: bool = False
+    weight_tying: bool = False
+
+    activation: Callable = "silu"  # "relu", "gelu", "silu" etc
+    mlp: str = "GLU"  # MLP or GLU
+
+    exp: int = 2
+
+
+MLP_BLOCK = {"MLP": MLP, "GLU": GLU}
+
+
+class Attention(nn.Module):
+    def __init__(self, config: Config):
         super().__init__()
-        self.dim = dim
-        self.hidden_dim = hidden_dim
 
-        self.up = nn.Linear(dim, hidden_dim)
-        self.gate = nn.Linear(dim, hidden_dim)
-        self.down = nn.Linear(hidden_dim, dim)
+        d_model = config.d_model
+        self.num_heads = config.num_heads
+        self.head_dim = config.d_model // config.num_heads
+        self.num_kv_heads = config.num_heads if config.num_kv_heads == 0 else config.num_kv_heads
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-    def init(self):
-        torch.nn.init.xavier_uniform_(self.up.weight)
-        torch.nn.init.xavier_uniform_(self.down.weight)
+        self.key = nn.Linear(config.exp * d_model, self.head_dim * self.num_heads, config.bias)
+        self.query = nn.Linear(config.exp * d_model, self.head_dim * self.num_kv_heads, config.bias)
+        self.value = nn.Linear(config.exp * d_model, self.head_dim * self.num_kv_heads, config.bias)
+        self.proj = nn.Linear(d_model, d_model * config.exp, config.bias)
 
-    def forward(self, x):
-        return self.down(F.relu(self.gate(x)) * self.up(x))
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.res_dropout = nn.Dropout(config.dropout)
+
+        self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor, freqs_cis) -> torch.Tensor:
+        batch, seq_len, d_model = x.shape
+
+        k: torch.Tensor  # type hint for lsp
+        q: torch.Tensor  # ignore
+        v: torch.Tensor
+
+        k = self.key(x)
+        q = self.query(x)
+        v = self.value(x)
+
+        k = k.view(
+            batch, seq_len, self.num_heads, self.head_dim
+        )  # shape = (B, seq_len, num_heads, head_dim)
+        q = q.view(batch, seq_len, self.num_heads, self.head_dim)
+        v = v.view(batch, seq_len, self.num_heads, self.head_dim)
+
+        q, k = apply_rope(q, k, freqs_cis)
+
+        # Grouped Query Attention
+        if self.num_kv_heads != self.num_heads:
+            k = torch.repeat_interleave(k, self.num_queries_per_kv, dim=2)
+            v = torch.repeat_interleave(v, self.num_queries_per_kv, dim=2)
+
+        k = k.transpose(1, 2)  # shape = (B, num_heads, seq_len, head_dim)
+        q = q.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        if self.flash_attn:
+            output = torch.nn.functional.scaled_dot_product_attention(
+                q,
+                k,
+                v,  # order impotent
+                attn_mask=None,
+                dropout_p=self.attn_dropout.p if self.training else 0.0,
+                is_causal=True,
+            )
+        else:
+            attn_mtx = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
+            attn_mtx = attn_mtx + mask[:, :, :seq_len, :seq_len]
+            attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(k)
+            attn_mtx = self.attn_dropout(attn_mtx)
+
+            output = torch.matmul(attn_mtx, v)  # (batch, n_head, seq_len, head_dim)
+
+        # restore time as batch dimension and concat heads
+        output = output.transpose(1, 2).contiguous().view(batch, seq_len, d_model)
+
+        # final projection into the residual stream
+        output = self.proj(output)
+        output = self.res_dropout(output)
+        return output
 
 
-class SwiGLU(nn.Module):
-    def __init__(self, dim, hidden_dim) -> None:
+class Block(nn.Module):
+    def __init__(self, config: Config):
         super().__init__()
-        self.dim = dim
-        self.hidden_dim = hidden_dim
 
-        self.up = nn.Linear(dim, hidden_dim)
-        self.gate = nn.Linear(dim, hidden_dim)
-        self.down = nn.Linear(hidden_dim, dim)
-
-    def init(self):
-        torch.nn.init.xavier_uniform_(self.up.weight)
-        torch.nn.init.xavier_uniform_(self.down.weight)
-
-    def forward(self, x):
-        return self.down(F.silu(self.gate(x)) * self.up(x))
-
-
-class MLP(nn.Module):
-    def __init__(self, dim, hidden_dim) -> None:
-        super().__init__()
-        self.dim = dim
-        self.hidden_dim = hidden_dim
-
-        self.up = nn.Linear(dim, hidden_dim)
-        self.down = nn.Linear(hidden_dim, dim)
-        self.init()
-
-    def init(self):
-        torch.nn.init.xavier_uniform_(self.up.weight)
-        torch.nn.init.xavier_uniform_(self.down.weight)
-
-    def forward(self, x):
-        return self.down(F.relu(self.up(x)))
-
-
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        PREV = 100
-        LATENT = 2
-        HIDDEN = 3
-        self.fc1 = nn.Linear(28 * 28, PREV)
-        self.fc2 = nn.Linear(PREV, LATENT)
-        self.proj = nn.Linear(LATENT, LATENT)
-        self.block = MLP(LATENT, HIDDEN)
-        print(f"{self.block.__class__.__name__}")
-        self.fc3 = nn.Linear(LATENT, 10)
-
-        self.ln = nn.LayerNorm(LATENT)
-
-    def forward(self, x):
-        x = x.view(-1, 28 * 28)
-        x = F.tanh(self.fc1(x))
-        x = self.fc2(x)
-        res = F.tanh(self.proj(x))
-        x = self.ln(x)
-        x = self.block(x)
-        x = x + res
-        x = self.fc3(x)
-        return F.log_softmax(x, dim=1)
-
-
-def train(model, device, train_loader, optimizer, epoch, log_interval):
-    model.train()
-    for batch_idx, (data, target) in enumerate(train_loader):
-        data, target = data.to(device), target.to(device)
-        optimizer.zero_grad()
-        output = model(data)
-        loss = F.nll_loss(output, target)
-        loss.backward()
-        optimizer.step()
-        # if batch_idx % log_interval == 0:
-        #     print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-        #         epoch, batch_idx * len(data), len(train_loader.dataset),
-        #         100. * batch_idx / len(train_loader), loss.item()))
-
-
-def test(model, device, test_loader):
-    model.eval()
-    test_loss = 0
-    correct = 0
-    with torch.no_grad():
-        for data, target in test_loader:
-            data, target = data.to(device), target.to(device)
-            output = model(data)
-            test_loss += F.nll_loss(output, target, reduction="sum").item()  # sum up batch loss
-            pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
-            correct += pred.eq(target.view_as(pred)).sum().item()
-
-    test_loss /= len(test_loader.dataset)
-
-    print(
-        "Test set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)".format(
-            test_loss, correct, len(test_loader.dataset), 100.0 * correct / len(test_loader.dataset)
+        self.attn = Attention(config)
+        self.ff = MLP_BLOCK[config.mlp](
+            dim=config.d_model,
+            hidden_dim=config.hidden_dim,
+            dropout=config.dropout,
+            bias=config.bias,
         )
-    )
+
+        self.norm1 = RMSNorm(config.d_model)
+        self.norm2 = RMSNorm(config.d_model)
+
+    def forward(self, x, mask, freqs_cis):
+        x = x + self.attn(self.norm1(x), mask, freqs_cis)
+        x = x + self.ff(self.norm2(x))
+        return x
 
 
-def main():
-    # Training settings
-    # parser = argparse.ArgumentParser(description='PyTorch MNIST Example')
-    # parser.add_argument('--batch-size', type=int, default=64, metavar='N',
-    #                     help='input batch size for training (default: 64)')
-    # parser.add_argument('--test-batch-size', type=int, default=1000, metavar='N',
-    #                     help='input batch size for testing (default: 1000)')
-    # parser.add_argument('--epochs', type=int, default=10, metavar='N',
-    #                     help='number of epochs to train (default: 10)')
-    # parser.add_argument('--lr', type=float, default=0.01, metavar='LR',
-    #                     help='learning rate (default: 0.01)')
-    # parser.add_argument('--momentum', type=float, default=0.5, metavar='M',
-    #                     help='SGD momentum (default: 0.5)')
-    # parser.add_argument('--no-cuda', action='store_true', default=False,
-    #                     help='disables CUDA training')
-    # parser.add_argument('--seed', type=int, default=1, metavar='S',
-    #                     help='random seed (default: 1)')
-    # parser.add_argument('--log-interval', type=int, default=10, metavar='N',
-    #                     help='how many batches to wait before logging training status')
+class Transformer(nn.Module):
+    def __init__(self, config: Config, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
 
-    # parser.add_argument('--save-model', action='store_true', default=False,
-    #                     help='For Saving the current Model')
-    # args = parser.parse_args()
+        self.config = config
 
-    seed = 42
-    batch_size = 128
-    test_batch_size = 1000
-    epochs = 10
-    lr = 0.01
-    momentum = 0.5
-    log_interval = 10
-    save_model = False
+        self.token_emb = nn.Embedding(config.vocab_size, config.d_model)
 
-    use_cuda = True
+        self.layers = nn.ModuleList([Block(config) for _ in range(config.num_layers)])
 
-    torch.manual_seed(seed)
+        self.norm = RMSNorm(config.d_model)
+        self.vocab_proj = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
-    device = torch.device("cuda")
+        if config.weight_tying:
+            self.token_emb.weight = self.vocab_proj.weight
 
-    kwargs = {"num_workers": 1, "pin_memory": True} if use_cuda else {}
-    train_loader = torch.utils.data.DataLoader(
-        datasets.MNIST(
-            "../data",
-            train=True,
-            download=True,
-            transform=transforms.Compose(
-                [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
-            ),
-        ),
-        batch_size=batch_size,
-        shuffle=True,
-        **kwargs,
-    )
-    test_loader = torch.utils.data.DataLoader(
-        datasets.MNIST(
-            "../data",
-            train=False,
-            transform=transforms.Compose(
-                [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
-            ),
-        ),
-        batch_size=test_batch_size,
-        shuffle=True,
-        **kwargs,
-    )
+        cos, isin = precompute_freqs_cis(config.d_model // config.num_heads, config.seq_len * 2)
+        self.register_buffer("freq_cos", cos)
+        self.register_buffer("freq_sin", isin)
 
-    model = Net().to(device)
-    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=momentum)
+        if not hasattr(torch.nn.functional, "scaled_dot_product_attention"):
+            print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
+            mask = torch.full((1, 1, config.seq_len, config.seq_len), float("-inf"))
+            mask = torch.triu(mask, diagonal=1)
+            self.register_buffer("mask", mask)
+        else:
+            self.mask = None
 
-    for epoch in range(1, epochs + 1):
-        train(model, device, train_loader, optimizer, epoch, log_interval)
-        test(model, device, test_loader)
+        self.apply(self._init_weights)
 
-    if save_model:
-        torch.save(model.state_dict(), "mnist_cnn.pt")
+    def forward(self, x: torch.Tensor):
+        batch, seqlen = x.shape
+        x = self.token_emb(x)
+        device = self.token_emb.weight.device
+        freqs_cis = self.freq_cos[:seqlen], self.freq_sin[:seqlen]
+
+        for layer in self.layers:
+            x = layer(x, self.mask, freqs_cis)
+
+        x = self.norm(x)
+        x = self.vocab_proj(x)
+        return x
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+
+class ModelingLM(nn.Module, PyTorchModelHubMixin):
+    def __init__(self, config: Config, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.config = config
+        self.model = Transformer(self.config)
+
+    def forward(self, x: torch.Tensor):
+        return self.model(x)
 
 
 if __name__ == "__main__":
-    main()
+    config = Config(
+        vocab_size=10,
+        seq_len=10,
+        d_model=128,
+        hidden_dim=128,
+        num_heads=4,
+        num_kv_heads=0,
+        num_layers=4,
+        dropout=0.2,
+        bias=False,
+        weight_tying=False,
+        activation="silu",
+        mlp="GLU",
+    )
+
+    model = ModelingLM(config).eval()
+    print(model)
+    hf_name = "joey00072/test_001"
+    model.push_to_hub(hf_name)
+    x = torch.arange(10).reshape(1, 10)
+    print(model(x).sum(dim=-1))
+    new_model = ModelingLM.from_pretrained(hf_name).eval()
+    print(new_model(x).sum(dim=-1))
+
+    # assert torch.isclose(model.model.vocab_proj.weight, new_model.model.vocab_proj.weight)

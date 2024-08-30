@@ -12,8 +12,6 @@ from ohara.modules.norm import RMSNorm
 from ohara.embedings_pos.rotatry import precompute_freqs_cis
 
 
-
-
 from huggingface_hub import PyTorchModelHubMixin
 import lightning as L
 
@@ -37,9 +35,10 @@ class Config(llama.Config):
     sliding_window_attention = False
     window_size: int = 128
     weight_tying: bool = True
-    
+
     def items(self):
         return self.__dict__.items()
+
 
 class Block(nn.Module):
     def __init__(self, cfg: Config):
@@ -85,10 +84,10 @@ class MoD(nn.Module):
         self.transformer_decoder_block = Block(cfg)
         self.router = nn.Linear(self.dim, 1, bias=False)
         self.aux_router = nn.Sequential(
-                            nn.Linear(self.dim,self.dim//2),
-                            nn.SiLU(),
-                            nn.Linear(self.dim//2,1),
-                            )
+            nn.Linear(self.dim, self.dim // 2),
+            nn.SiLU(),
+            nn.Linear(self.dim // 2, 1),
+        )
 
     def forward(
         self, x: Tensor, mask, freqs_cis, mode="train", auxiliary_loss=False, *args, **kwargs
@@ -128,7 +127,9 @@ class MoD(nn.Module):
         # I tried replacing it with sigmoid and too my surprise it "works"
         # I suspect author did not use it because they are using jax, jax does funny things
         # ...
-        token_weights = F.softmax(token_weights, dim=1) # <<<== use this if you want execact paper replication
+        token_weights = F.softmax(
+            token_weights, dim=1
+        )  # <<<== use this if you want execact paper replication
         # token_weights = F.sigmoid(token_weights)
         r_weights = torch.gather(token_weights, dim=1, index=index)
 
@@ -163,9 +164,9 @@ class MoD(nn.Module):
 
     def inference(self, x: Tensor, *args, **kwargs):
         batch_size, seq_len, dim = x.shape
-        top_k = int(seq_len * self.capacity_factor) 
+        top_k = int(seq_len * self.capacity_factor)
 
-        router_logits = self.router(x)  
+        router_logits = self.router(x)
         assert False, "TODO: will implement inference soon"
 
 
@@ -245,5 +246,3 @@ class ModelingMixtureOfDepth(PyTorchModelHubMixin, L.LightningModule):
             return self.model.inference(x)
         else:
             return self.model(x, **kwargs)
-
-

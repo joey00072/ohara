@@ -3,7 +3,8 @@ import torch.nn.functional as F
 
 
 def relu_squared(x):
-    return torch.relu(x)**2
+    return torch.relu(x) ** 2
+
 
 ACT2FN = {
     "relu": F.relu,

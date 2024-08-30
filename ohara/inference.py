@@ -14,7 +14,7 @@ class Inference:
         self,
         model: nn.Module,
         tokenizer: AutoTokenizer,
-        device: str=None,
+        device: str = None,
         temperature: float = 1.0,
         top_p: float = 0.0,
         max_tokens: int = 500,
@@ -35,7 +35,6 @@ class Inference:
             self.device = torch.device("cpu")
             if torch.cuda.is_available():
                 self.device = torch.device("cuda")
-            
 
     @staticmethod
     @torch.inference_mode()
@@ -75,7 +74,7 @@ class Inference:
             top_p = self.default_top_p
         if hasattr(self.model, "build_kv_cache"):
             self.kv_cache = self.model.build_kv_cache()
-        else: 
+        else:
             self.kv_cache = None
         device = torch.device("cuda")
         inputs = self.tokenizer.encode(prompt)

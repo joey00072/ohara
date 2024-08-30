@@ -146,7 +146,7 @@ class AdamW(Optimizer):
         if closure is not None:
             loss = closure()
 
-        p:Tensor
+        p: Tensor
         for group in self.param_groups:
             for p in group["params"]:
                 if p.grad is None:

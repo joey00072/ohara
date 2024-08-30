@@ -4,11 +4,13 @@ import torch.nn.functional as F
 
 import math
 from dataclasses import dataclass
-from ..modules.mlp import SwiGLU
-from ..modules.norm import RMSNorm
-
 from ohara.embedings_pos.rotatry import precompute_freqs_cis
 from ohara.embedings_pos.rotatry import apply_rope
+from ohara.modules.mlp import SwiGLU, ACT2FN
+from ohara.modules.norm import RMSNorm
+
+from torch import Tensor
+from huggingface_hub import PyTorchModelHubMixin
 
 
 @dataclass
@@ -171,3 +173,17 @@ class LLAMA(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+
+
+class ModelingLM(nn.Module,PyTorchModelHubMixin):
+    def __init__(self, cfg: Config, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+        self.config = cfg
+
+        self.model = LLAMA(cfg)
+        
+    
+    def forward(self, x: torch.Tensor):
+        return self.model(x)

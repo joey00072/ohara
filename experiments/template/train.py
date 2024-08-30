@@ -12,8 +12,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-
-from ohara.models.llama import LLAMA, Config
 from ohara.lr_scheduler import CosineScheduler
 from ohara.dataset import PreTokenizedDataset
 from ohara.utils import BetterCycle
@@ -31,56 +29,56 @@ import lightning as L
 from lightning.pytorch.loggers import WandbLogger
 from lightning.fabric.loggers import TensorBoardLogger
 
+from model import ModelingLM, Config
+from q_sparse import monkey_patch_model
+
+
 traceback.install()
 
+torch.set_float32_matmul_precision("high")
+
+# ================================================================================================
 
 ### CONFIGS
-wandb_project_name = "Ohara-LLAMA-Fabric"
+wandb_project_name = "Ohara-MODEL"
 wandb_run_name = random_name()
 
 learning_rate: float = 5e-4
 min_learning_rate: float = 0.0
 
 warmup_iters: int = 1000
-max_iters: int = 100_000
-total_batch_size = 524288
+max_iters: int = 10_000
 batch_size: int = 8
 micro_batch: int = 4
 eval_iters: int = 100
-save_ckpt_iters: int = 1000
+save_ckpt_iters: int = 2000
 
-d_model: int = 768
-seq_len: int = 1024
-num_layers: int = 12
-num_heads: int = 12
 multiple_of: int = 4
-weight_tying = True
+d_model: int = 1024 * 2 // 4
+hidden_dim = int(d_model * multiple_of)
+seq_len: int = 256
+num_layers: int = 32  # 44
+num_heads: int = 32
 
-assert d_model % num_heads == 0, f"{d_model=} {num_heads=} {d_model%num_heads}"
+MONKEY_PATCH =False
+model_name = f"joey00072/model_name{'Baseline' if MONKEY_PATCH is None else str(MONKEY_PATCH) }"
 
-compile_model = True
-compile_mode = "reduce-overhead"
-torch.set_float32_matmul_precision("high")  #'medium'
+assert d_model % num_heads == 0
+
+compile_model = not bool(sys.platform == "darwin")
 
 ### Dataset and Tokenizer
-# dataset_name = "roneneldan/TinyStories"  # run pretokeinze first
-# tokenizer_name = "microsoft/phi-2"
-
-dataset_name = "JeanKaddour/minipile"  # run pretokeinze first
+dataset_name = "joey00072/pretokenized__JeanKaddour_minipile__EleutherAI__gpt-neo-125m"  # run pretokeinze first
 tokenizer_name = "EleutherAI/gpt-neo-125m"
-
 
 ### Setup
 device = auto_accelerator()  # auto chose device (cuda, mps)
 
-
-# fabric
-strategy: str = "auto"
-precision: str = "bf16-mixed"  # "32-true", "16-mixed", "16-true", "bf16-mixed", "bf16-true"
-
 # for restarting training from last checkout
 resume_traning = False
 
+
+# ================================================================================================
 
 @torch.no_grad()
 def validate(
@@ -132,17 +130,16 @@ def train(
     train_dataloader = BetterCycle(iter(train_dataloader))
     val_dataloader = BetterCycle(iter(val_dataloader))
     (data, target) = next(val_dataloader)
-    print(f"{data.shape=}")
     tokerns_per_iter = int(math.prod(data.shape) * micro_batch)
 
     micro_batch_loss: float = 0
     idx: int = 0
     while True:
-        start_time: float = time.perf_counter()
         micro_batch_loss = 0
         if idx >= max_iters:
             break
         idx += 1
+        start_time: float = time.perf_counter()
 
         lr = get_lr(idx)
         for param_group in optimizer.param_groups:
@@ -170,26 +167,23 @@ def train(
             f"iter: {idx} | loss: {micro_batch_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s"
         )
 
-        if idx % eval_iters == 0:
-            val_loss = validate(fabric, model, val_dataloader, 100, device=device)
-            try:
-                fabric.log_dict(
-                    {
-                        "traning_loss": micro_batch_loss,
-                        "test_loss": val_loss,
-                        "iter": idx,
-                        "tokens": idx * tokerns_per_iter,
-                        "lr": lr,
-                        "time": elapsed_time,
-                    },
-                    step=idx,
-                )
-            except Exception as e:
-                print(f"Error logging: {e}")
+        fabric.log_dict(
+            {
+                "traning_loss": micro_batch_loss,
+                # "test_loss": val_loss,
+                "iter": idx,
+                "tokens": idx * tokerns_per_iter,
+                "lr": lr,
+                "time": elapsed_time,
+            },
+            step=idx,
+        )
 
         if idx % save_ckpt_iters == 0:
             state = {"model": model, "optimizer": optimizer, "idx": idx, "lr": lr}
             fabric.save("./ckpt/model.pt", state)
+            model.config.ckpt_iter = idx
+            model.push_to_hub(model_name, commit_message=f"checkpoint iter: {idx}")
 
 
 def main():
@@ -212,36 +206,41 @@ def main():
         "resume_traning": resume_traning,
         "save_ckpt_iters": save_ckpt_iters,
     }
-    loggers = []
-    # wandb_logger = WandbLogger(project=params["wandb_project_name"], resume=params["resume_traning"])
-    # loggers.append(wandb_logger)
-    tensorboard_logger = TensorBoardLogger(root_dir="logs", name=wandb_run_name)
-    loggers.append(tensorboard_logger)
-
-    fabric: L.Fabric = L.Fabric(strategy=strategy, precision=precision, loggers=loggers)
+    # fabric init
+    logger = WandbLogger(project=wandb_project_name, resume=resume_traning)
+    # logger = TensorBoardLogger(root_dir="./logs", name=wandb_project_name)
+    fabric = L.Fabric(loggers=[logger], precision="bf16-mixed")
+    fabric.logger.log_hyperparams(hyper_params)
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
     config = Config(
         vocab_size=tokenizer.vocab_size,
-        d_model=d_model,
         seq_len=seq_len,
+        d_model=d_model,
+        hidden_dim=hidden_dim,
+        num_heads=num_heads,
+        num_kv_heads=0,
         num_layers=num_layers,
-        num_heads=num_layers,
-        multiple_of=multiple_of,
-        weight_tying=weight_tying,
+        dropout=0.2,
+        bias=False,
+        weight_tying=True,
+        activation="relu_squared",
+        mlp="GLU",
     )
 
     train_ds = PreTokenizedDataset(
         dataset_name=dataset_name,
         tokenizer=tokenizer,
         split="train",
+        hf=True,
         max_length=seq_len,
     )
     test_ds = PreTokenizedDataset(
         dataset_name=dataset_name,
         tokenizer=tokenizer,
         split="validation",
+        hf=True,
         max_length=seq_len,
     )
 
@@ -249,14 +248,21 @@ def main():
     test_dataloader = DataLoader(test_ds, batch_size=batch_size)
     train_dataloader, test_dataloader = fabric.setup_dataloaders(train_dataloader, test_dataloader)
 
-    model = LLAMA(config)
+    model = ModelingLM(config)
+    
+    if MONKEY_PATCH:
+        target_layers = ["key", "value", "query", "proj", "w1", "w2", "w3"]
+        monkey_patch_model(model, target_layers, pct=QSPARSE)
+        print("\n>>>> Applied monkey patching <<<<\n")
+        
     model: L.LightningModule = fabric.setup(model)
-
+    print("=" * 100)
     if compile_model:
-        model = torch.compile(model, mode=compile_mode)
-
+        model = torch.compile(model)
+    # model.gradient_checkpointing_enable()
     print(model)
     print(model_summary(model))
+    import time
 
     get_lr = CosineScheduler(
         learning_rate=learning_rate,
