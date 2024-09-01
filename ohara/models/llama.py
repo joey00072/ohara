@@ -20,7 +20,7 @@ class Config:
     num_heads: int = 4
     num_kv_heads: int = 0
     num_layers: int = 4
-    dropout: int = 0.2
+    dropout: float = 0.2
     multiple_of: int = 4
     bias: int = False
     weight_tying: bool = False
