@@ -4,10 +4,9 @@ import torch
 # Load the Gemma 2B model and tokenizer
 model_name = "google/gemma-2-2b"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cpu").half()
-
+model = AutoModelForCausalLM.from_pretrained(model_name, device_map="cuda")
 # Set the device to GPU if available
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() and False else "cpu")
 model = model.to(device)
 
 

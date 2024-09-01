@@ -2,6 +2,7 @@ import sys
 import time
 import math
 from datetime import datetime
+import os
 
 from typing import Any, Dict
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch import Tensor
 
 from ohara.lr_scheduler import CosineScheduler
 from ohara.dataset import PreTokenizedDataset
@@ -30,7 +32,7 @@ from lightning.pytorch.loggers import WandbLogger
 from lightning.fabric.loggers import TensorBoardLogger
 
 from model import ModelingLM, Config
-from q_sparse import monkey_patch_model
+from monkey_patcher import dm_linear_monkey_patch
 
 
 traceback.install()
@@ -54,14 +56,14 @@ eval_iters: int = 100
 save_ckpt_iters: int = 2000
 
 multiple_of: int = 4
-d_model: int = 1024 * 2 // 4
+d_model: int = 1024 // 4
 hidden_dim = int(d_model * multiple_of)
 seq_len: int = 256
-num_layers: int = 32  # 44
+num_layers: int = 32 // 3  # 44
 num_heads: int = 32
 
-MONKEY_PATCH =False
-model_name = f"joey00072/model_name{'Baseline' if MONKEY_PATCH is None else str(MONKEY_PATCH) }"
+MONKEY_PATCH = False
+model_name = f"joey00072/model_name{'Baseline' if MONKEY_PATCH is None else str(MONKEY_PATCH)}"
 
 assert d_model % num_heads == 0
 
@@ -74,11 +76,13 @@ tokenizer_name = "EleutherAI/gpt-neo-125m"
 ### Setup
 device = auto_accelerator()  # auto chose device (cuda, mps)
 
-# for restarting training from last checkout
-resume_traning = False
+# for restarting training from last checkpoint
+resume_training = False
+checkpoint_path = "./ckpt/model.pt"
 
 
 # ================================================================================================
+
 
 @torch.no_grad()
 def validate(
@@ -88,7 +92,7 @@ def validate(
     max_iters: int,
     ignore_index: int = -1,
     device=None,
-) -> int:
+) -> Tensor:
     fabric.barrier()
     model.eval()
     with torch.no_grad():
@@ -121,19 +125,20 @@ def train(
     save_ckpt_iters: int,
     get_lr,
     ignore_index=-1,
+    start_iter: int = 0,
 ):
     fabric.launch()
     ignore_index = ignore_index if ignore_index else -1
     # sanity test
     validate(fabric, model, val_dataloader, 5, device=device)
-    # cyclining loder so you can runit indefinitely
+    # cycling loader so you can run it indefinitely
     train_dataloader = BetterCycle(iter(train_dataloader))
     val_dataloader = BetterCycle(iter(val_dataloader))
     (data, target) = next(val_dataloader)
-    tokerns_per_iter = int(math.prod(data.shape) * micro_batch)
+    tokens_per_iter = int(math.prod(data.shape) * micro_batch)
 
     micro_batch_loss: float = 0
-    idx: int = 0
+    idx: int = start_iter
     while True:
         micro_batch_loss = 0
         if idx >= max_iters:
@@ -147,7 +152,7 @@ def train(
         # ...
         for _ in range(micro_batch):
             (data, target) = next(train_dataloader)
-            with fabric.no_backward_sync(model, enabled=micro_batch == 1):
+            with fabric.no_backward_sync(model, enabled=micro_batch > 1):
                 logits: torch.Tensor = model(data)
                 loss = F.cross_entropy(
                     logits.view(-1, logits.size(-1)),
@@ -167,17 +172,22 @@ def train(
             f"iter: {idx} | loss: {micro_batch_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s"
         )
 
-        fabric.log_dict(
-            {
-                "traning_loss": micro_batch_loss,
-                # "test_loss": val_loss,
-                "iter": idx,
-                "tokens": idx * tokerns_per_iter,
-                "lr": lr,
-                "time": elapsed_time,
-            },
-            step=idx,
-        )
+        if idx % eval_iters == 0:
+            val_loss = validate(fabric, model, val_dataloader, 100, device=device)
+            try:
+                fabric.log_dict(
+                    {
+                        "training_loss": micro_batch_loss,
+                        "test_loss": val_loss,
+                        "iter": idx,
+                        "tokens": idx * tokens_per_iter,
+                        "lr": lr,
+                        "time": elapsed_time,
+                    },
+                    step=idx,
+                )
+            except Exception as e:
+                print(f"Error logging: {e}")
 
         if idx % save_ckpt_iters == 0:
             state = {"model": model, "optimizer": optimizer, "idx": idx, "lr": lr}
@@ -198,16 +208,16 @@ def main():
         "d_model": d_model,
         "seq_len": seq_len,
         "num_layers": num_layers,
-        "num_heads": num_layers,
+        "num_heads": num_heads,
         "multiple_of": multiple_of,
         "compile_model": compile_model,
         "tokenizer_name": tokenizer_name,
         "dataset_name": dataset_name,
-        "resume_traning": resume_traning,
+        "resume_training": resume_training,
         "save_ckpt_iters": save_ckpt_iters,
     }
     # fabric init
-    logger = WandbLogger(project=wandb_project_name, resume=resume_traning)
+    logger = WandbLogger(project=wandb_project_name, resume=resume_training)
     # logger = TensorBoardLogger(root_dir="./logs", name=wandb_project_name)
     fabric = L.Fabric(loggers=[logger], precision="bf16-mixed")
     fabric.logger.log_hyperparams(hyper_params)
@@ -249,12 +259,12 @@ def main():
     train_dataloader, test_dataloader = fabric.setup_dataloaders(train_dataloader, test_dataloader)
 
     model = ModelingLM(config)
-    
+
     if MONKEY_PATCH:
         target_layers = ["key", "value", "query", "proj", "w1", "w2", "w3"]
-        monkey_patch_model(model, target_layers, pct=QSPARSE)
+        dm_linear_monkey_patch(model, target_layers)
         print("\n>>>> Applied monkey patching <<<<\n")
-        
+
     model: L.LightningModule = fabric.setup(model)
     print("=" * 100)
     if compile_model:
@@ -272,13 +282,23 @@ def main():
     )
 
     # inputs = torch.tensor(tokenizer.encode("The")).unsqueeze(0).clone().detach()
-    optimzer = optim.AdamW(model.parameters(), lr=get_lr(0))
-    optimzer = fabric.setup_optimizers(optimzer)
-    # Lets GO!!
+    optimizer = optim.AdamW(model.parameters(), lr=get_lr(0))
+    optimizer = fabric.setup_optimizers(optimizer)
+
+    start_iter = 0
+    if resume_training and os.path.exists(checkpoint_path):
+        print(f"Resuming from checkpoint: {checkpoint_path}")
+        checkpoint = fabric.load(checkpoint_path)
+        model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        start_iter = checkpoint['idx']
+        print(f"Resuming from iteration: {start_iter}")
+
+    # Let's GO!!
     train(
         fabric,
         model,
-        optimzer,
+        optimizer,
         micro_batch=micro_batch,
         train_dataloader=train_dataloader,
         val_dataloader=test_dataloader,
@@ -286,6 +306,7 @@ def main():
         save_ckpt_iters=save_ckpt_iters,
         get_lr=get_lr,
         ignore_index=tokenizer.pad_token_id,
+        start_iter=start_iter,
     )
 
     # TODO: Replace this inference

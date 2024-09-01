@@ -10,8 +10,6 @@ from ohara.modules.norm import RMSNorm
 from ohara.embedings_pos.rotatry import precompute_freqs_cis
 from ohara.embedings_pos.rotatry import apply_rope
 
-from typing import Callable
-
 from huggingface_hub import PyTorchModelHubMixin
 
 from collections import OrderedDict
@@ -34,7 +32,7 @@ class Config(OrderedDict):
     bias: bool = False
     weight_tying: bool = False
 
-    activation: Callable = "silu"  # "relu", "gelu", "silu" etc
+    activation: str = "silu"  # "relu", "gelu", "silu" etc
     mlp: str = "GLU"  # MLP or GLU
 
 

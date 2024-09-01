@@ -4,47 +4,59 @@ import torch.nn.functional as F
 
 import math
 from dataclasses import dataclass
-from ohara.embedings_pos.rotatry import precompute_freqs_cis
-from ohara.embedings_pos.rotatry import apply_rope
-from ohara.modules.mlp import SwiGLU, ACT2FN
+from ohara.modules.mlp import GLU, MLP
 from ohara.modules.norm import RMSNorm
 
-from torch import Tensor
+from ohara.embedings_pos.rotatry import precompute_freqs_cis
+from ohara.embedings_pos.rotatry import apply_rope
+
 from huggingface_hub import PyTorchModelHubMixin
+
+from collections import OrderedDict
 
 
 @dataclass
-class Config:
-    vocab_size: int = 65
-    seq_len: int = 64
-    d_model: int = 128
-    hidden_dim: int = 256
-    num_heads: int = 4
+class Config(OrderedDict):
+    vocab_size: int
+    seq_len: int
+
+    d_model: int
+    hidden_dim: int
+
+    num_heads: int
     num_kv_heads: int = 0
+
     num_layers: int = 4
-    dropout: int = 0.2
-    multiple_of: int = 4
-    bias: int = False
+
+    dropout: float = 0.2
+    bias: bool = False
     weight_tying: bool = False
+
+    activation: str = "silu"  # "relu", "gelu", "silu" etc
+    mlp: str = "GLU"  # MLP or GLU
+
+
+MLP_BLOCK = {"MLP": MLP, "GLU": GLU}
 
 
 class Attention(nn.Module):
-    def __init__(self, cfg: Config):
+    def __init__(self, config: Config):
         super().__init__()
-        d_model = cfg.d_model
-        self.num_heads = cfg.num_heads
-        self.head_dim = cfg.d_model // cfg.num_heads
-        self.num_kv_heads = cfg.num_heads if cfg.num_kv_heads == 0 else cfg.num_kv_heads
+
+        d_model = config.d_model
+        self.num_heads = config.num_heads
+        self.head_dim = config.d_model // config.num_heads
+        self.num_kv_heads = config.num_heads if config.num_kv_heads == 0 else config.num_kv_heads
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        self.key = nn.Linear(d_model, self.head_dim * self.num_heads, cfg.bias)
-        self.query = nn.Linear(d_model, self.head_dim * self.num_kv_heads, cfg.bias)
-        self.value = nn.Linear(d_model, self.head_dim * self.num_kv_heads, cfg.bias)
-        self.proj = nn.Linear(d_model, d_model, cfg.bias)
+        self.key = nn.Linear(d_model, self.head_dim * self.num_kv_heads, config.bias)
+        self.query = nn.Linear(d_model, self.head_dim * self.num_heads, config.bias)
+        self.value = nn.Linear(d_model, self.head_dim * self.num_kv_heads, config.bias)
+        self.proj = nn.Linear(d_model, d_model, config.bias)
 
-        self.attn_dropout = nn.Dropout(cfg.dropout)
-        self.res_dropout = nn.Dropout(cfg.dropout)
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.res_dropout = nn.Dropout(config.dropout)
 
         self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
 
@@ -60,10 +72,10 @@ class Attention(nn.Module):
         v = self.value(x)
 
         k = k.view(
-            batch, seq_len, self.num_heads, self.head_dim
-        )  # shape = (B, seq_len, num_heads, head_dim)
+            batch, seq_len, self.num_kv_heads, self.head_dim
+        )  # shape = (B, seq_len, num_kv_heads, head_dim)
         q = q.view(batch, seq_len, self.num_heads, self.head_dim)
-        v = v.view(batch, seq_len, self.num_heads, self.head_dim)
+        v = v.view(batch, seq_len, self.num_kv_heads, self.head_dim)
 
         q, k = apply_rope(q, k, freqs_cis)
 
@@ -80,7 +92,7 @@ class Attention(nn.Module):
             output = torch.nn.functional.scaled_dot_product_attention(
                 q,
                 k,
-                v,  # order impotent
+                v,  # order important
                 attn_mask=None,
                 dropout_p=self.attn_dropout.p if self.training else 0.0,
                 is_causal=True,
@@ -103,19 +115,19 @@ class Attention(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, cfg: Config):
+    def __init__(self, config: Config):
         super().__init__()
 
-        self.attn = Attention(cfg)
-        self.ff = SwiGLU(
-            dim=cfg.d_model,
-            hidden_dim=cfg.hidden_dim,
-            dropout=cfg.dropout,
-            bias=cfg.bias,
+        self.attn = Attention(config)
+        self.ff = MLP_BLOCK[config.mlp](
+            dim=config.d_model,
+            hidden_dim=config.hidden_dim,
+            dropout=config.dropout,
+            bias=config.bias,
         )
 
-        self.norm1 = RMSNorm(cfg.d_model)
-        self.norm2 = RMSNorm(cfg.d_model)
+        self.norm1 = RMSNorm(config.d_model)
+        self.norm2 = RMSNorm(config.d_model)
 
     def forward(self, x, mask, freqs_cis):
         x = x + self.attn(self.norm1(x), mask, freqs_cis)
@@ -123,29 +135,29 @@ class Block(nn.Module):
         return x
 
 
-class LLAMA(nn.Module):
-    def __init__(self, cfg: Config, *args, **kwargs) -> None:
+class Transformer(nn.Module):
+    def __init__(self, config: Config, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        self.config = cfg
+        self.config = config
 
-        self.token_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
+        self.token_emb = nn.Embedding(config.vocab_size, config.d_model)
 
-        self.layers = nn.ModuleList([Block(cfg) for _ in range(cfg.num_layers)])
+        self.layers = nn.ModuleList([Block(config) for _ in range(config.num_layers)])
 
-        self.norm = RMSNorm(cfg.d_model)
-        self.vocab_proj = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
+        self.norm = RMSNorm(config.d_model)
+        self.vocab_proj = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
-        if cfg.weight_tying:
+        if config.weight_tying:
             self.token_emb.weight = self.vocab_proj.weight
 
-        cos, isin = precompute_freqs_cis(cfg.d_model // cfg.num_heads, cfg.seq_len * 2)
+        cos, isin = precompute_freqs_cis(config.d_model // config.num_heads, config.seq_len * 2)
         self.register_buffer("freq_cos", cos)
         self.register_buffer("freq_sin", isin)
 
         if not hasattr(torch.nn.functional, "scaled_dot_product_attention"):
             print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
-            mask = torch.full((1, 1, cfg.seq_len, cfg.seq_len), float("-inf"))
+            mask = torch.full((1, 1, config.seq_len, config.seq_len), float("-inf"))
             mask = torch.triu(mask, diagonal=1)
             self.register_buffer("mask", mask)
         else:
@@ -156,7 +168,6 @@ class LLAMA(nn.Module):
     def forward(self, x: torch.Tensor):
         batch, seqlen = x.shape
         x = self.token_emb(x)
-        device = self.token_emb.weight.device
         freqs_cis = self.freq_cos[:seqlen], self.freq_sin[:seqlen]
 
         for layer in self.layers:
@@ -175,15 +186,31 @@ class LLAMA(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
 
-
-class ModelingLM(nn.Module,PyTorchModelHubMixin):
-    def __init__(self, cfg: Config, *args, **kwargs) -> None:
+class ModelingLM(nn.Module, PyTorchModelHubMixin):
+    def __init__(self, config: Config, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self.config = config
+        self.model = Transformer(self.config)
 
-        self.config = cfg
-
-        self.model = LLAMA(cfg)
-        
-    
     def forward(self, x: torch.Tensor):
         return self.model(x)
+
+
+if __name__ == "__main__":
+    config = Config(
+        vocab_size=10,
+        seq_len=10,
+        d_model=128,
+        hidden_dim=128,
+        num_heads=4,
+        num_kv_heads=0,
+        num_layers=4,
+        dropout=0.2,
+        bias=False,
+        weight_tying=False,
+        activation="relu_squared",
+        mlp="GLU",
+    )
+
+    model = ModelingLM(config).eval()
+    print(model)
