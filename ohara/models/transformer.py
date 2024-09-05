@@ -34,7 +34,7 @@ class Config(OrderedDict):
     bias: bool = False
     weight_tying: bool = False
 
-    activation: Callable = "silu"  # "relu", "gelu", "silu" etc
+    activation: str = "silu"  # "relu", "gelu", "silu" etc
     mlp: str = "GLU"  # MLP or GLU
 
 
