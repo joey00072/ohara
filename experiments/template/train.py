@@ -48,26 +48,32 @@ wandb_run_name = random_name()
 learning_rate: float = 5e-4
 min_learning_rate: float = 0.0
 
-warmup_iters: int = 1000
 max_iters: int = 10_000
-batch_size: int = 8
-micro_batch: int = 4
+warmup_iters: int = max_iters//10 
+
+total_batch_size:int = 2**13 
+seq_len: int = 256
+batch_size: int = 8 
+micro_batch: int = int(total_batch_size/(seq_len*batch_size))
 eval_iters: int = 100
 save_ckpt_iters: int = 2000
 
 multiple_of: int = 4
 d_model: int = 1024 // 4
 hidden_dim = int(d_model * multiple_of)
-seq_len: int = 256
 num_layers: int = 32 // 3  # 44
 num_heads: int = 32
+
+mlp: str = "GLU"
+activation_fn: str = "silu"
 
 MONKEY_PATCH = False
 model_name = f"joey00072/model_name{'Baseline' if MONKEY_PATCH is None else str(MONKEY_PATCH)}"
 
 assert d_model % num_heads == 0
 
-compile_model = not bool(sys.platform == "darwin")
+compile_model = True# not bool(sys.platform == "darwin")
+compile_mode:str = None #"reduce-overhead"
 
 ### Dataset and Tokenizer
 dataset_name = "joey00072/pretokenized__JeanKaddour_minipile__EleutherAI__gpt-neo-125m"  # run pretokeinze first
@@ -78,8 +84,11 @@ device = auto_accelerator()  # auto chose device (cuda, mps)
 
 # for restarting training from last checkpoint
 resume_training = False
+push_to_hub = False
 checkpoint_path = "./ckpt/model.pt"
 
+wandb_logger = False
+tensorboard_logger = True
 
 # ================================================================================================
 
@@ -193,7 +202,8 @@ def train(
             state = {"model": model, "optimizer": optimizer, "idx": idx, "lr": lr}
             fabric.save("./ckpt/model.pt", state)
             model.config.ckpt_iter = idx
-            model.push_to_hub(model_name, commit_message=f"checkpoint iter: {idx}")
+            if push_to_hub:
+                model.push_to_hub(model_name, commit_message=f"checkpoint iter: {idx}")
 
 
 def main():
@@ -216,9 +226,18 @@ def main():
         "resume_training": resume_training,
         "save_ckpt_iters": save_ckpt_iters,
     }
+    
+    loggers = []
+
+    if wandb_logger:
+        logger = WandbLogger(project=wandb_project_name, resume=resume_training)
+        loggers.append(logger)
+
+    if tensorboard_logger:
+        logger = TensorBoardLogger(root_dir="./logs", name=wandb_project_name)
+        loggers.append(logger)
+
     # fabric init
-    logger = WandbLogger(project=wandb_project_name, resume=resume_training)
-    # logger = TensorBoardLogger(root_dir="./logs", name=wandb_project_name)
     fabric = L.Fabric(loggers=[logger], precision="bf16-mixed")
     fabric.logger.log_hyperparams(hyper_params)
 
@@ -235,8 +254,8 @@ def main():
         dropout=0.2,
         bias=False,
         weight_tying=True,
-        activation="relu_squared",
-        mlp="GLU",
+        activation=activation_fn,
+        mlp=mlp,
     )
 
     train_ds = PreTokenizedDataset(
@@ -268,7 +287,7 @@ def main():
     model: L.LightningModule = fabric.setup(model)
     print("=" * 100)
     if compile_model:
-        model = torch.compile(model)
+        model = torch.compile(model,mode=compile_mode)
     # model.gradient_checkpointing_enable()
     print(model)
     print(model_summary(model))

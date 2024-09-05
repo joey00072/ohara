@@ -1,10 +1,11 @@
+from typing import assert_type
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 import math
 from dataclasses import dataclass
-from ohara.modules.mlp import GLU, MLP
+from ohara.modules.mlp import GLU, MLP,ACT2FN
 from ohara.modules.norm import RMSNorm
 
 from ohara.embedings_pos.rotatry import precompute_freqs_cis
@@ -34,7 +35,6 @@ class Config(OrderedDict):
 
     activation: str = "silu"  # "relu", "gelu", "silu" etc
     mlp: str = "GLU"  # MLP or GLU
-
 
 MLP_BLOCK = {"MLP": MLP, "GLU": GLU}
 
@@ -122,6 +122,7 @@ class Block(nn.Module):
         self.ff = MLP_BLOCK[config.mlp](
             dim=config.d_model,
             hidden_dim=config.hidden_dim,
+            activation_fn=config.activation,
             dropout=config.dropout,
             bias=config.bias,
         )

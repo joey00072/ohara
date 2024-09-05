@@ -78,7 +78,7 @@ class RoPE(nn.Module):
 
         return rx
 
-    def _compute_traditional_rope(self, costheta, sintheta, x):
+    def _compute_traditional_rope(self, costheta, sintheta, x)->Tensor:
         x1 = x[..., ::2]
         x2 = x[..., 1::2]
         rx1 = x1 * costheta - x2 * sintheta
@@ -118,7 +118,7 @@ class RoPE(nn.Module):
         scale: float = 1.0,
         dtype=torch.float32,
         device=None,
-    ):
+    ) -> tuple[Tensor,Tensor]:
         D = D // 2
         positions = torch.arange(offset, N, dtype=dtype, device=device) * scale
         freqs = torch.exp(-torch.arange(0.0, D, dtype=dtype, device=device) * (math.log(base) / D))

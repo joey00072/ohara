@@ -73,7 +73,7 @@ class GLU(nn.Module):
         hidden_dim: int | None = None,
         multiple_of: int = 4,
         dropout: float | None = None,
-        activation: str = "silu",
+        activation_fn: str = "silu",
         bias: bool = False,
     ):
         """
@@ -93,7 +93,7 @@ class GLU(nn.Module):
         self.gate = nn.Linear(dim, hidden_dim, bias=bias)
         self.down = nn.Linear(hidden_dim, dim, bias=bias)
 
-        self.activation = ACT2FN[activation]
+        self.activation = ACT2FN[activation_fn]
         self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
 
     def forward(self, x):
