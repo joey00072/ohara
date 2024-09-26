@@ -1,5 +1,7 @@
 import torch
 
+from torch import Tensor
+
 
 def states_shift(tensor, n):
     """
@@ -24,10 +26,21 @@ def states_shift(tensor, n):
     return shifted_tensor
 
 
+def state_predition_loss(tensor:Tensor,shift:int)->Tensor:
+    tensor_ones = torch.ones_like(tensor)
+    ones_shifted = states_shift(tensor_ones, shift) 
+    tensor_shifted = states_shift(tensor, shift) 
+    loss = torch.nn.functional.mse_loss(tensor*ones_shifted,tensor_shifted)
+    return loss
+ 
+    
 if __name__ == "__main__":
     # Example usage
-    tensor = torch.arange(10 * 2).reshape(1, 10, 2)
+    B,T,C = 1,10,2
+    tensor = torch.rand(B,T,C) 
     shifted_tensor = states_shift(tensor, 2)  # Shift by 2 positions
+
+    print(f"{state_predition_loss(tensor,2)=}")
 
     print(tensor)
     print(shifted_tensor)
