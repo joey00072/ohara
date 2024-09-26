@@ -1,13 +1,15 @@
+from re import DEBUG
 import torch
 import torch.nn as nn
 
-from .mlp import MLP_MAP
+from ohara.modules.mlp import MLP_MAP
 
 
 # This might not me most efficient implementation of MOE
 # but it is easy to understand
 # TODO: Write a more efficient implementation and more types or moe
 
+DEBUG = False
 
 class MoE(nn.Module):
     def __init__(
@@ -39,6 +41,14 @@ class MoE(nn.Module):
         # expert_weights -> (batch_size * seq_len, num_experts_per_tok)
         # expert_indices -> (batch_size * seq_len, num_experts_per_tok)
         expert_weights, expert_indices = torch.topk(scores, self.num_experts_per_tok, dim=-1)
+
+        if DEBUG:
+            lst = [0]*4
+            for _idx in expert_indices.reshape(-1):
+                lst[_idx]+=1
+            for idx,item in enumerate(lst):
+                print(f"{idx=} {item=}")
+            print("-------------")
 
         # -> (batch_size * seq_len, num_experts_per_tok)
         expert_weights = expert_weights.softmax(dim=-1)
@@ -72,9 +82,35 @@ class MoE(nn.Module):
 
 
 if __name__ == "__main__":
-    B, T, C = 3, 5, 7
-    model = MoE(7, 20)
+    B, T, C = 8, 16, 32 
 
-    x = torch.randn(B, T, C)
-    y = model(x)
-    print(y.shape)
+    with torch.device("cuda"):
+        import torch.optim as optim
+        torch.set_float32_matmul_precision('high')
+        model = MoE(C, C)
+        model = torch.compile(model)
+        optimizer = optim.AdamW(model.parameters())
+
+        x = torch.randn(B, T, C)
+        y = torch.randn(B, T, C)
+
+        iters = 1000
+
+        DEBUG = True
+        model(x)
+        DEBUG = False
+
+        for _ in range(iters):
+            p = model(x)
+            loss = torch.nn.functional.mse_loss(p,y)
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            # print(f"{loss.item()=}")
+
+        DEBUG = True
+        model(x)
+        DEBUG = False
+
+
+        print(y.shape)
