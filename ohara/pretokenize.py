@@ -12,6 +12,7 @@ class DatasetPreprocessor:
         self,
         dataset_name: str = "JeanKaddour/minipile",
         tokenizer_name: str = "NeelNanda/gpt-neox-tokenizer-digits",
+        name:str=None,
         min_length: int = 512,
         max_length: int = 2049,
         splits: list[str] | None = None,
@@ -24,6 +25,7 @@ class DatasetPreprocessor:
             splits = ["train", "test"]
         self.dataset_name = dataset_name
         self.tokenizer_name = tokenizer_name
+        self.name = name
         self.min_length = min_length
         self.max_length = max_length
         self.splits = splits
@@ -44,6 +46,7 @@ class DatasetPreprocessor:
         dataset = load_dataset(
             self.dataset_name,
             split=split,
+            name=self.name,
             download_mode=DownloadMode.REUSE_CACHE_IF_EXISTS,
             revision=self.revision,
             cache_dir=self.hf_cache,
