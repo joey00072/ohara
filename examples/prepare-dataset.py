@@ -53,10 +53,28 @@ def minipile(
     )
     preprocessor.process_and_save(push=push, hf_username=hf_username)
 
+def refineweb_edu(
+    dataset="HuggingFaceFW/fineweb-edu",
+    tokenizer="EleutherAI/gpt-neo-125m",
+    name="sample-10BT",
+    push: bool = False,
+    hf_username: str = "joey00072",
+):
+    print(f"Pretokenizing {dataset=} with {tokenizer=}")
+    preprocessor = DatasetPreprocessor(
+        dataset_name=dataset,
+        tokenizer_name=tokenizer,
+        name=name,
+        splits=["train", "validation"],
+        hf_cache=Path("./hf_cache"),
+    )
+    preprocessor.process_and_save(push=push, hf_username=hf_username)
+
+
 
 datasets = {"openhermes": prepare_openhermes_2_5, "tinystories": tinystories, "minipile": minipile}
 
 
 if __name__ == "__main__":
-    minipile(push=True, hf_username="joey00072")
+    refineweb_edu(push=True, hf_username="joey00072")
     # tinystories(push=True,hf_username="joey00072")
