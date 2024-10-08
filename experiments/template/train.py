@@ -204,7 +204,7 @@ def main():
         max_iters=max_iters,
         eval_iters=eval_iters,
         save_ckpt_iters=save_ckpt_iters,
-        ignore_index=tokenizer.pad_token_id,
+        ignore_index=-1,
         push_to_hub=push_to_hub,
         model_name=model_name,
     )
