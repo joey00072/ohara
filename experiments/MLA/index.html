@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Model Size Calculator</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+        }
+        h1, h2 {
+            color: #61dafb;
+            text-align: center;
+        }
+        h1 {
+            margin-bottom: 30px;
+        }
+        h2 {
+            margin-top: 0;
+            font-size: 1.2em;
+        }
+        .input-group {
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+        }
+        label {
+            flex: 0 0 100px;
+            font-weight: bold;
+        }
+        input[type="number"] {
+            width: 80px;
+            padding: 8px;
+            border: 1px solid #4a4a4a;
+            border-radius: 4px;
+            font-size: 16px;
+            margin-right: 10px;
+            background-color: #2a2a2a;
+            color: #e0e0e0;
+        }
+        input[type="range"] {
+            flex: 1;
+            -webkit-appearance: none;
+            background: #4a4a4a;
+            outline: none;
+            opacity: 0.7;
+            transition: opacity .2s;
+        }
+        input[type="range"]:hover {
+            opacity: 1;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            background: #61dafb;
+            cursor: pointer;
+            border-radius: 50%;
+        }
+        input[type="range"]::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            background: #61dafb;
+            cursor: pointer;
+            border-radius: 50%;
+        }
+        .result-box {
+            background-color: #2a2a2a;
+            border: 1px solid #4a4a4a;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+        .result {
+            font-weight: bold;
+            color: #4caf50;
+        }
+        details {
+            margin-top: 10px;
+            background-color: #333;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        summary {
+            cursor: pointer;
+            color: #61dafb;
+        }
+        details p {
+            margin: 5px 0;
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <h1>Model Size Calculator</h1>
+    
+    <div class="input-group">
+        <label for="d_model">d_model:</label>
+        <input type="number" id="d_model" value="768" min="1" max="4096" oninput="updateSlider('d_model', this.value)">
+        <input type="range" id="d_model_slider" value="768" min="1" max="4096" step="1" oninput="updateInput('d_model', this.value)">
+    </div>
+
+    <div class="input-group">
+        <label for="num_head">num_head:</label>
+        <input type="number" id="num_head" value="6" min="1" max="128" oninput="updateNumHead(this.value)">
+        <input type="range" id="num_head_slider" value="6" min="1" max="128" step="1" oninput="updateNumHead(this.value)">
+    </div>
+
+    <div class="input-group">
+        <label for="head_dim">head_dim:</label>
+        <input type="number" id="head_dim" value="128" min="1" max="512" oninput="updateNormalSlider('head_dim', this.value)">
+        <input type="range" id="head_dim_slider" value="128" min="1" max="512" step="1" oninput="updateNormalInput('head_dim', this.value)">
+    </div>
+
+    <div class="input-group">
+        <label for="rope_head_dim">rope_head_dim:</label>
+        <input type="number" id="rope_head_dim" value="32" min="1" max="512" oninput="updateNormalSlider('rope_head_dim', this.value)">
+        <input type="range" id="rope_head_dim_slider" value="32" min="1" max="512" step="1" oninput="updateNormalInput('rope_head_dim', this.value)">
+    </div>
+
+    <!-- New input group for kv_lora_rank -->
+    <div class="input-group">
+        <label for="kv_lora_rank">kv_lora_rank:</label>
+        <input type="number" id="kv_lora_rank" value="64" min="1" max="512" oninput="updateNormalSlider('kv_lora_rank', this.value); updateQLora();">
+        <input type="range" id="kv_lora_rank_slider" value="64" min="1" max="512" step="1" oninput="updateNormalInput('kv_lora_rank', this.value); updateQLora();">
+    </div>
+
+    <!-- New input group for q_lora_rank -->
+    <div class="input-group">
+        <label for="q_lora_rank">q_lora_rank:</label>
+        <input type="number" id="q_lora_rank" value="192" min="1" max="1536" oninput="updateNormalSlider('q_lora_rank', this.value)">
+        <input type="range" id="q_lora_rank_slider" value="192" min="1" max="1536" step="1" oninput="updateNormalInput('q_lora_rank', this.value)">
+    </div>
+
+    <div class="result-box">
+        <h2>MultiHeadAttention (MHA)</h2>
+        <p>MHA Size: <span id="mha_size" class="result"></span> parameters</p>
+        <p>KV Cache: <span id="kv_cache" class="result"></span> per token</p>
+        <details>
+            <summary>Show formula</summary>
+            <p>MHA Size = 4 * d_model * d_model</p>
+            <p>KV Cache = 2 * d_model</p>
+        </details>
+    </div>
+
+    <!-- New result box for MLA -->
+    <div class="result-box">
+        <h2>MultiHeadLatentAttention (MLA)</h2>
+        <p>MLA Size: <span id="mla_size" class="result"></span> parameters</p>
+        <details>
+            <summary>Show formula</summary>
+            <p>MLA Size = d_model * q_lora_rank +</p>
+            <p>           q_lora_rank * num_head * head_dim +</p>
+            <p>           2 * d_model * kv_lora_rank +</p>
+            <p>           2 * kv_lora_rank * num_head * head_dim +</p>
+            <p>           num_head * head_dim * d_model</p>
+        </details>
+    </div>
+
+    <script>
+        const validValues = [];
+        for (let n = 0; n <= 12; n++) {
+            validValues.push(Math.pow(2, n));
+            if (3 * Math.pow(2, n) <= 4096) {
+                validValues.push(3 * Math.pow(2, n));
+            }
+        }
+        validValues.sort((a, b) => a - b);
+
+        function calculateSizes() {
+            const d_model = parseInt(document.getElementById('d_model').value);
+            const num_head = parseInt(document.getElementById('num_head').value);
+            const head_dim = parseInt(document.getElementById('head_dim').value);
+            const rope_head_dim = parseInt(document.getElementById('rope_head_dim').value);
+            const kv_lora_rank = parseInt(document.getElementById('kv_lora_rank').value);
+            const q_lora_rank = parseInt(document.getElementById('q_lora_rank').value);
+            
+            if (isNaN(d_model) || isNaN(num_head) || isNaN(head_dim) || isNaN(rope_head_dim) || isNaN(kv_lora_rank) || isNaN(q_lora_rank)) {
+                document.getElementById('mha_size').textContent = 'N/A';
+                document.getElementById('kv_cache').textContent = 'N/A';
+                document.getElementById('mla_size').textContent = 'N/A';
+            } else {
+                // Calculate MHA size
+                const mha_size = 4 * d_model * d_model;
+                
+                // Calculate KV cache size per token
+                const kv_cache = 2 * d_model;
+                
+                // Calculate MLA size
+                const mla_size = d_model * q_lora_rank + 
+                                 q_lora_rank * num_head * head_dim + 
+                                 2 * d_model * kv_lora_rank + 
+                                 2 * kv_lora_rank * num_head * head_dim + 
+                                 num_head * head_dim * d_model;
+                
+                // Update the results
+                document.getElementById('mha_size').textContent = formatNumber(mha_size);
+                document.getElementById('kv_cache').textContent = formatNumber(kv_cache);
+                document.getElementById('mla_size').textContent = formatNumber(mla_size);
+            }
+        }
+
+        function formatNumber(num) {
+            if (num >= 1e9) {
+                return (num / 1e9).toFixed(2) + 'B';
+            } else if (num >= 1e6) {
+                return (num / 1e6).toFixed(2) + 'M';
+            } else if (num >= 1e3) {
+                return (num / 1e3).toFixed(2) + 'K';
+            } else {
+                return num.toString();
+            }
+        }
+
+        function updateSlider(inputId, value) {
+            if (value === '') {
+                document.getElementById(inputId + '_slider').value = 1;
+            } else {
+                const nearestValid = findNearestValidValue(value);
+                document.getElementById(inputId + '_slider').value = nearestValid;
+                document.getElementById(inputId).value = nearestValid;
+            }
+            calculateSizes();
+        }
+
+        function updateInput(inputId, value) {
+            const nearestValid = findNearestValidValue(value);
+            document.getElementById(inputId).value = nearestValid;
+            calculateSizes();
+        }
+
+        function findNearestValidValue(value) {
+            const numValue = parseInt(value);
+            if (isNaN(numValue)) return 1;
+            return validValues.reduce((prev, curr) => 
+                Math.abs(curr - numValue) < Math.abs(prev - numValue) ? curr : prev
+            );
+        }
+
+        function updateNumHead(value) {
+            const numValue = parseInt(value);
+            if (!isNaN(numValue)) {
+                document.getElementById('num_head').value = numValue;
+                document.getElementById('num_head_slider').value = numValue;
+                calculateSizes();
+            }
+        }
+
+        function updateQLora() {
+            const kv_lora_rank = parseInt(document.getElementById('kv_lora_rank').value);
+            const q_lora_rank = 3 * kv_lora_rank;
+            document.getElementById('q_lora_rank').value = q_lora_rank;
+            document.getElementById('q_lora_rank_slider').value = q_lora_rank;
+            calculateSizes();
+        }
+
+        function updateNormalSlider(inputId, value) {
+            const numValue = parseInt(value);
+            if (!isNaN(numValue)) {
+                document.getElementById(inputId + '_slider').value = numValue;
+                calculateSizes();
+            }
+        }
+
+        function updateNormalInput(inputId, value) {
+            const numValue = parseInt(value);
+            if (!isNaN(numValue)) {
+                document.getElementById(inputId).value = numValue;
+                calculateSizes();
+            }
+        }
+
+        // Initial calculation
+        calculateSizes();
+    </script>
+</body>
+</html>
