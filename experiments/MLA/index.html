@@ -104,8 +104,8 @@
     
     <div class="input-group">
         <label for="d_model">d_model:</label>
-        <input type="number" id="d_model" value="768" min="1" max="4096" oninput="updateSlider('d_model', this.value)">
-        <input type="range" id="d_model_slider" value="768" min="1" max="4096" step="1" oninput="updateInput('d_model', this.value)">
+        <input type="number" id="d_model" value="768" min="1" max="8192" oninput="updateSlider('d_model', this.value)">
+        <input type="range" id="d_model_slider" value="768" min="1" max="8192" step="1" oninput="updateInput('d_model', this.value)">
     </div>
 
     <div class="input-group">
@@ -155,6 +155,7 @@
     <div class="result-box">
         <h2>MultiHeadLatentAttention (MLA)</h2>
         <p>MLA Size: <span id="mla_size" class="result"></span> parameters</p>
+        <p>MLA Cache: <span id="mla_cache" class="result"></span> per token</p>
         <details>
             <summary>Show formula</summary>
             <p>MLA Size = d_model * q_lora_rank +</p>
@@ -162,14 +163,25 @@
             <p>           2 * d_model * kv_lora_rank +</p>
             <p>           2 * kv_lora_rank * num_head * head_dim +</p>
             <p>           num_head * head_dim * d_model</p>
+            <p>MLA Cache = kv_lora_rank + rope_head_dim</p>
+        </details>
+    </div>
+
+    <!-- Cache Saving box -->
+    <div class="result-box">
+        <h2>Cache Saving</h2>
+        <p>Saving: <span id="cache_saving" class="result"></span></p>
+        <details>
+            <summary>Show formula</summary>
+            <p>Saving = (MHA Cache - MLA Cache) / MHA Cache</p>
         </details>
     </div>
 
     <script>
         const validValues = [];
-        for (let n = 0; n <= 12; n++) {
+        for (let n = 0; n <= 13; n++) {
             validValues.push(Math.pow(2, n));
-            if (3 * Math.pow(2, n) <= 4096) {
+            if (3 * Math.pow(2, n) <= 8192) {
                 validValues.push(3 * Math.pow(2, n));
             }
         }
@@ -187,6 +199,8 @@
                 document.getElementById('mha_size').textContent = 'N/A';
                 document.getElementById('kv_cache').textContent = 'N/A';
                 document.getElementById('mla_size').textContent = 'N/A';
+                document.getElementById('mla_cache').textContent = 'N/A';
+                document.getElementById('cache_saving').textContent = 'N/A';
             } else {
                 // Calculate MHA size
                 const mha_size = 4 * d_model * d_model;
@@ -201,10 +215,18 @@
                                  2 * kv_lora_rank * num_head * head_dim + 
                                  num_head * head_dim * d_model;
                 
+                // Calculate MLA cache size per token (updated)
+                const mla_cache = kv_lora_rank + rope_head_dim;
+                
+                // Calculate cache saving
+                const cache_saving = (kv_cache - mla_cache) / kv_cache;
+                
                 // Update the results
                 document.getElementById('mha_size').textContent = formatNumber(mha_size);
                 document.getElementById('kv_cache').textContent = formatNumber(kv_cache);
                 document.getElementById('mla_size').textContent = formatNumber(mla_size);
+                document.getElementById('mla_cache').textContent = formatNumber(mla_cache);
+                document.getElementById('cache_saving').textContent = formatPercentage(cache_saving);
             }
         }
 
@@ -218,6 +240,10 @@
             } else {
                 return num.toString();
             }
+        }
+
+        function formatPercentage(num) {
+            return (num * 100).toFixed(2) + '%';
         }
 
         function updateSlider(inputId, value) {
