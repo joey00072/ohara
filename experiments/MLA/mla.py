@@ -154,6 +154,7 @@ class MultiHeadLatentAttention(nn.Module):
 class MLA_Inference(MultiHeadLatentAttention):
     def __init__(self,config:Config):
         super().__init__(config)
+        self.inference_merged = False
         
     def inference_merge(self):
         Wd_Qnope = self.decompress_q_nope.weight.detach()
@@ -162,19 +163,71 @@ class MLA_Inference(MultiHeadLatentAttention):
         
         W_proj = self.proj.weight.detach()
         
-        WdQK = Wd_Qnope.T @ Wd_Knope
+        Wd_Qnope = Wd_Qnope.reshape(self.num_heads, Wd_Qnope.T.shape[0], -1)
+        Wd_Knope = Wd_Knope.reshape(self.num_heads, Wd_Knope.T.shape[0], -1)
+        
+        # print(f"Wd_Qnope.shape: {Wd_Qnope.shape}, Wd_Knope.shape: {Wd_Knope.shape}")
+        WdQK = Wd_Qnope @ Wd_Knope.transpose(-2, -1)
+        # print(f"WdQK.shape: {WdQK.shape}")
         
         WdVO = Wd_V.T @ W_proj
         
-        print(f"WdQK.shape: {WdQK.shape}, WdVO.shape: {WdVO.shape}")
-    
-
+        # print(f"WdQK.shape: {WdQK.shape}, WdVO.shape: {WdVO.shape}")
         
-    
+        self.register_buffer("WdQK", WdQK)
+        
+        self.inference_merged = True
+        
     def forward(self,x:Tensor,freqs_cis:Tensor):
         assert self.inference_merged, "model is not merged run .inference_merge() first"
+
+
+        batch_size, seq_len, _ = x.shape
+
+        compressed_q = self.compress_q_linear(x)
+        norm_q = self.q_norm(compressed_q)
+        query_nope:Tensor = self.decompress_q_nope(norm_q)
+        query_rope:Tensor = self.decompress_q_rope(norm_q)
+
+        compressed_kv = self.compress_kv_linear(x)
+        norm_kv = self.kv_norm(compressed_kv)
+        key_nope: Tensor = self.decompress_k_nope(norm_kv)
+        value: Tensor = self.decompress_v_linear(norm_kv)
+        
+        key_rope:Tensor = self.k_rope_linear(x)
+        # norm_rope = self.rope_norm(key_rope)
+
+        query_nope = query_nope.view(batch_size, seq_len, self.num_heads, self.nope_head_dim).transpose(1,2)
+        query_rope = query_rope.view(batch_size, seq_len, self.num_heads, self.rope_head_dim).transpose(1,2)
+        
+        key_rope = key_rope.view(batch_size, seq_len, 1, self.rope_head_dim).transpose(1,2)
+        key_nope = key_nope.view(batch_size, seq_len, self.num_heads, self.nope_head_dim).transpose(1,2)
+        
+        value = value.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1,2)
+        
+        k_rope, q_rope = apply_rope(query_rope,key_rope, cis=freqs_cis)
+        
+        attn_rope = q_rope @ k_rope.transpose(-2, -1)
+        
+        # print(f"compressed_q.shape: {compressed_q.unsqueeze(-3).shape} WdQK.shape: {self.WdQK.shape}")
+        attn_nope = compressed_q.unsqueeze(-3) @ self.WdQK @ compressed_kv.unsqueeze(-3).transpose(-2, -1)
+        # print(f"attn_rope.shape: {attn_rope.shape}, attn_nope.shape: {attn_nope.shape}")
+        
+        attn = (attn_rope + attn_nope) / self.head_dim  
+        
+        attn = torch.tril(attn).masked_fill(torch.tril(torch.ones(attn.shape, dtype=bool)) == 0, -torch.inf)
+        
+        output = attn.softmax(dim=-1) @ value
+        
+        output = output.view(batch_size, seq_len, self.num_heads * self.head_dim)
+        
+        output = self.proj(output)
+
+        return output
         
         
+
+
 
 
 if __name__ == "__main__":
@@ -198,7 +251,7 @@ if __name__ == "__main__":
     )
 
     mla = MultiHeadLatentAttention(config)
-    x = torch.randn(1, 10, d_model)
+    x = torch.randn(2, 10, d_model)
     freqs_cis = precompute_freqs_cis(config.rope_head_dim, config.seq_len)
     # mla = torch.compile(mla)
     output = mla(x, freqs_cis)
@@ -207,4 +260,7 @@ if __name__ == "__main__":
     mla_inference = MLA_Inference(config)
     mla_inference.load_state_dict(mla.state_dict())
     mla_inference.inference_merge()
-
+    
+    output_inference = mla_inference(x, freqs_cis)
+    print(torch.allclose(output, output_inference))
+    
