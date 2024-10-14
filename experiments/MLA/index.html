@@ -177,6 +177,12 @@
         </details>
     </div>
 
+    <!-- New YAML Parameters box -->
+    <div class="result-box">
+        <h2>All Parameters (YAML)</h2>
+        <pre id="yaml_params" class="result"></pre>
+    </div>
+
     <script>
         const validValues = [];
         for (let n = 0; n <= 13; n++) {
@@ -227,6 +233,9 @@
                 document.getElementById('mla_size').textContent = formatNumber(mla_size);
                 document.getElementById('mla_cache').textContent = formatNumber(mla_cache);
                 document.getElementById('cache_saving').textContent = formatPercentage(cache_saving);
+                
+                // Update YAML parameters
+                updateYAMLParams(d_model, num_head, head_dim, rope_head_dim, kv_lora_rank, q_lora_rank, mha_size, kv_cache, mla_size, mla_cache, cache_saving);
             }
         }
 
@@ -302,6 +311,23 @@
                 document.getElementById(inputId).value = numValue;
                 calculateSizes();
             }
+        }
+
+        function updateYAMLParams(d_model, num_head, head_dim, rope_head_dim, kv_lora_rank, q_lora_rank, mha_size, kv_cache, mla_size, mla_cache, cache_saving) {
+            const yaml = `
+d_model: ${d_model}
+num_head: ${num_head}
+head_dim: ${head_dim}
+rope_head_dim: ${rope_head_dim}
+kv_lora_rank: ${kv_lora_rank}
+q_lora_rank: ${q_lora_rank}
+mha_size: ${formatNumber(mha_size)}
+kv_cache: ${formatNumber(kv_cache)}
+mla_size: ${formatNumber(mla_size)}
+mla_cache: ${formatNumber(mla_cache)}
+cache_saving: ${formatPercentage(cache_saving)}
+            `.trim();
+            document.getElementById('yaml_params').textContent = yaml;
         }
 
         // Initial calculation
