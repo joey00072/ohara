@@ -28,6 +28,9 @@ class Config(OrderedDict):
     # they expanded dim*3.2 for attention
     num_heads: int
     head_dim: int
+    hidden_dim: int
+    
+    num_kv_heads: int
 
     num_layers: int = 4
 
@@ -46,6 +49,8 @@ class Config(OrderedDict):
     # in deepseekv2  q_lora_rank =  3 * kv_lora_rank
     kv_lora_rank: int = None
     q_lora_rank: int = None
+    
+    attn_type: str = "mla"
 
 
 # ======================================================================================
@@ -88,24 +93,24 @@ class MultiHeadLatentAttention(nn.Module):
         self.nope_head_dim = config.head_dim - config.rope_head_dim
 
         # query compression
-        self.compress_q_linear = nn.Linear(self.dim, self.q_lora_rank, bias=config.bias)  # W_DQ
-        self.decompress_q_nope = nn.Linear(self.q_lora_rank, self.nope_head_dim * self.num_heads, bias=config.bias)
-        self.decompress_q_rope = nn.Linear(self.q_lora_rank, self.rope_head_dim * self.num_heads, bias=config.bias)
+        self.compress_q_linear = nn.Linear(self.dim, self.q_lora_rank, bias=False)  # W_DQ
+        self.decompress_q_nope = nn.Linear(self.q_lora_rank, self.nope_head_dim * self.num_heads, bias=False)
+        self.decompress_q_rope = nn.Linear(self.q_lora_rank, self.rope_head_dim * self.num_heads, bias=False)
 
         # key and value compression
-        self.compress_kv_linear = nn.Linear(self.dim, self.kv_lora_rank, bias=config.bias)  # W_DKV
-        self.decompress_k_nope = nn.Linear(self.kv_lora_rank, self.nope_head_dim * self.num_heads, bias=config.bias)
-        self.decompress_v_linear = nn.Linear(self.kv_lora_rank, self.head_dim * self.num_heads, bias=config.bias)
+        self.compress_kv_linear = nn.Linear(self.dim, self.kv_lora_rank, bias=False)  # W_DKV
+        self.decompress_k_nope = nn.Linear(self.kv_lora_rank, self.nope_head_dim * self.num_heads, bias=False)
+        self.decompress_v_linear = nn.Linear(self.kv_lora_rank, self.head_dim * self.num_heads, bias=False)
         
-        self.k_rope_linear = nn.Linear(self.dim, self.rope_head_dim, bias=config.bias)
+        self.k_rope_linear = nn.Linear(self.dim, self.rope_head_dim, bias=False)
 
         self.q_norm = RMSNorm(self.q_lora_rank)
         self.kv_norm = RMSNorm(self.kv_lora_rank)
         # self.rope_norm = RMSNorm(self.rope_head_dim) # not in deepseekv2
 
-        self.proj = nn.Linear(self.attention_dim, self.num_heads*self.head_dim, bias=config.bias)
+        self.proj = nn.Linear(self.num_heads*self.head_dim, self.dim, bias=False)
 
-    def forward(self, x: Tensor, freqs_cis: Tensor):
+    def forward(self, x: Tensor,mask: torch.Tensor, freqs_cis: Tensor):
         batch_size, seq_len, _ = x.shape
 
         compressed_q = self.compress_q_linear(x)
@@ -184,51 +189,71 @@ class MLA_Inference(MultiHeadLatentAttention):
 
         batch_size, seq_len, _ = x.shape
 
-        compressed_q = self.compress_q_linear(x)
-        norm_q = self.q_norm(compressed_q)
-        query_nope:Tensor = self.decompress_q_nope(norm_q)
-        query_rope:Tensor = self.decompress_q_rope(norm_q)
+        
+        def _test_self_attention(x:Tensor):
+            compressed_q = self.compress_q_linear(x)
+            norm_q = self.q_norm(compressed_q)
+            query_nope:Tensor = self.decompress_q_nope(norm_q)
+            query_rope:Tensor = self.decompress_q_rope(norm_q)
 
-        compressed_kv = self.compress_kv_linear(x)
-        norm_kv = self.kv_norm(compressed_kv)
-        key_nope: Tensor = self.decompress_k_nope(norm_kv)
-        value: Tensor = self.decompress_v_linear(norm_kv)
-        
-        key_rope:Tensor = self.k_rope_linear(x)
-        # norm_rope = self.rope_norm(key_rope)
+            compressed_kv = self.compress_kv_linear(x)
+            norm_kv = self.kv_norm(compressed_kv)
+            key_nope: Tensor = self.decompress_k_nope(norm_kv)
+            value: Tensor = self.decompress_v_linear(norm_kv)
+            
+            key_rope:Tensor = self.k_rope_linear(x)
+            # norm_rope = self.rope_norm(key_rope)
 
-        query_nope = query_nope.view(batch_size, seq_len, self.num_heads, self.nope_head_dim).transpose(1,2)
-        query_rope = query_rope.view(batch_size, seq_len, self.num_heads, self.rope_head_dim).transpose(1,2)
-        
-        key_rope = key_rope.view(batch_size, seq_len, 1, self.rope_head_dim).transpose(1,2)
-        key_nope = key_nope.view(batch_size, seq_len, self.num_heads, self.nope_head_dim).transpose(1,2)
-        
-        value = value.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1,2)
-        
-        k_rope, q_rope = apply_rope(query_rope,key_rope, cis=freqs_cis)
-        
-        attn_rope = q_rope @ k_rope.transpose(-2, -1)
-        
-        # print(f"compressed_q.shape: {compressed_q.unsqueeze(-3).shape} WdQK.shape: {self.WdQK.shape}")
-        attn_nope = compressed_q.unsqueeze(-3) @ self.WdQK @ compressed_kv.unsqueeze(-3).transpose(-2, -1)
-        # print(f"attn_rope.shape: {attn_rope.shape}, attn_nope.shape: {attn_nope.shape}")
-        
-        attn = (attn_rope + attn_nope) / self.head_dim  
-        
-        attn = torch.tril(attn).masked_fill(torch.tril(torch.ones(attn.shape, dtype=bool)) == 0, -torch.inf)
-        
-        output = attn.softmax(dim=-1) @ value
-        
-        output = output.view(batch_size, seq_len, self.num_heads * self.head_dim)
-        
-        output = self.proj(output)
+            query_nope = query_nope.view(batch_size, seq_len, self.num_heads, self.nope_head_dim).transpose(1,2)
+            query_rope = query_rope.view(batch_size, seq_len, self.num_heads, self.rope_head_dim).transpose(1,2)
+            
+            key_rope = key_rope.view(batch_size, seq_len, 1, self.rope_head_dim).transpose(1,2)
+            key_nope = key_nope.view(batch_size, seq_len, self.num_heads, self.nope_head_dim).transpose(1,2)
+            
+            value = value.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1,2)
+            
+            k_rope, q_rope = apply_rope(query_rope,key_rope, cis=freqs_cis)
+            
+            q_recombined = torch.empty((batch_size,self.num_heads,seq_len, self.head_dim), device=x.device)
+            k_recombined = torch.empty((batch_size, self.num_heads, seq_len, self.head_dim), device=x.device)
+            
+            q_recombined[:,:,:,:self.nope_head_dim] = query_nope
+            q_recombined[:,:,:,self.nope_head_dim:] = q_rope
+            
+            # k_rope = torch.repeat_interleave(k_rope, self.num_heads, dim=1) # >> you dont need to do this <<
+            # 👇 broadcasting will do replication krope to all heads automagically
+            k_recombined[:,:,:,:self.nope_head_dim] = key_nope
+            k_recombined[:,:,:,self.nope_head_dim:] = k_rope
 
-        return output
+            output = F.scaled_dot_product_attention(q_recombined, k_recombined, value, is_causal=True)
+
+            output = output.contiguous().view(batch_size, seq_len, self.num_heads * self.head_dim)
+
+            output = self.proj(output)
+
+            return output
         
         
+        def _test_flat_attention(x:Tensor):
+            compressed_q = self.compress_q_linear(x)
+            norm_q = self.q_norm(compressed_q)
+            query_nope:Tensor = self.decompress_q_nope(norm_q)
+        
 
 
-
+def mla_reformulation_test(config:Config):
+    
+    mla = MultiHeadLatentAttention(config)
+    mla_inference = MLA_Inference(config)
+    
+    x = torch.randn(2, 10, config.d_model)
+    freqs_cis = precompute_freqs_cis(config.rope_head_dim, config.seq_len)
+    
+    mla_inference.load_state_dict(mla.state_dict())
+    mla_inference.inference_merge()
+    
+    output_inference = mla_inference(x, freqs_cis)
+    print(torch.allclose(output, output_inference))
 
 if __name__ == "__main__":
     
@@ -257,10 +282,4 @@ if __name__ == "__main__":
     output = mla(x, freqs_cis)
     print(output.shape)
     
-    mla_inference = MLA_Inference(config)
-    mla_inference.load_state_dict(mla.state_dict())
-    mla_inference.inference_merge()
-    
-    output_inference = mla_inference(x, freqs_cis)
-    print(torch.allclose(output, output_inference))
-    
+ 
