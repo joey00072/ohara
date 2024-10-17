@@ -104,36 +104,34 @@
     
     <div class="input-group">
         <label for="d_model">d_model:</label>
-        <input type="number" id="d_model" value="768" min="1" max="8192" oninput="updateSlider('d_model', this.value)">
-        <input type="range" id="d_model_slider" value="768" min="1" max="8192" step="1" oninput="updateInput('d_model', this.value)">
+        <input type="number" id="d_model" value="1024" min="1" max="8192" oninput="updateCustomDModel(this.value)">
+        <input type="range" id="d_model_slider" value="1024" min="1" max="8192" step="1" oninput="updateInput('d_model', this.value)">
     </div>
 
     <div class="input-group">
         <label for="num_head">num_head:</label>
-        <input type="number" id="num_head" value="6" min="1" max="128" oninput="updateNumHead(this.value)">
-        <input type="range" id="num_head_slider" value="6" min="1" max="128" step="1" oninput="updateNumHead(this.value)">
+        <input type="number" id="num_head" value="46" min="1" max="128" oninput="updateNumHead(this.value)">
+        <input type="range" id="num_head_slider" value="46" min="1" max="128" step="1" oninput="updateNumHead(this.value)">
     </div>
 
     <div class="input-group">
         <label for="head_dim">head_dim:</label>
-        <input type="number" id="head_dim" value="128" min="1" max="512" oninput="updateNormalSlider('head_dim', this.value)">
-        <input type="range" id="head_dim_slider" value="128" min="1" max="512" step="1" oninput="updateNormalInput('head_dim', this.value)">
+        <input type="number" id="head_dim" value="64" min="1" max="512" oninput="updateNormalSlider('head_dim', this.value)">
+        <input type="range" id="head_dim_slider" value="64" min="1" max="512" step="1" oninput="updateNormalInput('head_dim', this.value)">
     </div>
 
     <div class="input-group">
         <label for="rope_head_dim">rope_head_dim:</label>
-        <input type="number" id="rope_head_dim" value="32" min="1" max="512" oninput="updateNormalSlider('rope_head_dim', this.value)">
-        <input type="range" id="rope_head_dim_slider" value="32" min="1" max="512" step="1" oninput="updateNormalInput('rope_head_dim', this.value)">
+        <input type="number" id="rope_head_dim" value="16" min="1" max="512" oninput="updateNormalSlider('rope_head_dim', this.value)">
+        <input type="range" id="rope_head_dim_slider" value="16" min="1" max="512" step="1" oninput="updateNormalInput('rope_head_dim', this.value)">
     </div>
 
-    <!-- New input group for kv_lora_rank -->
     <div class="input-group">
         <label for="kv_lora_rank">kv_lora_rank:</label>
         <input type="number" id="kv_lora_rank" value="64" min="1" max="512" oninput="updateNormalSlider('kv_lora_rank', this.value); updateQLora();">
         <input type="range" id="kv_lora_rank_slider" value="64" min="1" max="512" step="1" oninput="updateNormalInput('kv_lora_rank', this.value); updateQLora();">
     </div>
 
-    <!-- New input group for q_lora_rank -->
     <div class="input-group">
         <label for="q_lora_rank">q_lora_rank:</label>
         <input type="number" id="q_lora_rank" value="192" min="1" max="1536" oninput="updateNormalSlider('q_lora_rank', this.value)">
@@ -159,10 +157,12 @@
         <details>
             <summary>Show formula</summary>
             <p>MLA Size = d_model * q_lora_rank +</p>
-            <p>           q_lora_rank * num_head * head_dim +</p>
-            <p>           2 * d_model * kv_lora_rank +</p>
-            <p>           2 * kv_lora_rank * num_head * head_dim +</p>
-            <p>           num_head * head_dim * d_model</p>
+            <p>           q_lora_rank * (nope_head_dim + rope_head_dim) * num_heads +</p>
+            <p>           d_model * kv_lora_rank +</p>
+            <p>           kv_lora_rank * nope_head_dim * num_heads +</p>
+            <p>           kv_lora_rank * head_dim * num_heads +</p>
+            <p>           d_model * rope_head_dim +</p>
+            <p>           num_heads * head_dim * d_model</p>
             <p>MLA Cache = kv_lora_rank + rope_head_dim</p>
         </details>
     </div>
@@ -214,11 +214,14 @@
                 // Calculate KV cache size per token
                 const kv_cache = 2 * d_model;
                 
-                // Calculate MLA size
+                // Calculate MLA size (updated based on mla.py)
+                const nope_head_dim = head_dim - rope_head_dim;
                 const mla_size = d_model * q_lora_rank + 
-                                 q_lora_rank * num_head * head_dim + 
-                                 2 * d_model * kv_lora_rank + 
-                                 2 * kv_lora_rank * num_head * head_dim + 
+                                 q_lora_rank * (nope_head_dim + rope_head_dim) * num_head + 
+                                 d_model * kv_lora_rank + 
+                                 kv_lora_rank * nope_head_dim * num_head + 
+                                 kv_lora_rank * head_dim * num_head + 
+                                 d_model * rope_head_dim + 
                                  num_head * head_dim * d_model;
                 
                 // Calculate MLA cache size per token (updated)
@@ -261,14 +264,20 @@
             } else {
                 const nearestValid = findNearestValidValue(value);
                 document.getElementById(inputId + '_slider').value = nearestValid;
-                document.getElementById(inputId).value = nearestValid;
+                if (inputId !== 'd_model') {
+                    document.getElementById(inputId).value = nearestValid;
+                }
             }
             calculateSizes();
         }
 
         function updateInput(inputId, value) {
             const nearestValid = findNearestValidValue(value);
-            document.getElementById(inputId).value = nearestValid;
+            if (inputId === 'd_model') {
+                document.getElementById(inputId).value = value;
+            } else {
+                document.getElementById(inputId).value = nearestValid;
+            }
             calculateSizes();
         }
 
@@ -328,6 +337,15 @@ mla_cache: ${formatNumber(mla_cache)}
 cache_saving: ${formatPercentage(cache_saving)}
             `.trim();
             document.getElementById('yaml_params').textContent = yaml;
+        }
+
+        function updateCustomDModel(value) {
+            const numValue = parseInt(value);
+            if (!isNaN(numValue) && numValue >= 1 && numValue <= 8192) {
+                document.getElementById('d_model').value = numValue;
+                document.getElementById('d_model_slider').value = findNearestValidValue(numValue);
+                calculateSizes();
+            }
         }
 
         // Initial calculation

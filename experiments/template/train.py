@@ -55,16 +55,16 @@ warmup_iters: int = max_iters//10
 
 total_batch_size:int = 2**13 
 seq_len: int = 256
-batch_size: int = 8 
+batch_size: int = 1 
 micro_batch: int = int(total_batch_size/(seq_len*batch_size))
 eval_iters: int = 100
 save_ckpt_iters: int = 2000
 
 multiple_of: int = 4
-d_model: int = 1024 // 4
+d_model: int = 1024 
 hidden_dim = int(d_model * multiple_of)
-num_layers: int = 32 // 3  # 44
-num_heads: int = 32
+num_layers: int = 16 #// 3  # 44
+num_heads: int = 16
 
 mlp: str = "GLU"
 activation_fn: str = "silu"
@@ -75,7 +75,7 @@ model_name = f"joey00072/model_name{'Baseline' if MONKEY_PATCH is None else str(
 assert d_model % num_heads == 0
 
 compile_model = True# not bool(sys.platform == "darwin")
-compile_mode:str = None #"reduce-overhead"
+compile_mode:str = "reduce-overhead"
 
 ### Dataset and Tokenizer
 dataset_name = "joey00072/pretokenized__JeanKaddour_minipile__EleutherAI__gpt-neo-125m"  # run pretokeinze first
@@ -115,6 +115,11 @@ def main():
         "resume_training": resume_training,
         "save_ckpt_iters": save_ckpt_iters,
     }
+    
+    print("="*100)  
+    print(hyper_params)
+    print("="*100)
+    
     
     loggers = []
 

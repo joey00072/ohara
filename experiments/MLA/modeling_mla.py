@@ -86,6 +86,7 @@ class Attention(nn.Module):
 
             output = torch.matmul(attn_mtx, v)  # (batch, n_head, seq_len, head_dim)
 
+        
         # restore time as batch dimension and concat heads
         output = output.transpose(1, 2).contiguous().view(batch, seq_len, d_model)
 
@@ -98,8 +99,8 @@ class Attention(nn.Module):
 class Block(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
-                    
-        self.attn = MultiHeadLatentAttention(config) if config.attn_type == "mla" else Attention(config)
+
+        self.attn = MultiHeadLatentAttention(config) if config.attn_type == "mla" else Attention(config) 
         self.ff = MLP_BLOCK[config.mlp](
             dim=config.d_model,
             hidden_dim=config.hidden_dim,
@@ -132,11 +133,9 @@ class Transformer(nn.Module):
 
         if config.weight_tying:
             self.token_emb.weight = self.vocab_proj.weight
-            
-            
-        rope_head_dim = config.rope_head_dim if config.attn_type == "mla" else config.d_model//config.num_heads
 
-        cos, isin = precompute_freqs_cis(rope_head_dim, config.seq_len * 2)
+        rope_dim = config.d_model // config.num_heads if config.rope_head_dim is None else config.rope_head_dim
+        cos, isin = precompute_freqs_cis(rope_dim, config.seq_len * 2)
         self.register_buffer("freq_cos", cos)
         self.register_buffer("freq_sin", isin)
 
