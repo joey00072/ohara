@@ -21,36 +21,27 @@ traceback.install()
 class Config(OrderedDict):
     vocab_size: int
     seq_len: int
-
     d_model: int
-
-    # in deepseekv2 d_model < num_heads * head_dim
-    # they expanded dim*3.2 for attention
-    num_heads: int
-    head_dim: int
-    hidden_dim: int
-    
-    num_kv_heads: int
-
+    num_heads: int = None
+    head_dim: int = None
+    hidden_dim: int = None
+    num_kv_heads: int = None
     num_layers: int = 4
-
     dropout: float = 0.2
     bias: bool = False
     weight_tying: bool = False
-
-    activation: str = "silu"  # "relu", "gelu", "silu" etc
-    mlp: str = "GLU"  # MLP or GLU
-    
-    # rope is applied partially to hdim of query and key
+    activation: str = "silu"
+    mlp: str = "GLU"
     rope_head_dim: int = None
-    
-    # rank for query is higher than key and value
-    # query has more information than key and value
-    # in deepseekv2  q_lora_rank =  3 * kv_lora_rank
     kv_lora_rank: int = None
     q_lora_rank: int = None
-    
     attn_type: str = "mla"
+
+    def __init__(self, **kwargs):
+        super().__init__()
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
 
 
 # ======================================================================================
@@ -80,6 +71,11 @@ class MultiHeadLatentAttention(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
         
+        assert config.head_dim is not None , f"head_dim is not defined {config.head_dim=}"
+        assert config.q_lora_rank is not None , f"q_lora_rank is not defined {config.q_lora_rank=}"
+        assert config.kv_lora_rank is not None , f"kv_lora_rank is not defined {config.kv_lora_rank=}"
+        assert config.rope_head_dim is not None , f"rope_head_dim is not defined {config.rope_head_dim=}"
+        
         self.config = config
         self.dim = config.d_model
         self.num_heads = config.num_heads
@@ -91,7 +87,7 @@ class MultiHeadLatentAttention(nn.Module):
         self.attention_dim = self.num_heads * self.head_dim
         self.rope_head_dim = config.rope_head_dim
         self.nope_head_dim = config.head_dim - config.rope_head_dim
-
+        
         # query compression
         self.compress_q_linear = nn.Linear(self.dim, self.q_lora_rank, bias=False)  # W_DQ
         self.decompress_q_nope = nn.Linear(self.q_lora_rank, self.nope_head_dim * self.num_heads, bias=False)
@@ -108,8 +104,10 @@ class MultiHeadLatentAttention(nn.Module):
         self.kv_norm = RMSNorm(self.kv_lora_rank)
         # self.rope_norm = RMSNorm(self.rope_head_dim) # not in deepseekv2
 
-        self.proj = nn.Linear(self.num_heads*self.head_dim, self.dim, bias=False)
-
+        self.proj = nn.Linear(self.num_heads*self.head_dim , self.dim, bias=False)
+        
+        
+ 
     def forward(self, x: Tensor,mask: torch.Tensor, freqs_cis: Tensor):
         batch_size, seq_len, _ = x.shape
 

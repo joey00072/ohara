@@ -32,8 +32,9 @@ from lightning.pytorch.loggers import WandbLogger
 from lightning.fabric.loggers import TensorBoardLogger
 
 from modeling_mla import ModelingLM, Config
+
 from ohara.trainer import Trainer
-attn_type = "mla"
+
 
 traceback.install()
 
@@ -41,8 +42,11 @@ torch.set_float32_matmul_precision("high")
 
 # ================================================================================================
 
+# EXP
+attn_type = "mla" # "mha"
+
 ### CONFIGS
-wandb_project_name = "Ohara-MODEL"
+wandb_project_name = "Ohara-MLA"
 wandb_run_name = random_name()
 
 learning_rate: float = 5e-4
@@ -53,33 +57,35 @@ warmup_iters: int = max_iters//10
 
 total_batch_size:int = 2**13 
 seq_len: int = 256
-batch_size: int = 8 
+batch_size: int = 64 
 micro_batch: int = int(total_batch_size/(seq_len*batch_size))
 eval_iters: int = 100
 save_ckpt_iters: int = 2000
 
 multiple_of: int = 4
-d_model: int = 1024 
-hidden_dim = int(d_model * multiple_of)
-num_layers: int = 10 #32 // 3  # 44
-num_heads: int = 10
+mlp_expansion_ratio: int = 1.5  # putting this low so I can fit attention layers
+d_model: int = 1024
+hidden_dim = int(d_model * mlp_expansion_ratio)
+num_layers: int = 8 #// 3  # 44
+num_heads: int = 46 if attn_type=="mla" else 16
+num_kv_heads: int = num_heads
 
-kv_lora_rank = 64
-q_lora_rank = 3 * kv_lora_rank
+head_dim = 64 if attn_type=="mla" else None
+rope_head_dim = 16 if attn_type=="mla" else None
+kv_lora_rank = 64 if attn_type=="mla" else None
+q_lora_rank = 3*kv_lora_rank if attn_type=="mla" else None
 
-head_dim: int = 128
-rope_head_dim: int = 32
 
 mlp: str = "GLU"
 activation_fn: str = "silu"
 
 MONKEY_PATCH = False
-model_name = f"joey00072/model_name_{attn_type}"
+model_name = f"joey00072/model_name{'Baseline' if MONKEY_PATCH is None else str(MONKEY_PATCH)}"
 
-assert d_model % num_heads == 0
+if attn_type!="mla": assert d_model % num_heads == 0
 
 compile_model = True# not bool(sys.platform == "darwin")
-compile_mode:str = None #"reduce-overhead"
+compile_mode:str = "reduce-overhead"
 
 ### Dataset and Tokenizer
 dataset_name = "joey00072/pretokenized__JeanKaddour_minipile__EleutherAI__gpt-neo-125m"  # run pretokeinze first
@@ -96,24 +102,26 @@ checkpoint_path = "./ckpt/model.pt"
 wandb_logger = False
 tensorboard_logger = True
 
-print(f">>>> {attn_type} <<<<")
 # ================================================================================================
 
-
 def main():
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     hyper_params = {
+        "vocab_size": tokenizer.vocab_size,
+        "seq_len": seq_len,
+        "d_model": d_model,
+        "hidden_dim": hidden_dim,
+        "num_heads": num_heads,
+        "head_dim": head_dim,
+        "rope_head_dim": rope_head_dim,
+        "kv_lora_rank": kv_lora_rank,
+        "q_lora_rank": q_lora_rank,
         "learning_rate": learning_rate,
         "min_learning_rate": min_learning_rate,
         "warmup_iters": warmup_iters,
+        "num_kv_heads": num_kv_heads,
         "max_iters": max_iters,
-        "eval_iters": eval_iters,
-        "batch_size": batch_size,
         "micro_batch": micro_batch,
-        "d_model": d_model,
-        "seq_len": seq_len,
-        "num_layers": num_layers,
-        "num_heads": num_heads,
-        "multiple_of": multiple_of,
         "compile_model": compile_model,
         "tokenizer_name": tokenizer_name,
         "dataset_name": dataset_name,
@@ -125,6 +133,11 @@ def main():
         "kv_lora_rank": kv_lora_rank,
         "q_lora_rank": q_lora_rank,
     }
+    
+    print("="*100)  
+    print(hyper_params)
+    print("="*100)
+    
     
     loggers = []
 
@@ -140,27 +153,9 @@ def main():
     fabric = L.Fabric(loggers=loggers, precision="bf16-mixed")
     fabric.logger.log_hyperparams(hyper_params)
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    
 
-    config = Config(
-        vocab_size=tokenizer.vocab_size,
-        seq_len=seq_len,
-        d_model=d_model,
-        hidden_dim=hidden_dim,
-        head_dim= head_dim,
-        rope_head_dim=rope_head_dim,
-        num_heads=num_heads,
-        num_kv_heads=0,
-        num_layers=num_layers,
-        dropout=0.2,
-        bias=False,
-        weight_tying=True,
-        activation=activation_fn,
-        mlp=mlp,
-        attn_type=attn_type,
-        kv_lora_rank=kv_lora_rank,
-        q_lora_rank=q_lora_rank,
-    )
+    config = Config(**hyper_params)
 
     train_ds = PreTokenizedDataset(
         dataset_name=dataset_name,
@@ -187,14 +182,14 @@ def main():
         target_layers = ["key", "value", "query", "proj", "w1", "w2", "w3"]
         dm_linear_monkey_patch(model, target_layers)
         print("\n>>>> Applied monkey patching <<<<\n")
-        
+
     model: L.LightningModule = fabric.setup(model)
     print("=" * 100)
     if compile_model:
         model = torch.compile(model,mode=compile_mode)
     # model.gradient_checkpointing_enable()
     print(model)
-    print(model_summary(model.model.layers[0]))
+    print(model_summary(model))
     import time
 
     get_lr = CosineScheduler(
