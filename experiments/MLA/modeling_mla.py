@@ -1,4 +1,3 @@
-from typing import assert_type
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

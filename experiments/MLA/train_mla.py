@@ -55,9 +55,9 @@ min_learning_rate: float = 0.0
 max_iters: int = 10_000
 warmup_iters: int = max_iters//10 
 
-total_batch_size:int = 2**13 
+total_batch_size:int = 2**14 
 seq_len: int = 256
-batch_size: int = 64 
+batch_size: int = 32 
 micro_batch: int = int(total_batch_size/(seq_len*batch_size))
 eval_iters: int = 100
 save_ckpt_iters: int = 2000
