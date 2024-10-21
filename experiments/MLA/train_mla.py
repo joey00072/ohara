@@ -61,6 +61,7 @@ batch_size: int = 32
 micro_batch: int = int(total_batch_size/(seq_len*batch_size))
 eval_iters: int = 100
 save_ckpt_iters: int = 2000
+dropout: float = 0.2
 
 multiple_of: int = 4
 mlp_expansion_ratio: int = 1.5  # putting this low so I can fit attention layers
@@ -132,6 +133,7 @@ def main():
         "rope_head_dim": rope_head_dim,
         "kv_lora_rank": kv_lora_rank,
         "q_lora_rank": q_lora_rank,
+        "dropout": dropout,
     }
     
     print("="*100)  

@@ -27,7 +27,7 @@ class Config(OrderedDict):
     hidden_dim: int = None
     num_kv_heads: int = None
     num_layers: int = 4
-    dropout: float = 0.2
+    dropout: float = 0.0
     bias: bool = False
     weight_tying: bool = False
     activation: str = "silu"
@@ -82,7 +82,7 @@ class MultiHeadLatentAttention(nn.Module):
         self.head_dim = config.head_dim
         self.q_lora_rank = config.q_lora_rank
         self.kv_lora_rank = config.kv_lora_rank
-
+        self.dropout = config.dropout
         # (attention_dim == num_head*head_dim) > d_model in deepseekv2
         self.attention_dim = self.num_heads * self.head_dim
         self.rope_head_dim = config.rope_head_dim
@@ -105,6 +105,8 @@ class MultiHeadLatentAttention(nn.Module):
         # self.rope_norm = RMSNorm(self.rope_head_dim) # not in deepseekv2
 
         self.proj = nn.Linear(self.num_heads*self.head_dim , self.dim, bias=False)
+        
+        self.res_dropout = nn.Dropout(config.dropout)
         
         
  
@@ -145,12 +147,12 @@ class MultiHeadLatentAttention(nn.Module):
         k_recombined[:,:,:,:self.nope_head_dim] = key_nope
         k_recombined[:,:,:,self.nope_head_dim:] = k_rope
 
-        output = F.scaled_dot_product_attention(q_recombined, k_recombined, value, is_causal=True)
+        output = F.scaled_dot_product_attention(q_recombined, k_recombined, value, is_causal=True, dropout_p=self.dropout)
 
         output = output.contiguous().view(batch_size, seq_len, self.num_heads * self.head_dim)
 
         output = self.proj(output)
-
+        output = self.res_dropout(output)
         return output
 
 
@@ -238,6 +240,91 @@ class MLA_Inference(MultiHeadLatentAttention):
             query_nope:Tensor = self.decompress_q_nope(norm_q)
         
 
+class DSMultiHeadLatentAttention(nn.Module):
+    """
+    Multi Head Latent Attention compatible with your config and inputs,
+    using your RoPE implementation and taking mask as input.
+    """
+    def __init__(self, config):
+        super().__init__()
+
+        assert config.head_dim is not None, f"head_dim is not defined {config.head_dim=}"
+        assert config.q_lora_rank is not None, f"q_lora_rank is not defined {config.q_lora_rank=}"
+        assert config.kv_lora_rank is not None, f"kv_lora_rank is not defined {config.kv_lora_rank=}"
+        assert config.rope_head_dim is not None, f"rope_head_dim is not defined {config.rope_head_dim=}"
+
+        self.config = config
+        self.dim = config.d_model
+        self.num_heads = config.num_heads
+        self.head_dim = config.head_dim
+        self.q_lora_rank = config.q_lora_rank
+        self.kv_lora_rank = config.kv_lora_rank
+        self.dropout = config.dropout
+        self.rope_head_dim = config.rope_head_dim
+        self.nope_head_dim = self.head_dim - self.rope_head_dim
+
+        # Query projections
+        self.q_a_proj = nn.Linear(self.dim, self.q_lora_rank, bias=False)
+        self.q_a_layernorm = RMSNorm(self.q_lora_rank)
+        self.q_b_proj = nn.Linear(self.q_lora_rank, self.num_heads * self.head_dim, bias=False)
+
+        # Key and Value projections
+        self.kv_a_proj_with_rope = nn.Linear(self.dim, self.kv_lora_rank + self.rope_head_dim, bias=False)
+        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank)
+        self.kv_b_proj = nn.Linear(
+            self.kv_lora_rank,
+            self.num_heads * (self.nope_head_dim + self.head_dim),
+            bias=False,
+        )
+
+        # Output projection
+        self.proj = nn.Linear(self.num_heads * self.head_dim, self.dim, bias=False)
+
+        self.res_dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor, freqs_cis: torch.Tensor):
+        batch_size, seq_len, _ = x.shape
+
+        # Query projections
+        compressed_q = self.q_a_proj(x)
+        norm_q = self.q_a_layernorm(compressed_q)
+        q = self.q_b_proj(norm_q)
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        q_nope, q_rope = torch.split(q, [self.nope_head_dim, self.rope_head_dim], dim=-1)
+
+        # Key and Value projections
+        kv_proj = self.kv_a_proj_with_rope(x)
+        compressed_kv, k_rope = torch.split(kv_proj, [self.kv_lora_rank, self.rope_head_dim], dim=-1)
+        norm_kv = self.kv_a_layernorm(compressed_kv)
+        kv = self.kv_b_proj(norm_kv)
+        kv = kv.view(batch_size, seq_len, self.num_heads, self.nope_head_dim + self.head_dim).transpose(1, 2)
+        k_nope, v = torch.split(kv, [self.nope_head_dim, self.head_dim], dim=-1)
+        k_rope = k_rope.view(batch_size, seq_len, 1, self.rope_head_dim).transpose(1, 2)
+
+        # Apply RoPE
+        q_rope, k_rope = apply_rope(q_rope, k_rope,freqs_cis)
+        
+        # Recombine q and k
+        q_recombined = torch.cat([q_nope, q_rope], dim=-1)
+        k_recombined = torch.cat([k_nope, k_rope.expand(-1, self.num_heads, -1, -1)], dim=-1)
+
+        # Compute attention output using scaled_dot_product_attention
+        attn_output = F.scaled_dot_product_attention(
+            q_recombined,
+            k_recombined,
+            v,
+            attn_mask=mask,
+            dropout_p=self.dropout,
+            is_causal=True
+        )
+
+        # Reshape and project
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.num_heads * self.head_dim)
+        output = self.proj(attn_output)
+        output = self.res_dropout(output)
+
+        return output
+
 
 def mla_reformulation_test(config:Config):
     
@@ -277,7 +364,7 @@ if __name__ == "__main__":
     x = torch.randn(2, 10, d_model)
     freqs_cis = precompute_freqs_cis(config.rope_head_dim, config.seq_len)
     # mla = torch.compile(mla)
-    output = mla(x, freqs_cis)
+    print(f"Model Size: {sum(p.numel() for p in mla.parameters())} ")
+    output = mla(x,None, freqs_cis)
     print(output.shape)
     
- 
