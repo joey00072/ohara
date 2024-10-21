@@ -14,7 +14,7 @@ from huggingface_hub import PyTorchModelHubMixin
 
 from collections import OrderedDict
 
-from mla import Config, MultiHeadLatentAttention
+from mla import Config, MultiHeadLatentAttention,DSMultiHeadLatentAttention
 
 MLP_BLOCK = {"MLP": MLP, "GLU": GLU}
 
@@ -99,7 +99,7 @@ class Block(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
 
-        self.attn = MultiHeadLatentAttention(config) if config.attn_type == "mla" else Attention(config) 
+        self.attn = DSMultiHeadLatentAttention(config) if config.attn_type == "mla" else Attention(config) 
         self.ff = MLP_BLOCK[config.mlp](
             dim=config.d_model,
             hidden_dim=config.hidden_dim,
