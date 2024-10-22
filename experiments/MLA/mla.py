@@ -302,11 +302,24 @@ class DSMultiHeadLatentAttention(nn.Module):
         k_rope = k_rope.view(batch_size, seq_len, 1, self.rope_head_dim).transpose(1, 2)
 
         # Apply RoPE
-        q_rope, k_rope = apply_rope(q_rope, k_rope,freqs_cis)
+        q_rope, k_rope = apply_rope(k_rope,q_rope,freqs_cis)
         
         # Recombine q and k
-        q_recombined = torch.cat([q_nope, q_rope], dim=-1)
-        k_recombined = torch.cat([k_nope, k_rope.expand(-1, self.num_heads, -1, -1)], dim=-1)
+        # q_recombined = torch.cat([q_nope, q_rope], dim=-1)
+        # k_recombined = torch.cat([k_nope, k_rope.expand(-1, self.num_heads, -1, -1)], dim=-1)
+         
+        q_recombined = torch.empty((batch_size,self.num_heads,seq_len, self.head_dim), device=x.device)
+        k_recombined = torch.empty((batch_size, self.num_heads, seq_len, self.head_dim), device=x.device)
+        
+        
+        q_recombined[:,:,:,:self.nope_head_dim] = q_nope
+        q_recombined[:,:,:,self.nope_head_dim:] = q_rope
+        
+        # k_rope = torch.repeat_interleave(k_rope, self.num_heads, dim=1) # >> you dont need to do this <<
+        # 👇 broadcasting will do replication krope to all heads automagically
+        k_recombined[:,:,:,:self.nope_head_dim] = k_nope
+        k_recombined[:,:,:,self.nope_head_dim:] = k_rope
+
 
         # Compute attention output using scaled_dot_product_attention
         attn_output = F.scaled_dot_product_attention(
@@ -360,7 +373,7 @@ if __name__ == "__main__":
         rope_head_dim=rope_head_dim,
     )
 
-    mla = MultiHeadLatentAttention(config)
+    mla = DSMultiHeadLatentAttention(config)
     x = torch.randn(2, 10, d_model)
     freqs_cis = precompute_freqs_cis(config.rope_head_dim, config.seq_len)
     # mla = torch.compile(mla)
