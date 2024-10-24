@@ -84,7 +84,7 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     return freqs_cis.view(shape)
 
 
-def apply_rope(k, q, cis):
+def apply_rope(q,k, cis):
     # Idea suppose vector v = [x,y,x1,y1,...] # v.shape = dim
     # convert vetor into complex num # ie two vec one real, one imagery
     # [x,y,x1,y1,...] -> x+iy, x1+iy1
