@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="ohara",
-    version="0.1.1",
+    version="0.1.2",
     packages=find_packages(),
     author="joey00072",
     author_email="00shxf@gmail.com",
