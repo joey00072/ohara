@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="ohara",
-    version="0.1.2",
+    version="0.1.3",
     packages=find_packages(),
     author="joey00072",
     author_email="00shxf@gmail.com",
@@ -13,7 +13,6 @@ setup(
     install_requires=[
         # Add your project dependencies here
         "lightning>=2.3.0",
-        "torch>=2.0.0", 
         "transformers>=4.46.0",
         "datasets>=3.1.0",
         "wandb>=0.18.0",
