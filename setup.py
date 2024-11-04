@@ -12,13 +12,13 @@ setup(
     url="https://github.com/joey00072/ohara",
     install_requires=[
         # Add your project dependencies here
-        # TODO: add requirements here
-        "lightning",
-        "transformers",
-        "datasets",
-        "wandb",
-        "rich",
-        "tensorboard",
+        "lightning>=2.3.0",
+        "torch>=2.0.0", 
+        "transformers>=4.46.0",
+        "datasets>=3.1.0",
+        "wandb>=0.18.0",
+        "rich>=13.19.0",
+        "tensorboard>=2.18.0",
     ],
     entry_points={
         "console_scripts": [
