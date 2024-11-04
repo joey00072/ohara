@@ -16,7 +16,6 @@ setup(
         "lightning",
         "transformers",
         "datasets",
-        "torch",
         "wandb",
         "rich",
         "tensorboard",
