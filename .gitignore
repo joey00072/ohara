@@ -29,3 +29,6 @@ runs/
 logs/
 hf_cache/
 */media/
+logs*/
+**/logs*/
+model.pt
