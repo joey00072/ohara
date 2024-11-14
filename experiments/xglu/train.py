@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
 
-# from rich import print, traceback
+from rich import print, traceback
 
 import lightning as L
 from lightning.pytorch.loggers import WandbLogger
@@ -36,17 +36,17 @@ from model import ModelingLM, Config
 from ohara.trainer import Trainer
 
 
-# traceback.install()
+traceback.install()
 
 torch.set_float32_matmul_precision("high")
 
 # ================================================================================================
 
 ### CONFIGS
-wandb_project_name = "Ohara-MODEL"
+wandb_project_name = "Ohara-XGLU"
 wandb_run_name = random_name()
 
-learning_rate: float = 5e-4
+learning_rate: float = 3e-4 # Karpathy Constant 
 min_learning_rate: float = 0.0
 
 max_iters: int = 10_000 
@@ -62,10 +62,13 @@ save_ckpt_iters: int = 2000
 multiple_of: int = 4
 d_model: int = 1024 
 hidden_dim = int(d_model * multiple_of)
-num_layers: int = 16*2 #// 3  # 44
-num_heads: int = 16*2
+num_layers: int = 16 #// 3  # 44
+num_heads: int = 16
 
 args = sys.argv
+
+mlp: str = "GLU"
+expand_ratio: int = 4
 
 for arg in args:
     if arg.startswith("--mlp"):
@@ -126,6 +129,12 @@ def main():
         "dataset_name": dataset_name,
         "resume_training": resume_training,
         "save_ckpt_iters": save_ckpt_iters,
+        "hidden_dim": hidden_dim,
+        "mlp": mlp,
+        "activation_fn": activation_fn,
+        "expand_ratio": expand_ratio,
+        "total_batch_size": total_batch_size,
+        "compile_mode": compile_mode
     }
     
     print("="*100)  
@@ -184,20 +193,15 @@ def main():
     train_dataloader, test_dataloader = fabric.setup_dataloaders(train_dataloader, test_dataloader)
 
     model = ModelingLM(config)
-
-    # if MONKEY_PATCH:
-    #     target_layers = ["key", "value", "query", "proj", "w1", "w2", "w3"]
-    #     dm_linear_monkey_patch(model, target_layers)
-    #     print("\n>>>> Applied monkey patching <<<<\n")
+    print(model)
 
     model: L.LightningModule = fabric.setup(model)
     print("=" * 100)
     if compile_model:
         model = torch.compile(model,mode=compile_mode)
     # model.gradient_checkpointing_enable()
-    print(model)
     print(model_summary(model))
-    # exit()
+
     import time
 
     get_lr = CosineScheduler(
@@ -235,7 +239,7 @@ def main():
         optimizer.load_state_dict(checkpoint['optimizer'])
         start_iter = checkpoint['idx']
         print(f"Resuming from iteration: {start_iter}")
-    exit()
+    # exit()
     # Let's GO!!
     trainer.train(start_iter=start_iter)
 

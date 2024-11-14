@@ -1,4 +1,3 @@
-from typing import assert_type
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,7 +14,8 @@ from huggingface_hub import PyTorchModelHubMixin
 
 from collections import OrderedDict
 
-from xglu import MLP, GLU , XGLU, RGLU
+from xglu import MLP, GLU , XGLU
+
 
 @dataclass
 class Config(OrderedDict):
@@ -37,7 +37,7 @@ class Config(OrderedDict):
     activation: str = "silu"  # "relu", "gelu", "silu" etc
     mlp: str = "GLU"  # MLP or GLU
 
-MLP_BLOCK = {"MLP": MLP, "GLU": GLU, "XGLU": XGLU, "RGLU": RGLU}
+MLP_BLOCK = {"MLP": MLP, "GLU": GLU, "XGLU": XGLU}
 
 
 class Attention(nn.Module):
@@ -215,3 +215,5 @@ if __name__ == "__main__":
 
     model = ModelingLM(config).eval()
     print(model)
+
+    

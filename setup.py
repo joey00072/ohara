@@ -16,7 +16,7 @@ setup(
         "transformers>=4.46.0",
         "datasets>=3.1.0",
         "wandb>=0.18.0",
-        "rich>=13.19.0",
+        "rich>=13",
         "tensorboard>=2.18.0",
     ],
     entry_points={
