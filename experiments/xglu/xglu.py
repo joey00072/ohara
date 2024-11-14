@@ -18,47 +18,6 @@ ACT2FN = {
     "relu2": relu_squared,
 }
 
-class RGLU(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        hidden_dim: int | None = None,
-        mlp_rank: int = 240,
-        multiple_of: int = 4,
-        dropout: float | None = None,
-        activation_fn: str = "silu",
-        bias: bool = False,
-        *args,
-        **kwargs,
-    ):
-        """
-        GLU Variants Improve Transformer
-        https://arxiv.org/abs/2002.05202v1
-
-        order in which W1,W2,W3 are multiplied is as per llama (for compatiblity)
-        """
-        super().__init__()
-        self.compress = nn.Linear(dim, mlp_rank, bias=bias)
-        self.up_decomp = nn.Linear(mlp_rank, hidden_dim, bias=bias)
-        self.gate_decomp = nn.Linear(mlp_rank, hidden_dim, bias=bias)
-        self.down = nn.Linear(hidden_dim, dim, bias=bias)
-
-        self.compress_norm = RMSNorm(mlp_rank)
-        # self.up_norm = RMSNorm(hidden_dim)
-        self.gate_norm = RMSNorm(hidden_dim)
-
-        self.activation = ACT2FN[activation_fn]
-        self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
-
-    def forward(self, x):
-        x_compress = self.compress(x)
-        x_compress = self.compress_norm(x_compress)
-        up = self.up_decomp(x_compress)
-        gate = self.gate_decomp(x_compress)
-        gate = self.gate_norm(gate)
-        gate = self.activation(gate)
-        down = self.down(gate * up)
-        return self.dropout(down)
 
 class XGLU(nn.Module):
     def __init__(
