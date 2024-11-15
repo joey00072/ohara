@@ -7,6 +7,7 @@ from ohara.modules.activations import ACT2FN
 import math
 
 
+
 def gelu_l2_norm(inputs, dim=-1):
     nonlinear_outputs = F.gelu(inputs)
     norm_outputs = (
@@ -25,6 +26,7 @@ class Pattention(nn.Module):
     check down from renamed version
     only contribution of paper is using gelu_l2_norm allows
     you to expand weight matrix without (maybe)
+    https://arxiv.org/pdf/2410.23168
     """
 
     def __init__(

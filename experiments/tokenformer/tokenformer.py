@@ -16,6 +16,8 @@ from huggingface_hub import PyTorchModelHubMixin
 from collections import OrderedDict
 
 from pattention import Pattention
+# read pattenion ^
+
 
 @dataclass
 class Config(OrderedDict):
