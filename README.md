@@ -46,16 +46,21 @@ If you look into [docs](./docs/) you can find some written things. this are most
 
 ### WORK IS PROGESS (always)
 
-### papers
-1. [SwiGLU](./ohara/models/mlp.py) | [md](./docs/glu/GLU%20Variants%20Improve%20Transformer.md)
-2. [Alibi Embeddings](./ohara/embedings_pos/alibi.py) | [md](./ohara/embedings_pos/alibi/alibi.md)
-3. [Rotary Embeddings](./ohara/embedings_pos/rotatry.py) | [md](./docs/RoFormer.md) 
-4. [LoRA ](./ohara/adaptor/lora.py)
-5. [LLAMA](./ohara/llama/llama.py) | [md](./docs/llama/llama.md)
-6. [XPOS](./ohara/embedings_pos/xpos.py)
-7. [GPT](./ohara/models/gpt.py) | [md](./docs/gpt/gpt.md)
-8. [Mamba](./ohara/models/mamba.py)
-9. [renet](./ohara/models/retnet.py)
+### papers / models
+- [TokenFormer](./experiments/tokenformer/pattention.py)
+- [MLA](./experiments/mla/mla.py)
+- [Griffin & Hawk](./experiments/griffin_and_hawk/griffin_and_hawk.py)
+- [Galore](./experiments/galore/galore.py)
+- [Qsparse](./experiments/qsparse/qsparse.py)
+- [Bitnet](./experiments/bitnet/bitnet.py)
+- [renet](./ohara/models/retnet.py)
+- [Alibi Embeddings](./ohara/embedings_pos/alibi.py) | [md](./ohara/embedings_pos/alibi/alibi.md)
+- [Rotary Embeddings](./ohara/embedings_pos/rotatry.py) | [md](./docs/RoFormer.md) 
+- [LoRA ](./ohara/adaptor/lora.py)
+- [LLAMA](./ohara/llama/llama.py) | [md](./docs/llama/llama.md)
+- [XPOS](./ohara/embedings_pos/xpos.py)
+- [Mamba](./ohara/models/mamba.py)
+- [GPT](./ohara/models/gpt.py) | [md](./docs/gpt/gpt.md)
 
 
 ### More things are not in this repo
