@@ -75,6 +75,8 @@ class GLU(nn.Module):
         dropout: float | None = None,
         activation_fn: str = "silu",
         bias: bool = False,
+        *args,
+        **kwargs,
     ):
         """
         GLU Variants Improve Transformer
@@ -199,7 +201,7 @@ class GEGLU(nn.Module):
 MLP_MAP = {
     "swiglu": SwiGLU,
     "mlp": MLP,
-    "glu": nn.GLU,
+    "glu": GLU,
     "bilinear": BiLinear,
     "reglu": ReGLU,
     "geglu": GEGLU,
