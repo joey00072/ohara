@@ -50,19 +50,19 @@ learning_rate: float = 5e-4
 min_learning_rate: float = 0.0
 
 max_iters: int = 20_000
-warmup_iters: int = max_iters//10 
+warmup_iters: int = max_iters//10
 
-total_batch_size:int = 2**13 
+total_batch_size:int = 2**15
 seq_len: int = 256
-batch_size: int = 1 
+batch_size: int = 32
 micro_batch: int = int(total_batch_size/(seq_len*batch_size))
 eval_iters: int = 100
-save_ckpt_iters: int = 2000
+save_ckpt_iters: int = max_iters-1
 
 multiple_of: int = 4
-d_model: int = 512
-hidden_dim = int(d_model * multiple_of)
-num_layers: int = 32 #// 3  # 44
+d_model: int = 1024
+hidden_dim = int(d_model * 1.5)
+num_layers: int = 16 #// 3  # 44
 
 mlp: str = "glu"
 activation_fn: str = "silu"
@@ -75,7 +75,7 @@ for arg in sys.argv:
         head_dim = int(arg.split("=")[1])
     elif arg.startswith("num_heads="):
         num_heads = int(arg.split("=")[1])
-        
+
 rope_head_dim = head_dim
 if attention_type == "partial_kv":
     rope_head_dim = head_dim//2
@@ -86,8 +86,8 @@ compile_model = True
 compile_mode:str = "reduce-overhead"
 
 ### Dataset and Tokenizer
-dataset_name = "joey00072/pretokenized__roneneldan_TinyStories__microsoft__phi-2" #"joey00072/pretokenized__JeanKaddour_minipile__EleutherAI__gpt-neo-125m"  # run pretokeinze first
-tokenizer_name = "microsoft/phi-2"
+dataset_name = "joey00072/pretokenized__JeanKaddour_minipile__EleutherAI__gpt-neo-125m"  # run pretokeinze first
+tokenizer_name = "EleutherAI/gpt-neo-125m"
 
 ### Setup
 device = auto_accelerator()  # auto chose device (cuda, mps)
@@ -98,7 +98,7 @@ push_to_hub = True
 checkpoint_path = "./ckpt/model.pt"
 
 wandb_logger = True
-tensorboard_logger = False
+tensorboard_logger = True
 
 # ================================================================================================
 
@@ -126,12 +126,12 @@ def main():
         "attention_type": attention_type,
         "rope_head_dim": rope_head_dim,
     }
-    
-    print("="*100)  
+
+    print("="*100)
     print(hyper_params)
     print("="*100)
-    
-    
+
+
     loggers = []
 
     if wandb_logger:
@@ -186,7 +186,8 @@ def main():
     train_dataloader, test_dataloader = fabric.setup_dataloaders(train_dataloader, test_dataloader)
 
     print(config)
-    model = ModelingLM(config)
+    with fabric.init_module():
+        model = ModelingLM(config)
     print(model)
 
 
@@ -195,7 +196,7 @@ def main():
     if compile_model:
         model = torch.compile(model,mode=compile_mode)
     # model.gradient_checkpointing_enable()
-    
+
     print(model_summary(model))
     import time
 
