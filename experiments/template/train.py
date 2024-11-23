@@ -61,9 +61,9 @@ eval_iters: int = 100
 save_ckpt_iters: int = 2000
 
 multiple_of: int = 4
-d_model: int = 1024 
+d_model: int = 512 
 hidden_dim = int(d_model * multiple_of)
-num_layers: int = 16 #// 3  # 44
+num_layers: int = 32 #// 3  # 44
 num_heads: int = 16
 
 mlp: str = "GLU"
@@ -78,8 +78,8 @@ compile_model = True# not bool(sys.platform == "darwin")
 compile_mode:str = "reduce-overhead"
 
 ### Dataset and Tokenizer
-dataset_name = "joey00072/pretokenized__JeanKaddour_minipile__EleutherAI__gpt-neo-125m"  # run pretokeinze first
-tokenizer_name = "EleutherAI/gpt-neo-125m"
+dataset_name = "joey00072/pretokenized__roneneldan_TinyStories__microsoft__phi-2" #"joey00072/pretokenized__JeanKaddour_minipile__EleutherAI__gpt-neo-125m"  # run pretokeinze first
+tokenizer_name = "microsoft/phi-2"
 
 ### Setup
 device = auto_accelerator()  # auto chose device (cuda, mps)

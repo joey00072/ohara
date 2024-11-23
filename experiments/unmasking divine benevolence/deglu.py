@@ -74,5 +74,5 @@ if __name__ == "__main__":
     dim = 4
     hdim = 8
     x = torch.randn(bsz, dim)
-    m = DeGLU(dim, hdim)
-    print(m(x).shape)
+    model = DeGLU(dim, hdim)
+    print(model(x).shape)

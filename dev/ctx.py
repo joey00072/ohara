@@ -1,116 +1,235 @@
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from dataclasses import dataclass
+from collections import OrderedDict
+
+from ohara.modules.norm import RMSNorm
+
+from ohara.embedings_pos.rotatry import precompute_freqs_cis
+from ohara.embedings_pos.rotatry import apply_rope
+
+from torch import Tensor
+
+import math
+from rich import print, traceback
+traceback.install()
 
 
-# rotary embedding
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    # [: (dim // 2)] for odd number truncation
-    # torch.arange(0, dim, 2) -> 2(i-1)//d while i= 1,2,..,(d//2)
+@dataclass
+class Config(OrderedDict):
+    vocab_size: int
+    seq_len: int
+    d_model: int
+    num_heads: int = None
+    head_dim: int = None
+    hidden_dim: int = None
+    num_kv_heads: int = None
+    num_layers: int = 4
+    dropout: float = 0.0
+    bias: bool = False
+    weight_tying: bool = False
+    activation: str = "silu"
+    mlp: str = "GLU"
+    rope_head_dim: int = None
+    kv_lora_rank: int = None
+    attn_type: str = "mla"
 
-    t = torch.arange(end, device=freqs.device)
-    freqs = torch.outer(t, freqs).float()  # gives diffrent angle vector
-
-    # e^it = cos(t) + i sin(t)
-    freqs_cos = torch.cos(freqs)  # real
-    freqs_sin = torch.sin(freqs)  # imaginary
-    return freqs_cos, freqs_sin
-
-
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
-    ndim = x.dim()
-    assert 1 < ndim
-    assert freqs_cis.shape == (
-        x.shape[1],
-        x.shape[-1],
-    ), f"{freqs_cis.shape=}, {(x.shape[1], x.shape[-1])=}"
-
-    # keep 2nd (T) and last(freq) dim same else make dim 1 for freq_cis
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-    # print(shape)
-    return freqs_cis.view(shape)
+    def __init__(self, **kwargs):
+        super().__init__()
+        for key, value in kwargs.items():
+            setattr(self, key, value)
 
 
-def apply_rope(k, q, freq_cis):
-    freqs_sin, freqs_cos = freq_cis
-    #  rehsape a shape (...,n )-> (..., n//2,2)
-    q_cis = q.float().reshape(
-        q.shape[:-1] + (-1, 2)
-    )  # (B,T,nhead,C) -> (B,T,nhead,Cc,2) # Cc = C//2
-    k_cis = k.float().reshape(k.shape[:-1] + (-1, 2))  # (B,T,nhead,C) -> (B,T,nhead,Cc,2)
+class KAttention(nn.Module):
+    def __init__(self, config: Config):
+        super().__init__()
 
-    xq_r, xq_i = q_cis.unbind(-1)  # (B,T,nhead,Cc,2) -> ((B,T,Cc), (B,T,Cc)) split into two tuple
-    xk_r, xk_i = k_cis.unbind(-1)  # (B,T,nhead,Cc,2) -> ((B,T,Cc), (B,T,Cc))
+        d_model = config.d_model
+        self.num_heads = config.num_heads
+        self.head_dim = config.d_model // config.num_heads
+        self.num_kv_heads = config.num_heads if config.num_kv_heads == 0 else config.num_kv_heads
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-    freqs_cos = reshape_for_broadcast(freq_cis[0], xq_r)  # freqs.shape = (1,T,1,Cc)
-    freqs_sin = reshape_for_broadcast(freq_cis[0], xq_r)
+        self.key = nn.Linear(d_model, self.head_dim * self.num_kv_heads, config.bias)
+        self.query = nn.Linear(d_model, self.head_dim * self.num_heads, config.bias)
+        self.proj = nn.Linear(d_model, d_model, config.bias)
 
-    xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin
-    xq_out_i = xq_r * freqs_sin + xq_i * freqs_cos
-    xk_out_r = xk_r * freqs_cos - xk_i * freqs_sin
-    xk_out_i = xk_r * freqs_sin + xk_i * freqs_cos
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.res_dropout = nn.Dropout(config.dropout)
 
-    # now we stack r,i -> [r,i,r2,i2]
-    xq_out = torch.stack([xq_out_r, xq_out_i], dim=-1)  # (B,T,nhead,Cc,2)
-    xk_out = torch.stack([xk_out_r, xk_out_i], dim=-1)  # (B,T,nhead,Cc,2)
+        self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
 
-    # flatten last two dimensions
-    xq_out = xq_out.flatten(3)  # (B,T,nhead,C)
-    xk_out = xk_out.flatten(3)  # (B,T,nhead,C)
+    def forward(self, x: torch.Tensor, mask: torch.Tensor, freqs_cis) -> torch.Tensor:
+        batch, seq_len, d_model = x.shape
 
-    return xq_out.type_as(q), xk_out.type_as(q)
+        k: torch.Tensor  # type hint for lsp
+        q: torch.Tensor  # ignore
+        v: torch.Tensor
 
+        k = self.key(x)
+        q = self.query(x)
 
-B, nh, T, C = 1, 1, 20, 8
-G = 2
-w_n = 5
+        k = k.view(
+            batch, seq_len, self.num_kv_heads, self.head_dim
+        )  # shape = (B, seq_len, num_kv_heads, head_dim)
+        q = q.view(batch, seq_len, self.num_heads, self.head_dim)
 
-pos = torch.arange(T)
+        q, k = apply_rope(q, k, freqs_cis)
 
+        # Grouped Query Attention
+        if self.num_kv_heads != self.num_heads:
+            k = torch.repeat_interleave(k, self.num_queries_per_kv, dim=2)
+            v = torch.repeat_interleave(v, self.num_queries_per_kv, dim=2)
 
-k = q = v = torch.rand(B, T, nh, C)
+        k = k.transpose(1, 2)  # shape = (B, num_heads, seq_len, head_dim)
+        q = q.transpose(1, 2)
+        
+        # setting up v to be the same as k  
+        v = k
 
-freq_cis = precompute_freqs_cis(dim=C, end=T)
+        if self.flash_attn:
+            output = torch.nn.functional.scaled_dot_product_attention(
+                q,
+                k,
+                v,  # order important
+                attn_mask=None,
+                dropout_p=self.attn_dropout.p if self.training else 0.0,
+                is_causal=True,
+            )
+        else:
+            attn_mtx = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
+            attn_mtx = attn_mtx + mask[:, :, :seq_len, :seq_len]
+            attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(k)
+            attn_mtx = self.attn_dropout(attn_mtx)
 
-k, q = apply_rope(k, q, freq_cis)
+            output = torch.matmul(attn_mtx, v)  # (batch, n_head, seq_len, head_dim)
 
-k = k.transpose(1, 2)
-q = q.transpose(1, 2)
+        output = output.transpose(1, 2).contiguous().view(batch, seq_len, d_model)
 
-wei = q @ k.transpose(-1, -2)
-
-# print(torch.tril(wei))
-
-# g_size, w_size = G, w_n
-# g_pos = pos // g_size
-
-# shift = w_n - w_n // G
-# s_g_pos = g_pos + shift
-# g_q, g_k = apply_rope(q,k,(s_g_pos,s_g_pos))
-
-cos, isin = freq_cis
-
-print(cos)
-
-q = torch.randn(B, T + 4, C)
-
-
-def rope_extension(freqs, x):
-    f_seq_len, hdim = freqs.shape
-    _, T, _ = x.shape
-    if T <= f_seq_len:
-        return x
-
-    ext = T - f_seq_len
-    old, rec = freqs[:ext], freqs[ext:]
-
-    old: torch.Tensor
-    old = old.repeat_interleave(2, dim=0)
-    print(old)
-    freqs = torch.cat([old, rec])
-
-    return freqs
+        # final projection into the residual stream
+        output = self.proj(output)
+        output = self.res_dropout(output)
+        return output
 
 
-freqs = rope_extension(cos, q)
+class PKVAttention(nn.Module):
+    def __init__(self, config: Config):
+        super().__init__()
 
-print(freqs.shape)
+        self.d_model = config.d_model
+        self.num_heads = config.num_heads
+        self.head_dim = config.d_model // config.num_heads
+        self.num_kv_heads = config.num_heads if config.num_kv_heads == 0 else config.num_kv_heads
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+
+        self.keyvalue = nn.Linear(self.d_model, int ( 1.5 * self.head_dim * self.num_kv_heads), config.bias)
+        self.query = nn.Linear(self.d_model, self.head_dim * self.num_heads, config.bias)
+        self.proj = nn.Linear(self.d_model, self.d_model, config.bias)
+
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.res_dropout = nn.Dropout(config.dropout)
+
+        self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor, freqs_cis) -> torch.Tensor:
+        batch, seq_len, d_model = x.shape
+
+        k: torch.Tensor  # type hint for lsp
+        q: torch.Tensor  # ignore
+        v: torch.Tensor
+
+        kv = self.keyvalue(x)
+        q = self.query(x)
+        
+        split_size = self.d_model // 2
+        k,s,v = kv.split([split_size, split_size, split_size], dim=-1)
+        q1,q2 = q.split([split_size, split_size], dim=-1)
+        
+        print(f"{q.shape=} {q1.shape=} {q2.shape=} {split_size=}")
+        q1 = q1.view(batch, seq_len, self.num_heads, self.head_dim//2)
+        q2 = q2.view(batch, seq_len, self.num_heads, self.head_dim//2)
+        
+        k = k.view(
+            batch, seq_len, self.num_kv_heads, self.head_dim//2
+        )  # shape = (B, seq_len, num_kv_heads, head_dim)
+        
+        v = v.view(batch, seq_len, self.num_kv_heads, self.head_dim//2)
+        
+        s = s.view(batch, seq_len, self.num_kv_heads, self.head_dim//2)
+
+        q2, k = apply_rope(q2, k, freqs_cis)
+        
+        k = torch.cat([s,k], dim=-1)
+        v = torch.cat([s,v], dim=-1)
+        q = torch.cat([q1,q2], dim=-1)
+        
+        # Grouped Query Attention
+        if self.num_kv_heads != self.num_heads:
+            k = torch.repeat_interleave(k, self.num_queries_per_kv, dim=2)
+            v = torch.repeat_interleave(v, self.num_queries_per_kv, dim=2)
+
+        k = k.transpose(1, 2)  # shape = (B, num_heads, seq_len, head_dim)
+        q = q.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        if self.flash_attn:
+            output = torch.nn.functional.scaled_dot_product_attention(
+                q,
+                k,
+                v,  # order important
+                attn_mask=None,
+                dropout_p=self.attn_dropout.p if self.training else 0.0,
+                is_causal=True,
+            )
+        else:
+            attn_mtx = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
+            attn_mtx = attn_mtx + mask[:, :, :seq_len, :seq_len]
+            attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(k)
+            attn_mtx = self.attn_dropout(attn_mtx)
+
+            output = torch.matmul(attn_mtx, v)  # (batch, n_head, seq_len, head_dim)
+
+        
+        # restore time as batch dimension and concat heads
+        output = output.transpose(1, 2).contiguous().view(batch, seq_len, d_model)
+
+        # final projection into the residual stream
+        output = self.proj(output)
+        output = self.res_dropout(output)
+        return output
+
+
+if __name__ == "__main__":
+    
+    d_model = 1024
+    num_heads = 16
+    head_dim = d_model // num_heads
+    kv_lora_rank = 64
+    q_lora_rank = 3 * kv_lora_rank
+    rope_head_dim = 32
+    num_kv_heads = num_heads
+    
+    config = Config(
+        vocab_size=30522,
+        d_model=d_model,
+        seq_len=2048,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        q_lora_rank=q_lora_rank,
+        kv_lora_rank=kv_lora_rank,
+        rope_head_dim=rope_head_dim,
+        num_kv_heads=num_kv_heads,
+    )
+
+    mla = PKVAttention(config)
+    x = torch.randn(2, 10, d_model)
+    freqs_cis = precompute_freqs_cis(config.head_dim//2, config.seq_len)
+    # mla = torch.compile(mla)
+    print(f"Model Size: {sum(p.numel() for p in mla.parameters())} ")
+    output = mla(x,None, freqs_cis)
+    print(output.shape)
+    

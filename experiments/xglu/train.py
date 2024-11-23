@@ -46,21 +46,21 @@ torch.set_float32_matmul_precision("high")
 wandb_project_name = "Ohara-XGLU"
 wandb_run_name = random_name()
 
-learning_rate: float = 3e-4 # Karpathy Constant 
+learning_rate: float = 3e-4 # Karpathy Constant
 min_learning_rate: float = 0.0
 
-max_iters: int = 10_000 
-warmup_iters: int = max_iters//10 
+max_iters: int = 10_000
+warmup_iters: int = max_iters//10
 
-total_batch_size:int = 2**13 
+total_batch_size:int = 2**14
 seq_len: int = 256
-batch_size: int = 8
+batch_size: int = 32
 micro_batch: int = int(total_batch_size/(seq_len*batch_size))
 eval_iters: int = 100
 save_ckpt_iters: int = 2000
 
 multiple_of: int = 4
-d_model: int = 1024 
+d_model: int = 1024//8
 hidden_dim = int(d_model * multiple_of)
 num_layers: int = 16 #// 3  # 44
 num_heads: int = 16
@@ -75,7 +75,7 @@ for arg in args:
         mlp = arg.split("=")[1]
     if arg.startswith("--expand_ratio"):
         expand_ratio = int(arg.split("=")[1])
-        
+
 # ========== MLP Block ==========
 hidden_dim = int(d_model * expand_ratio)
 activation_fn: str = "silu"
@@ -136,12 +136,12 @@ def main():
         "total_batch_size": total_batch_size,
         "compile_mode": compile_mode
     }
-    
-    print("="*100)  
+
+    print("="*100)
     print(hyper_params)
     print("="*100)
-    
-    
+
+
     loggers = []
 
     if wandb_logger:
