@@ -38,26 +38,28 @@ from ohara.trainer import Trainer
 
 traceback.install()
 
+torch.manual_seed(42)
+
 torch.set_float32_matmul_precision("high")
 
 # ================================================================================================
 
 # EXP
-attn_type = "mla" # "mha"
+attn_type = "mha" # "mha"
 
 ### CONFIGS
-wandb_project_name = "Ohara-MLA"
+wandb_project_name = "Ohara-MLA2"
 wandb_run_name = random_name()
 
 learning_rate: float = 5e-4
 min_learning_rate: float = 0.0
 
 max_iters: int = 10_000
-warmup_iters: int = max_iters//10 
+warmup_iters: int = 500
 
 total_batch_size:int = 2**14 
 seq_len: int = 256
-batch_size: int = 32 
+batch_size: int = 32//4
 micro_batch: int = int(total_batch_size/(seq_len*batch_size))
 eval_iters: int = 100
 save_ckpt_iters: int = 2000
@@ -65,14 +67,18 @@ dropout: float = 0.2
 
 multiple_of: int = 4
 mlp_expansion_ratio: int = 1.5  # putting this low so I can fit attention layers
+
 d_model: int = 1024
 hidden_dim = int(d_model * mlp_expansion_ratio)
-num_layers: int = 8 #// 3  # 44
-num_heads: int = 46 if attn_type=="mla" else 16
+num_layers: int = 16 #// 3  # 44
+num_heads: int = 70 if attn_type=="mla" else 16 # 46 for lora_kv = 128
 num_kv_heads: int = num_heads
 
-head_dim = 64 if attn_type=="mla" else None
-rope_head_dim = 16 if attn_type=="mla" else None
+head_dim = 32 if attn_type=="mla" else None
+v_head_dim = head_dim
+nope_head_dim = 32
+rope_head_dim = 64 if attn_type=="mla" else None
+
 kv_lora_rank = 64 if attn_type=="mla" else None
 q_lora_rank = 3*kv_lora_rank if attn_type=="mla" else None
 
@@ -80,8 +86,10 @@ q_lora_rank = 3*kv_lora_rank if attn_type=="mla" else None
 mlp: str = "GLU"
 activation_fn: str = "silu"
 
+weight_tying = True
+
 MONKEY_PATCH = False
-model_name = f"joey00072/model_name{'Baseline' if MONKEY_PATCH is None else str(MONKEY_PATCH)}"
+model_name = f"joey00072/experiment_{attn_type}"
 
 if attn_type!="mla": assert d_model % num_heads == 0
 
@@ -97,11 +105,11 @@ device = auto_accelerator()  # auto chose device (cuda, mps)
 
 # for restarting training from last checkpoint
 resume_training = False
-push_to_hub = False
+push_to_hub = True
 checkpoint_path = "./ckpt/model.pt"
 
-wandb_logger = False
-tensorboard_logger = True
+wandb_logger = True
+tensorboard_logger = False
 
 # ================================================================================================
 
@@ -112,7 +120,10 @@ def main():
         "seq_len": seq_len,
         "d_model": d_model,
         "hidden_dim": hidden_dim,
+        "num_layers": num_layers,
         "num_heads": num_heads,
+        "v_head_dim": v_head_dim,
+        "nope_head_dim": nope_head_dim,
         "head_dim": head_dim,
         "rope_head_dim": rope_head_dim,
         "kv_lora_rank": kv_lora_rank,
@@ -134,6 +145,7 @@ def main():
         "kv_lora_rank": kv_lora_rank,
         "q_lora_rank": q_lora_rank,
         "dropout": dropout,
+        "weight_tying": weight_tying,
     }
     
     print("="*100)  
@@ -192,6 +204,7 @@ def main():
     # model.gradient_checkpointing_enable()
     print(model)
     print(model_summary(model))
+    # exit()
     import time
 
     get_lr = CosineScheduler(
