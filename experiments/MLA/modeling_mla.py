@@ -99,7 +99,7 @@ class Block(nn.Module):
     def __init__(self, config: Config):
         super().__init__()
 
-        self.attn = DSMultiHeadLatentAttention(config) if config.attn_type == "mla" else Attention(config) 
+        self.attn = MultiHeadLatentAttention(config) if config.attn_type == "mla" else Attention(config) 
         self.ff = MLP_BLOCK[config.mlp](
             dim=config.d_model,
             hidden_dim=config.hidden_dim,

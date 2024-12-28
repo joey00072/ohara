@@ -23,7 +23,11 @@ class Config(OrderedDict):
     seq_len: int
     d_model: int
     num_heads: int = None
-    head_dim: int = None
+    v_head_dim: int = None
+    
+    nope_head_dim: int = None
+    rope_head_dim: int = None
+    
     hidden_dim: int = None
     num_kv_heads: int = None
     num_layers: int = 4
@@ -32,7 +36,6 @@ class Config(OrderedDict):
     weight_tying: bool = False
     activation: str = "silu"
     mlp: str = "GLU"
-    rope_head_dim: int = None
     kv_lora_rank: int = None
     q_lora_rank: int = None
     attn_type: str = "mla"
@@ -64,49 +67,62 @@ class MultiHeadLatentAttention(nn.Module):
     paper: https://arxiv.org/pdf/2405.04434
     
     TLDR: 
-    kv are low ranks, this verient of attention project q,k,v to low rank to save memory
+    kv are low ranks, this verient of attention project q,k,v to low rank to save memory,
+    replace linear with lora(ish) layers
 
     by joey00072 (https://github.com/joey00072)
     """
     def __init__(self, config: Config):
         super().__init__()
         
-        assert config.head_dim is not None , f"head_dim is not defined {config.head_dim=}"
+        assert config.v_head_dim is not None , f"v_head_dim is not defined {config.v_head_dim=}"
         assert config.q_lora_rank is not None , f"q_lora_rank is not defined {config.q_lora_rank=}"
         assert config.kv_lora_rank is not None , f"kv_lora_rank is not defined {config.kv_lora_rank=}"
         assert config.rope_head_dim is not None , f"rope_head_dim is not defined {config.rope_head_dim=}"
         
         self.config = config
+        
         self.dim = config.d_model
         self.num_heads = config.num_heads
-        self.head_dim = config.head_dim
+        self.v_head_dim = config.v_head_dim
+        
+        self.nope_head_dim = config.nope_head_dim
+        self.rope_head_dim = config.rope_head_dim
+        
         self.q_lora_rank = config.q_lora_rank
         self.kv_lora_rank = config.kv_lora_rank
+        
         self.dropout = config.dropout
+        
+        # note: head dim of query and key if different from head dim of value
+        
         # (attention_dim == num_head*head_dim) > d_model in deepseekv2
-        self.attention_dim = self.num_heads * self.head_dim
-        self.rope_head_dim = config.rope_head_dim
-        self.nope_head_dim = config.head_dim - config.rope_head_dim
+        # this is dim between wV and wQ
+        self.value_dim = self.num_heads * self.v_head_dim
+        
+        # this is dims between wQ and wK
+        self.nope_dim = self.num_heads * self.nope_head_dim
+        self.rope_dim = self.num_heads * self.rope_head_dim  
         
         # query compression
         self.compress_q_linear = nn.Linear(self.dim, self.q_lora_rank, bias=False)  # W_DQ
-        self.decompress_q_nope = nn.Linear(self.q_lora_rank, self.nope_head_dim * self.num_heads, bias=False)
-        self.decompress_q_rope = nn.Linear(self.q_lora_rank, self.rope_head_dim * self.num_heads, bias=False)
-
+        self.decompress_q_nope = nn.Linear(self.q_lora_rank, self.nope_dim, bias=False)
+        self.decompress_q_rope = nn.Linear(self.q_lora_rank, self.rope_dim, bias=False)
+        self.q_norm = RMSNorm(dim=self.q_lora_rank)
+        
+        
         # key and value compression
         self.compress_kv_linear = nn.Linear(self.dim, self.kv_lora_rank, bias=False)  # W_DKV
-        self.decompress_k_nope = nn.Linear(self.kv_lora_rank, self.nope_head_dim * self.num_heads, bias=False)
-        self.decompress_v_linear = nn.Linear(self.kv_lora_rank, self.head_dim * self.num_heads, bias=False)
+        self.decompress_k_nope = nn.Linear(self.kv_lora_rank, self.nope_dim, bias=False)
+        self.decompress_v_linear = nn.Linear(self.kv_lora_rank, self.value_dim, bias=False)
+        self.kv_norm = RMSNorm(dim=self.kv_lora_rank)
         
-        self.k_rope_linear = nn.Linear(self.dim, self.rope_head_dim, bias=False)
-
-        self.q_norm = RMSNorm(self.q_lora_rank)
-        self.kv_norm = RMSNorm(self.kv_lora_rank)
-        # self.rope_norm = RMSNorm(self.rope_head_dim) # not in deepseekv2
-
-        self.proj = nn.Linear(self.num_heads*self.head_dim , self.dim, bias=False)
         
-        self.res_dropout = nn.Dropout(config.dropout)
+        self.k_rope_linear = nn.Linear(self.dim, self.rope_head_dim  , bias=False)
+        # self.rope_norm = RMSNorm(self.rope_dim) # not in deepseekv2
+
+        self.proj = nn.Linear(self.value_dim , self.dim, bias=False)
+        self.res_dropout = nn.Dropout(p=config.dropout)
         
         
  
@@ -132,12 +148,12 @@ class MultiHeadLatentAttention(nn.Module):
         key_rope = key_rope.view(batch_size, seq_len, 1, self.rope_head_dim).transpose(1,2)
         key_nope = key_nope.view(batch_size, seq_len, self.num_heads, self.nope_head_dim).transpose(1,2)
         
-        value = value.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1,2)
+        value = value.view(batch_size, seq_len, self.num_heads, self.v_head_dim).transpose(1,2)
         
-        k_rope, q_rope = apply_rope(query_rope,key_rope, cis=freqs_cis)
+        q_rope,k_rope = apply_rope(query_rope,key_rope, cis=freqs_cis)
         
-        q_recombined = torch.empty((batch_size,self.num_heads,seq_len, self.head_dim), device=x.device)
-        k_recombined = torch.empty((batch_size, self.num_heads, seq_len, self.head_dim), device=x.device)
+        q_recombined = torch.empty((batch_size,self.num_heads,seq_len, self.rope_head_dim + self.nope_head_dim), device=x.device)
+        k_recombined = torch.empty((batch_size, self.num_heads, seq_len, self.rope_head_dim + self.nope_head_dim), device=x.device)
         
         q_recombined[:,:,:,:self.nope_head_dim] = query_nope
         q_recombined[:,:,:,self.nope_head_dim:] = q_rope
@@ -149,7 +165,7 @@ class MultiHeadLatentAttention(nn.Module):
 
         output = F.scaled_dot_product_attention(q_recombined, k_recombined, value, is_causal=True, dropout_p=self.dropout)
 
-        output = output.contiguous().view(batch_size, seq_len, self.num_heads * self.head_dim)
+        output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.num_heads * self.v_head_dim)
 
         output = self.proj(output)
         output = self.res_dropout(output)
@@ -232,13 +248,6 @@ class MLA_Inference(MultiHeadLatentAttention):
             output = self.proj(output)
 
             return output
-        
-        
-        def _test_flat_attention(x:Tensor):
-            compressed_q = self.compress_q_linear(x)
-            norm_q = self.q_norm(compressed_q)
-            query_nope:Tensor = self.decompress_q_nope(norm_q)
-        
 
 class DSMultiHeadLatentAttention(nn.Module):
     """
@@ -295,6 +304,7 @@ class DSMultiHeadLatentAttention(nn.Module):
         # Key and Value projections
         kv_proj = self.kv_a_proj_with_rope(x)
         compressed_kv, k_rope = torch.split(kv_proj, [self.kv_lora_rank, self.rope_head_dim], dim=-1)
+        
         norm_kv = self.kv_a_layernorm(compressed_kv)
         kv = self.kv_b_proj(norm_kv)
         kv = kv.view(batch_size, seq_len, self.num_heads, self.nope_head_dim + self.head_dim).transpose(1, 2)
@@ -356,28 +366,32 @@ def mla_reformulation_test(config:Config):
 if __name__ == "__main__":
     
     d_model = 1024
-    num_heads = 16
-    head_dim = 128
+    num_heads = 70
+    
+    v_head_dim = 32
     kv_lora_rank = 64
     q_lora_rank = 3 * kv_lora_rank
-    rope_head_dim = 32
+    
+    rope_head_dim = 64
+    nope_head_dim = 32
     
     config = Config(
         vocab_size=30522,
         d_model=d_model,
         seq_len=2048,
         num_heads=num_heads,
-        head_dim=head_dim,
-        q_lora_rank=q_lora_rank,
-        kv_lora_rank=kv_lora_rank,
+        v_head_dim=v_head_dim,
+        nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
+        kv_lora_rank=kv_lora_rank,
+        q_lora_rank=q_lora_rank,
     )
 
-    mla = DSMultiHeadLatentAttention(config)
+    mla = MultiHeadLatentAttention(config)
     x = torch.randn(2, 10, d_model)
     freqs_cis = precompute_freqs_cis(config.rope_head_dim, config.seq_len)
     # mla = torch.compile(mla)
-    print(f"Model Size: {sum(p.numel() for p in mla.parameters())} ")
+    print(f"Model Size: {sum(p.numel() for p in mla.parameters())/1e6}M params, attn size {d_model*d_model*4/1e6}m")
     output = mla(x,None, freqs_cis)
     print(output.shape)
     
