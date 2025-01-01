@@ -10,6 +10,6 @@ echo -e "=====================\n"
 # Run XGLU experiment  
 echo -e "\nRunning XGLU experiment"
 echo -e "======================\n"
-python train.py --mlp=XGLU --expand_ratio=4
+python train.py --mlp=XGLU --expand_ratio=7.8 --xglu_rank=256
 echo -e "\nFinished XGLU experiment"
 echo -e "======================\n"

@@ -36,6 +36,8 @@ class Config(OrderedDict):
 
     activation: str = "silu"  # "relu", "gelu", "silu" etc
     mlp: str = "GLU"  # MLP or GLU
+    
+    xglu_rank: int = 128
 
 MLP_BLOCK = {"MLP": MLP, "GLU": GLU, "XGLU": XGLU}
 
@@ -123,6 +125,7 @@ class Block(nn.Module):
         self.ff = MLP_BLOCK[config.mlp](
             dim=config.d_model,
             hidden_dim=config.hidden_dim,
+            xglu_rank=config.xglu_rank,
             activation_fn=config.activation,
             dropout=config.dropout,
             bias=config.bias,

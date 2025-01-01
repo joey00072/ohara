@@ -62,19 +62,21 @@ save_ckpt_iters: int = 2000
 multiple_of: int = 4
 d_model: int = 1024 
 hidden_dim = int(d_model * multiple_of)
-num_layers: int = 16 #// 3  # 44
+num_layers: int = 8 #// 3  # 44
 num_heads: int = 16
 
 args = sys.argv
 
 mlp: str = "GLU"
 expand_ratio: int = 4
-
+xglu_rank: int = 128
 for arg in args:
     if arg.startswith("--mlp"):
         mlp = arg.split("=")[1]
     if arg.startswith("--expand_ratio"):
-        expand_ratio = int(arg.split("=")[1])
+        expand_ratio = float(arg.split("=")[1])
+    if arg.startswith("--xglu_rank"):
+        xglu_rank = int(arg.split("=")[1])
         
 # ========== MLP Block ==========
 hidden_dim = int(d_model * expand_ratio)
@@ -83,7 +85,8 @@ model_name = f"joey00072/{mlp}_{activation_fn}_{expand_ratio}"
 print(f"{model_name=}")
 # ================================
 
-MONKEY_PATCH = False
+weight_tying: bool = True
+
 # import wandb
 # wandb.init(project=wandb_project_name, name=model_name)
 
@@ -134,7 +137,9 @@ def main():
         "activation_fn": activation_fn,
         "expand_ratio": expand_ratio,
         "total_batch_size": total_batch_size,
-        "compile_mode": compile_mode
+        "compile_mode": compile_mode,
+        "weight_tying": weight_tying,
+        "xglu_rank": xglu_rank,
     }
     
     print("="*100)  
@@ -168,9 +173,10 @@ def main():
         num_layers=num_layers,
         dropout=0.2,
         bias=False,
-        weight_tying=True,
+        weight_tying=weight_tying,
         activation=activation_fn,
         mlp=mlp,
+        xglu_rank=xglu_rank,
     )
 
     train_ds = PreTokenizedDataset(
@@ -194,6 +200,7 @@ def main():
 
     model = ModelingLM(config)
     print(model)
+
 
     model: L.LightningModule = fabric.setup(model)
     print("=" * 100)
