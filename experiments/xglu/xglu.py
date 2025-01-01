@@ -25,18 +25,13 @@ class XGLU(nn.Module):
         dim: int,
         hidden_dim: int | None = None,
         multiple_of: int = 4,
+        xglu_rank: int | None = 128,
         dropout: float | None = None,
         activation_fn: str = "silu",
         bias: bool = False,
         *args,
         **kwargs,
     ):
-        """
-        GLU Variants Improve Transformer
-        https://arxiv.org/abs/2002.05202v1
-
-        order in which W1,W2,W3 are multiplied is as per llama (for compatiblity)
-        """
         super().__init__()
 
         if hidden_dim is None:
@@ -44,20 +39,22 @@ class XGLU(nn.Module):
             hidden_dim = int(2 * hidden_dim / 3)
             hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.up = nn.Linear(dim, hidden_dim, bias=bias)
-        self.gate = nn.Linear(dim, hidden_dim, bias=bias)
+        self.compress = nn.Linear(dim, xglu_rank, bias=bias)
+        self.compress_norm = RMSNorm(xglu_rank)
+        self.up = nn.Linear(xglu_rank, hidden_dim, bias=bias)
+        self.gate = nn.Linear(xglu_rank, hidden_dim, bias=bias)
         self.down = nn.Linear(hidden_dim, dim, bias=bias)
-        
-        self.gate_norm = RMSNorm(hidden_dim)
 
+        self.scale = hidden_dim ** -0.5
         self.activation = ACT2FN[activation_fn]
         self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
 
     def forward(self, x):
-        up = self.up(x)
-        gate = self.gate(x)
+        x = self.compress(x)
+        x = self.compress_norm(x)
+        up = self.up(x) * self.scale
+        gate = self.gate(x) * self.scale
         gate = self.activation(gate)
-        gate = self.gate_norm(gate)
         down = self.down(gate * up)
         return self.dropout(down)
     
@@ -109,6 +106,8 @@ class MLP(nn.Module):
         dropout: float | None = None,
         activation_fn: str = "silu",
         bias: bool = True,
+        *args,
+        **kwargs,
     ):
         super().__init__()
 
@@ -142,8 +141,8 @@ if __name__ == "__main__":
     print(f"glu: {glu(x).shape}")
 
     expand_ratio = 5
-    rank = 144
-    xglu = XGLU(dim=dim, hidden_dim=dim * expand_ratio)
+    xglu_rank = 144
+    xglu = XGLU(dim=dim, hidden_dim=dim * expand_ratio, xglu_rank=xglu_rank)
     print(f"xglu: {sum(p.numel() for p in xglu.parameters()) / 1e6:.2f}M")
     print(f"xglu: {xglu(x).shape}")
 

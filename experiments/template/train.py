@@ -69,6 +69,8 @@ num_heads: int = 16
 mlp: str = "GLU"
 activation_fn: str = "silu"
 
+weight_tying: bool = False
+
 MONKEY_PATCH = False
 model_name = f"joey00072/model_name{'Baseline' if MONKEY_PATCH is None else str(MONKEY_PATCH)}"
 
@@ -114,6 +116,7 @@ def main():
         "dataset_name": dataset_name,
         "resume_training": resume_training,
         "save_ckpt_iters": save_ckpt_iters,
+        "weight_tying": weight_tying,
     }
     
     print("="*100)  
@@ -147,7 +150,7 @@ def main():
         num_layers=num_layers,
         dropout=0.2,
         bias=False,
-        weight_tying=True,
+        weight_tying=weight_tying,
         activation=activation_fn,
         mlp=mlp,
     )
