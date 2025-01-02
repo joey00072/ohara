@@ -3,353 +3,321 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Model Size Calculator</title>
+    <title>Dynamic Parameter Calculator</title>
     <style>
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            max-width: 600px;
-            margin: 0 auto;
-            padding: 20px;
-            background-color: #1a1a1a;
-            color: #e0e0e0;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            max-width: 800px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+            background-color: #E8E4E1;
+            color: #4A4A4A;
+            line-height: 1.6;
         }
+
         h1, h2 {
-            color: #61dafb;
-            text-align: center;
+            color: #5C5552;
         }
-        h1 {
-            margin-bottom: 30px;
-        }
-        h2 {
-            margin-top: 0;
-            font-size: 1.2em;
-        }
-        .input-group {
-            margin-bottom: 20px;
+
+        .input-grid {
             display: flex;
-            align-items: center;
+            flex-direction: column;
+            gap: 1rem;
+            margin-bottom: 2rem;
         }
+
+        .input-group {
+            background: #F5F2F0;
+            padding: 1rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+            width: 100%;
+        }
+
         label {
-            flex: 0 0 100px;
-            font-weight: bold;
+            display: block;
+            margin-bottom: 0.5rem;
+            color: #6B6461;
+            font-size: 0.9rem;
         }
+
         input[type="number"] {
-            width: 80px;
-            padding: 8px;
-            border: 1px solid #4a4a4a;
-            border-radius: 4px;
-            font-size: 16px;
-            margin-right: 10px;
-            background-color: #2a2a2a;
-            color: #e0e0e0;
+            width: 120px;
+            flex-shrink: 0;
+            padding: 0.5rem;
+            border: 1px solid #DDD;
+            border-radius: 6px;
+            background: white;
+            color: #4A4A4A;
+            font-size: 0.9rem;
+            transition: all 0.2s ease;
         }
-        input[type="range"] {
-            flex: 1;
-            -webkit-appearance: none;
-            background: #4a4a4a;
+
+        input[type="number"]:focus {
             outline: none;
-            opacity: 0.7;
-            transition: opacity .2s;
+            border-color: #9A8F8A;
+            box-shadow: 0 0 0 2px rgba(154, 143, 138, 0.2);
         }
-        input[type="range"]:hover {
-            opacity: 1;
+
+        input[type="range"] {
+            -webkit-appearance: none;
+            height: 6px;
+            background: #DDD;
+            border-radius: 3px;
+            margin: 10px 0;
         }
+
         input[type="range"]::-webkit-slider-thumb {
             -webkit-appearance: none;
-            appearance: none;
-            width: 20px;
-            height: 20px;
-            background: #61dafb;
-            cursor: pointer;
+            width: 18px;
+            height: 18px;
             border-radius: 50%;
-        }
-        input[type="range"]::-moz-range-thumb {
-            width: 20px;
-            height: 20px;
-            background: #61dafb;
+            background: #9A8F8A;
             cursor: pointer;
-            border-radius: 50%;
+            border: 2px solid white;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            transition: all 0.2s ease-in-out;
         }
-        .result-box {
-            background-color: #2a2a2a;
-            border: 1px solid #4a4a4a;
+
+        input[type="range"]::-webkit-slider-thumb:hover {
+            background: #847571;
+            transform: scale(1.1);
+        }
+
+        input[type="range"]:focus {
+            outline: none;
+        }
+
+        .results {
+            background: #F5F2F0;
+            padding: 1.5rem;
             border-radius: 8px;
-            padding: 20px;
-            margin-top: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.08);
         }
-        .result {
-            font-weight: bold;
-            color: #4caf50;
+
+        .results p {
+            margin: 0.5rem 0;
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #f0f0f0;
         }
-        details {
-            margin-top: 10px;
-            background-color: #333;
-            padding: 10px;
-            border-radius: 5px;
+
+        .results span {
+            font-weight: 500;
+            color: #847571;
         }
-        summary {
+
+        .input-wrapper {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+            width: 100%;
+            padding: 0.5rem 0;
+        }
+
+        .input-wrapper input[type="number"] {
+            width: 120px;
+            flex-shrink: 0;
+        }
+
+        .input-wrapper input[type="range"] {
+            flex-grow: 1;
+            min-width: 200px;
+        }
+
+        .input-wrapper input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #9A8F8A;
             cursor: pointer;
-            color: #61dafb;
+            transition: all 0.2s ease-in-out;
         }
-        details p {
-            margin: 5px 0;
-            font-family: monospace;
-            white-space: pre-wrap;
+
+        .input-wrapper input[type="range"]::-webkit-slider-thumb:hover {
+            background: #847571;
+            transform: scale(1.1);
         }
     </style>
+    <script>
+        function calculateParameters() {
+            const d_model = parseInt(document.getElementById('d_model').value);
+            const num_heads = parseInt(document.getElementById('num_heads').value);
+            const v_head_dim = parseInt(document.getElementById('v_head_dim').value);
+            const kv_lora_rank = parseInt(document.getElementById('kv_lora_rank').value);
+            const q_lora_rank = 3 * kv_lora_rank;
+            const rope_head_dim = parseInt(document.getElementById('rope_head_dim').value);
+            const nope_head_dim = parseInt(document.getElementById('nope_head_dim').value);
+
+            const value_dim = num_heads * v_head_dim;
+            const nope_dim = num_heads * nope_head_dim;
+            const rope_dim = num_heads * rope_head_dim;
+
+            const compress_q_linear = d_model * q_lora_rank;
+            const decompress_q_nope = q_lora_rank * nope_dim;
+            const decompress_q_rope = q_lora_rank * rope_dim;
+
+            const compress_kv_linear = d_model * kv_lora_rank;
+            const decompress_k_nope = kv_lora_rank * nope_dim;
+            const decompress_v_linear = kv_lora_rank * value_dim;
+
+            const k_rope_linear = d_model * rope_head_dim;
+            const proj_final = value_dim * d_model;
+
+            const total_parameters_corrected = compress_q_linear +
+                decompress_q_nope +
+                decompress_q_rope +
+                compress_kv_linear +
+                decompress_k_nope +
+                decompress_v_linear +
+                k_rope_linear +
+                proj_final;
+
+            const total_parameters_corrected_in_millions = total_parameters_corrected / 1_000_000;
+
+            // Calculate MLA KV cache size
+            const mla_kv_cache_size = kv_lora_rank + rope_head_dim;
+
+            // Format the number with K, M, or B suffix
+            let formatted_parameters;
+            if (total_parameters_corrected >= 1_000_000_000) {
+                formatted_parameters = (total_parameters_corrected / 1_000_000_000).toFixed(4) + 'B';
+            } else if (total_parameters_corrected >= 1_000_000) {
+                formatted_parameters = (total_parameters_corrected / 1_000_000).toFixed(4) + 'M';
+            } else if (total_parameters_corrected >= 1_000) {
+                formatted_parameters = (total_parameters_corrected / 1_000).toFixed(4) + 'K';
+            } else {
+                formatted_parameters = Math.round(total_parameters_corrected).toString();
+            }
+
+            // Format KV cache size with K, M, B suffix
+            let formatted_cache_size;
+            if (mla_kv_cache_size >= 1_000_000_000) {
+                formatted_cache_size = (mla_kv_cache_size / 1_000_000_000).toFixed(4) + 'B';
+            } else if (mla_kv_cache_size >= 1_000_000) {
+                formatted_cache_size = (mla_kv_cache_size / 1_000_000).toFixed(4) + 'M';
+            } else if (mla_kv_cache_size >= 1_000) {
+                formatted_cache_size = (mla_kv_cache_size / 1_000).toFixed(4) + 'K';
+            } else {
+                formatted_cache_size = Math.round(mla_kv_cache_size).toString();
+            }
+
+            // Calculate MHA parameters and cache size
+            const mha_parameters = d_model * d_model * 4;
+            const mha_cache_size = d_model * 2;
+
+            // Format MHA parameters
+            let formatted_mha_parameters;
+            if (mha_parameters >= 1_000_000_000) {
+                formatted_mha_parameters = (mha_parameters / 1_000_000_000).toFixed(4) + 'B';
+            } else if (mha_parameters >= 1_000_000) {
+                formatted_mha_parameters = (mha_parameters / 1_000_000).toFixed(4) + 'M';
+            } else if (mha_parameters >= 1_000) {
+                formatted_mha_parameters = (mha_parameters / 1_000).toFixed(4) + 'K';
+            } else {
+                formatted_mha_parameters = Math.round(mha_parameters).toString();
+            }
+
+            // Format MHA cache size
+            let formatted_mha_cache_size;
+            if (mha_cache_size >= 1_000_000_000) {
+                formatted_mha_cache_size = (mha_cache_size / 1_000_000_000).toFixed(4) + 'B';
+            } else if (mha_cache_size >= 1_000_000) {
+                formatted_mha_cache_size = (mha_cache_size / 1_000_000).toFixed(4) + 'M';
+            } else if (mha_cache_size >= 1_000) {
+                formatted_mha_cache_size = (mha_cache_size / 1_000).toFixed(4) + 'K';
+            } else {
+                formatted_mha_cache_size = Math.round(mha_cache_size).toString();
+            }
+
+            // Calculate cache size reduction percentage
+            const cache_reduction = ((mha_cache_size - mla_kv_cache_size) / mha_cache_size * 100).toFixed(2);
+
+            document.getElementById('total_parameters_millions').textContent = formatted_parameters;
+            document.getElementById('mla_kv_cache_size').textContent = formatted_cache_size;
+            document.getElementById('mha_parameters').textContent = formatted_mha_parameters;
+            document.getElementById('mha_cache_size').textContent = formatted_mha_cache_size;
+            document.getElementById('cache_reduction').textContent = cache_reduction + '%';
+        }
+    </script>
 </head>
 <body>
-    <h1>Model Size Calculator</h1>
+    <h1>Multi Head Latent Attention (MLA) Calculator</h1>
     
-    <div class="input-group">
-        <label for="d_model">d_model:</label>
-        <input type="number" id="d_model" value="1024" min="1" max="8192" oninput="updateCustomDModel(this.value)">
-        <input type="range" id="d_model_slider" value="1024" min="1" max="8192" step="1" oninput="updateInput('d_model', this.value)">
+    <div class="results">
+        <h2>MLA</h2>
+        <p>Parameters <span id="total_parameters_millions">0.00</span></p>
+        <p>MLA KV Cache Size (per token) <span id="mla_kv_cache_size">0</span></p>
+        <p>Cache Size Reduction <span id="cache_reduction">0%</span></p>
+        
+        <h2>MHA</h2>
+        <p>Parameters <span id="mha_parameters">0.00</span></p>
+        <p>MHA KV Cache Size (per token) <span id="mha_cache_size">0</span></p>
     </div>
 
-    <div class="input-group">
-        <label for="num_head">num_head:</label>
-        <input type="number" id="num_head" value="46" min="1" max="128" oninput="updateNumHead(this.value)">
-        <input type="range" id="num_head_slider" value="46" min="1" max="128" step="1" oninput="updateNumHead(this.value)">
-    </div>
-
-    <div class="input-group">
-        <label for="head_dim">head_dim:</label>
-        <input type="number" id="head_dim" value="64" min="1" max="512" oninput="updateNormalSlider('head_dim', this.value)">
-        <input type="range" id="head_dim_slider" value="64" min="1" max="512" step="1" oninput="updateNormalInput('head_dim', this.value)">
-    </div>
-
-    <div class="input-group">
-        <label for="rope_head_dim">rope_head_dim:</label>
-        <input type="number" id="rope_head_dim" value="16" min="1" max="512" oninput="updateNormalSlider('rope_head_dim', this.value)">
-        <input type="range" id="rope_head_dim_slider" value="16" min="1" max="512" step="1" oninput="updateNormalInput('rope_head_dim', this.value)">
-    </div>
-
-    <div class="input-group">
-        <label for="kv_lora_rank">kv_lora_rank:</label>
-        <input type="number" id="kv_lora_rank" value="64" min="1" max="512" oninput="updateNormalSlider('kv_lora_rank', this.value); updateQLora();">
-        <input type="range" id="kv_lora_rank_slider" value="64" min="1" max="512" step="1" oninput="updateNormalInput('kv_lora_rank', this.value); updateQLora();">
-    </div>
-
-    <div class="input-group">
-        <label for="q_lora_rank">q_lora_rank:</label>
-        <input type="number" id="q_lora_rank" value="192" min="1" max="1536" oninput="updateNormalSlider('q_lora_rank', this.value)">
-        <input type="range" id="q_lora_rank_slider" value="192" min="1" max="1536" step="1" oninput="updateNormalInput('q_lora_rank', this.value)">
-    </div>
-
-    <div class="result-box">
-        <h2>MultiHeadAttention (MHA)</h2>
-        <p>MHA Size: <span id="mha_size" class="result"></span> parameters</p>
-        <p>KV Cache: <span id="kv_cache" class="result"></span> per token</p>
-        <details>
-            <summary>Show formula</summary>
-            <p>MHA Size = 4 * d_model * d_model</p>
-            <p>KV Cache = 2 * d_model</p>
-        </details>
-    </div>
-
-    <!-- New result box for MLA -->
-    <div class="result-box">
-        <h2>MultiHeadLatentAttention (MLA)</h2>
-        <p>MLA Size: <span id="mla_size" class="result"></span> parameters</p>
-        <p>MLA Cache: <span id="mla_cache" class="result"></span> per token</p>
-        <details>
-            <summary>Show formula</summary>
-            <p>MLA Size = d_model * q_lora_rank +</p>
-            <p>           q_lora_rank * (nope_head_dim + rope_head_dim) * num_heads +</p>
-            <p>           d_model * kv_lora_rank +</p>
-            <p>           kv_lora_rank * nope_head_dim * num_heads +</p>
-            <p>           kv_lora_rank * head_dim * num_heads +</p>
-            <p>           d_model * rope_head_dim +</p>
-            <p>           num_heads * head_dim * d_model</p>
-            <p>MLA Cache = kv_lora_rank + rope_head_dim</p>
-        </details>
-    </div>
-
-    <!-- Cache Saving box -->
-    <div class="result-box">
-        <h2>Cache Saving</h2>
-        <p>Saving: <span id="cache_saving" class="result"></span></p>
-        <details>
-            <summary>Show formula</summary>
-            <p>Saving = (MHA Cache - MLA Cache) / MHA Cache</p>
-        </details>
-    </div>
-
-    <!-- New YAML Parameters box -->
-    <div class="result-box">
-        <h2>All Parameters (YAML)</h2>
-        <pre id="yaml_params" class="result"></pre>
+    <h2>Parameters</h2>
+    <div class="input-grid">
+        <div class="input-group"> 
+            <label for="d_model">d_model</label>
+            <div class="input-wrapper">
+                <input type="range" min="256" max="8192" value="1024" step="128" 
+                       oninput="this.nextElementSibling.value=this.value; calculateParameters()">
+                <input type="number" id="d_model" value="1024" min="256" max="8192" step="128"
+                       oninput="this.previousElementSibling.value=this.value; calculateParameters()">
+            </div>
+        </div>
+        <div class="input-group">
+            <label for="num_heads">num_heads</label>
+            <div class="input-wrapper">
+                <input type="range" min="1" max="256" value="70" step="1"
+                       oninput="this.nextElementSibling.value=this.value; calculateParameters()">
+                <input type="number" id="num_heads" value="70" min="1" max="256"
+                       oninput="this.previousElementSibling.value=this.value; calculateParameters()">
+            </div>
+        </div>
+        <div class="input-group">
+            <label for="v_head_dim">v_head_dim</label>
+            <div class="input-wrapper">
+                <input type="range" min="8" max="256" value="32" step="8"
+                       oninput="this.nextElementSibling.value=this.value; calculateParameters()">
+                <input type="number" id="v_head_dim" value="32" min="8" max="256" step="8"
+                       oninput="this.previousElementSibling.value=this.value; calculateParameters()">
+            </div>
+        </div>
+        <div class="input-group">
+            <label for="kv_lora_rank">kv_lora_rank</label>
+            <div class="input-wrapper">
+                <input type="range" min="16" max="512" value="64" step="16"
+                       oninput="this.nextElementSibling.value=this.value; calculateParameters()">
+                <input type="number" id="kv_lora_rank" value="64" min="16" max="512" step="16"
+                       oninput="this.previousElementSibling.value=this.value; calculateParameters()">
+            </div>
+        </div>
+        <div class="input-group">
+            <label for="rope_head_dim">rope_head_dim</label>
+            <div class="input-wrapper">
+                <input type="range" min="16" max="512" value="64" step="16"
+                       oninput="this.nextElementSibling.value=this.value; calculateParameters()">
+                <input type="number" id="rope_head_dim" value="64" min="16" max="512" step="16"
+                       oninput="this.previousElementSibling.value=this.value; calculateParameters()">
+            </div>
+        </div>
+        <div class="input-group">
+            <label for="nope_head_dim">nope_head_dim</label>
+            <div class="input-wrapper">
+                <input type="range" min="8" max="256" value="32" step="8"
+                       oninput="this.nextElementSibling.value=this.value; calculateParameters()">
+                <input type="number" id="nope_head_dim" value="32" min="8" max="256" step="8"
+                       oninput="this.previousElementSibling.value=this.value; calculateParameters()">
+            </div>
+        </div>
     </div>
 
     <script>
-        const validValues = [];
-        for (let n = 0; n <= 13; n++) {
-            validValues.push(Math.pow(2, n));
-            if (3 * Math.pow(2, n) <= 8192) {
-                validValues.push(3 * Math.pow(2, n));
-            }
-        }
-        validValues.sort((a, b) => a - b);
-
-        function calculateSizes() {
-            const d_model = parseInt(document.getElementById('d_model').value);
-            const num_head = parseInt(document.getElementById('num_head').value);
-            const head_dim = parseInt(document.getElementById('head_dim').value);
-            const rope_head_dim = parseInt(document.getElementById('rope_head_dim').value);
-            const kv_lora_rank = parseInt(document.getElementById('kv_lora_rank').value);
-            const q_lora_rank = parseInt(document.getElementById('q_lora_rank').value);
-            
-            if (isNaN(d_model) || isNaN(num_head) || isNaN(head_dim) || isNaN(rope_head_dim) || isNaN(kv_lora_rank) || isNaN(q_lora_rank)) {
-                document.getElementById('mha_size').textContent = 'N/A';
-                document.getElementById('kv_cache').textContent = 'N/A';
-                document.getElementById('mla_size').textContent = 'N/A';
-                document.getElementById('mla_cache').textContent = 'N/A';
-                document.getElementById('cache_saving').textContent = 'N/A';
-            } else {
-                // Calculate MHA size
-                const mha_size = 4 * d_model * d_model;
-                
-                // Calculate KV cache size per token
-                const kv_cache = 2 * d_model;
-                
-                // Calculate MLA size (updated based on mla.py)
-                const nope_head_dim = head_dim - rope_head_dim;
-                const mla_size = d_model * q_lora_rank + 
-                                 q_lora_rank * (nope_head_dim + rope_head_dim) * num_head + 
-                                 d_model * kv_lora_rank + 
-                                 kv_lora_rank * nope_head_dim * num_head + 
-                                 kv_lora_rank * head_dim * num_head + 
-                                 d_model * rope_head_dim + 
-                                 num_head * head_dim * d_model;
-                
-                // Calculate MLA cache size per token (updated)
-                const mla_cache = kv_lora_rank + rope_head_dim;
-                
-                // Calculate cache saving
-                const cache_saving = (kv_cache - mla_cache) / kv_cache;
-                
-                // Update the results
-                document.getElementById('mha_size').textContent = formatNumber(mha_size);
-                document.getElementById('kv_cache').textContent = formatNumber(kv_cache);
-                document.getElementById('mla_size').textContent = formatNumber(mla_size);
-                document.getElementById('mla_cache').textContent = formatNumber(mla_cache);
-                document.getElementById('cache_saving').textContent = formatPercentage(cache_saving);
-                
-                // Update YAML parameters
-                updateYAMLParams(d_model, num_head, head_dim, rope_head_dim, kv_lora_rank, q_lora_rank, mha_size, kv_cache, mla_size, mla_cache, cache_saving);
-            }
-        }
-
-        function formatNumber(num) {
-            if (num >= 1e9) {
-                return (num / 1e9).toFixed(2) + 'B';
-            } else if (num >= 1e6) {
-                return (num / 1e6).toFixed(2) + 'M';
-            } else if (num >= 1e3) {
-                return (num / 1e3).toFixed(2) + 'K';
-            } else {
-                return num.toString();
-            }
-        }
-
-        function formatPercentage(num) {
-            return (num * 100).toFixed(2) + '%';
-        }
-
-        function updateSlider(inputId, value) {
-            if (value === '') {
-                document.getElementById(inputId + '_slider').value = 1;
-            } else {
-                const nearestValid = findNearestValidValue(value);
-                document.getElementById(inputId + '_slider').value = nearestValid;
-                if (inputId !== 'd_model') {
-                    document.getElementById(inputId).value = nearestValid;
-                }
-            }
-            calculateSizes();
-        }
-
-        function updateInput(inputId, value) {
-            const nearestValid = findNearestValidValue(value);
-            if (inputId === 'd_model') {
-                document.getElementById(inputId).value = value;
-            } else {
-                document.getElementById(inputId).value = nearestValid;
-            }
-            calculateSizes();
-        }
-
-        function findNearestValidValue(value) {
-            const numValue = parseInt(value);
-            if (isNaN(numValue)) return 1;
-            return validValues.reduce((prev, curr) => 
-                Math.abs(curr - numValue) < Math.abs(prev - numValue) ? curr : prev
-            );
-        }
-
-        function updateNumHead(value) {
-            const numValue = parseInt(value);
-            if (!isNaN(numValue)) {
-                document.getElementById('num_head').value = numValue;
-                document.getElementById('num_head_slider').value = numValue;
-                calculateSizes();
-            }
-        }
-
-        function updateQLora() {
-            const kv_lora_rank = parseInt(document.getElementById('kv_lora_rank').value);
-            const q_lora_rank = 3 * kv_lora_rank;
-            document.getElementById('q_lora_rank').value = q_lora_rank;
-            document.getElementById('q_lora_rank_slider').value = q_lora_rank;
-            calculateSizes();
-        }
-
-        function updateNormalSlider(inputId, value) {
-            const numValue = parseInt(value);
-            if (!isNaN(numValue)) {
-                document.getElementById(inputId + '_slider').value = numValue;
-                calculateSizes();
-            }
-        }
-
-        function updateNormalInput(inputId, value) {
-            const numValue = parseInt(value);
-            if (!isNaN(numValue)) {
-                document.getElementById(inputId).value = numValue;
-                calculateSizes();
-            }
-        }
-
-        function updateYAMLParams(d_model, num_head, head_dim, rope_head_dim, kv_lora_rank, q_lora_rank, mha_size, kv_cache, mla_size, mla_cache, cache_saving) {
-            const yaml = `
-d_model: ${d_model}
-num_head: ${num_head}
-head_dim: ${head_dim}
-rope_head_dim: ${rope_head_dim}
-kv_lora_rank: ${kv_lora_rank}
-q_lora_rank: ${q_lora_rank}
-mha_size: ${formatNumber(mha_size)}
-kv_cache: ${formatNumber(kv_cache)}
-mla_size: ${formatNumber(mla_size)}
-mla_cache: ${formatNumber(mla_cache)}
-cache_saving: ${formatPercentage(cache_saving)}
-            `.trim();
-            document.getElementById('yaml_params').textContent = yaml;
-        }
-
-        function updateCustomDModel(value) {
-            const numValue = parseInt(value);
-            if (!isNaN(numValue) && numValue >= 1 && numValue <= 8192) {
-                document.getElementById('d_model').value = numValue;
-                document.getElementById('d_model_slider').value = findNearestValidValue(numValue);
-                calculateSizes();
-            }
-        }
-
-        // Initial calculation
-        calculateSizes();
+        // Initial calculation on page load
+        calculateParameters();
     </script>
 </body>
 </html>
