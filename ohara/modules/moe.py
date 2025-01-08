@@ -2,7 +2,7 @@ from re import DEBUG
 import torch
 import torch.nn as nn
 
-from ohara.modules.mlp import MLP_MAP
+from ohara.modules.mlp import MLP_MAP, MLP
 
 
 # This might not me most efficient implementation of MOE
@@ -21,6 +21,8 @@ class MoE(nn.Module):
         mlp: str = "swiglu",
     ):
         super().__init__()
+        self.dim = dim
+        self.hidden_dim = hidden_dim
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
 
@@ -28,6 +30,8 @@ class MoE(nn.Module):
 
         self.experts = nn.ModuleList([mlp_block(dim, hidden_dim) for i in range(num_experts)])
         self.gate = nn.Linear(dim, num_experts, bias=False)
+
+
 
     def forward(self, x: torch.Tensor):
         batch_size, seq_len, dim = x.shape  # (batch_size, seq_len, dim)
@@ -80,7 +84,24 @@ class MoE(nn.Module):
 
         return output.view(batch_size, seq_len, dim)  #  batch_size, seq_len, dim
 
-
+    def reset_parameters(self, init_std=None):
+        # Initialize gate weights
+        gate_std = init_std or (self.dim ** (-0.5))
+        nn.init.trunc_normal_(
+            self.gate.weight,
+            mean=0.0,
+            std=gate_std,
+            a=-3 * gate_std,
+            b=3 * gate_std,
+        )
+        
+        self.experts:list[MLP]
+        
+        # Reset parameters for each expert
+        for expert in self.experts:
+            if hasattr(expert, 'reset_parameters'):
+                expert.reset_parameters(init_std=init_std)
+                
 if __name__ == "__main__":
     B, T, C = 8, 16, 32 
 

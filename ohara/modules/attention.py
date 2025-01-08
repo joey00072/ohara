@@ -36,6 +36,9 @@ class CasualAttention(nn.Module):
         self.res_dropout = nn.Dropout(res_dropout)
 
         self.flash_attn: bool = hasattr(torch.nn.functional, "scaled_dot_product_attention")
+        
+        self.reset_parameters()
+
 
     def forward(
         self,
@@ -99,6 +102,26 @@ class CasualAttention(nn.Module):
         return output
 
 
+    def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
+        init_std = init_std or (self.head_dim ** (-0.5))
+
+        for w in [self.key, self.query, self.value]:
+            nn.init.trunc_normal_(
+                w.weight,
+                mean=0.0,
+                std=init_std,
+                a=-3 * init_std,
+                b=3 * init_std,
+            )
+
+        nn.init.trunc_normal_(
+            self.proj.weight,
+            mean=0.0,
+            std=init_std / factor,
+            a=-3 * init_std,
+            b=3 * init_std,
+        )
+
 class Attention(nn.Module):
     def __init__(
         self,
@@ -122,6 +145,10 @@ class Attention(nn.Module):
         self.res_dropout = nn.Dropout(res_dropout)
 
         self.flash_attn: bool = hasattr(torch.nn.functional, "scaled_dot_product_attention")
+        
+        self.reset_parameters()
+
+
 
     def forward(
         self,
@@ -187,7 +214,27 @@ class Attention(nn.Module):
             return output, {"idx": self.idx, "attn_mtx": attn_mtx}
         return output
 
+    def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
+        init_std = init_std or (self.head_dim ** (-0.5))
 
+        for w in [self.key, self.query, self.value]:
+            nn.init.trunc_normal_(
+                w.weight,
+                mean=0.0,
+                std=init_std,
+                a=-3 * init_std,
+                b=3 * init_std,
+            )
+
+        nn.init.trunc_normal_(
+            self.proj.weight,
+            mean=0.0,
+            std=init_std / factor,
+            a=-3 * init_std,
+            b=3 * init_std,
+        )
+        
+        
 class CrossAttention(nn.Module):
     def __init__(
         self,
@@ -207,6 +254,9 @@ class CrossAttention(nn.Module):
         self.res_dropout = nn.Dropout(res_dropout)
 
         self.flash_attn: bool = hasattr(torch.nn.functional, "scaled_dot_product_attention")
+        
+        self.reset_parameters()
+
 
     def forward(
         self,
@@ -237,6 +287,23 @@ class CrossAttention(nn.Module):
         q = q.transpose(1, 2)
         v = v.transpose(1, 2)
 
+        if self.flash_attn and not verbose:
+            output = torch.nn.functional.scaled_dot_product_attention(
+                q,
+                k,
+                v,  # order impotent
+                attn_mask=None,
+                dropout_p=self.attn_dropout.p if self.training else 0.0,
+                is_causal=True,
+            )
+        else:
+            attn_mtx = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
+            attn_mtx = attn_mtx + mask[:, :, :seq_len, :seq_len]
+            attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(k)
+            attn_mtx_dropout = self.attn_dropout(attn_mtx)
+
+            output = torch.matmul(attn_mtx_dropout, v)  # (batch, n_head, seq_len, head_dim)
+
         # restore time as batch dimension and concat heads
         output = output.transpose(1, 2).contiguous().view(batch, seq_len, d_model)
 
@@ -247,3 +314,24 @@ class CrossAttention(nn.Module):
         if verbose:
             return output, {"idx": self.idx, "attn_mtx": attn_mtx}
         return output
+
+
+    def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
+        init_std = init_std or (self.head_dim ** (-0.5))
+
+        for w in [self.query]:
+            nn.init.trunc_normal_(
+                w.weight,
+                mean=0.0,
+                std=init_std,
+                a=-3 * init_std,
+                b=3 * init_std,
+            )
+
+        nn.init.trunc_normal_(
+            self.proj.weight,
+            mean=0.0,
+            std=init_std / factor,
+            a=-3 * init_std,
+            b=3 * init_std,
+        )

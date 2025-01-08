@@ -60,6 +60,29 @@ class Attention(nn.Module):
 
         self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
 
+        self.reset_parameters() 
+    
+    
+    def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
+        init_std = init_std or (self.head_dim ** (-0.5))
+
+        for w in [self.key, self.query, self.value]:
+            nn.init.trunc_normal_(
+                w.weight,
+                mean=0.0,
+                std=init_std,
+                a=-3 * init_std,
+                b=3 * init_std,
+            )
+
+        nn.init.trunc_normal_(
+            self.proj.weight,
+            mean=0.0,
+            std=init_std / factor,
+            a=-3 * init_std,
+            b=3 * init_std,
+        )
+
     def forward(self, x: torch.Tensor, mask: torch.Tensor, freqs_cis) -> torch.Tensor:
         batch, seq_len, d_model = x.shape
 
@@ -112,6 +135,8 @@ class Attention(nn.Module):
         output = self.proj(output)
         output = self.res_dropout(output)
         return output
+    
+    
 
 
 class Block(nn.Module):
@@ -119,7 +144,7 @@ class Block(nn.Module):
         super().__init__()
 
         self.attn = Attention(config)
-        self.ff = MLP_BLOCK[config.mlp](
+        self.ff:MLP|GLU = MLP_BLOCK[config.mlp](
             dim=config.d_model,
             hidden_dim=config.hidden_dim,
             activation_fn=config.activation,
@@ -134,6 +159,10 @@ class Block(nn.Module):
         x = x + self.attn(self.norm1(x), mask, freqs_cis)
         x = x + self.ff(self.norm2(x))
         return x
+    
+    def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
+        self.attn.reset_parameters(init_std, factor)
+        self.ff.reset_parameters(init_std, factor)
 
 
 class Transformer(nn.Module):
@@ -165,6 +194,8 @@ class Transformer(nn.Module):
             self.mask = None
 
         self.apply(self._init_weights)
+        
+
 
     def forward(self, x: torch.Tensor):
         batch, seqlen = x.shape
@@ -186,15 +217,28 @@ class Transformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
+    def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
+        layer:Block
+        torch.nn.init.normal_(self.token_emb.weight, mean=0.0, std=0.02)
+        torch.nn.init.normal_(self.vocab_proj.weight, mean=0.0, std=0.02)
+        for layer in self.layers:
+            layer.reset_parameters(init_std, factor)
+        self.norm.reset_parameters()
 
+        
+        
 class ModelingLM(nn.Module, PyTorchModelHubMixin):
     def __init__(self, config: Config, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.config = config
         self.model = Transformer(self.config)
-
+        self.reset_parameters()
+        
     def forward(self, x: torch.Tensor):
         return self.model(x)
+
+    def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
+        self.model.reset_parameters(init_std, factor)
 
 
 if __name__ == "__main__":

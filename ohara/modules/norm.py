@@ -19,3 +19,6 @@ class RMSNorm(nn.Module):
     def forward(self, x):
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
+
+    def reset_parameters(self):
+        torch.nn.init.ones_(self.weight)
