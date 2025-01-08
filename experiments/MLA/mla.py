@@ -176,6 +176,38 @@ class MultiHeadLatentAttention(nn.Module):
         output = self.res_dropout(output)
         return output
 
+    
+    def reset_parameters(self, init_std: float | None = None, factor: float = 1.0, qkv_std: float = None) -> None:
+        init_std = init_std or (self.dim ** (-0.5))
+        qkv_std = qkv_std or (self.v_head_dim ** (-0.5))
+
+        for w in [self.compress_q_linear, self.decompress_q_nope, self.decompress_q_rope, self.k_rope_linear]:
+            nn.init.trunc_normal_(
+                w.weight,
+                mean=0.0,
+                std=init_std,
+                a=-3 * init_std,
+                b=3 * init_std,
+            )
+        
+        for w in [self.compress_kv_linear, self.decompress_k_nope, self.decompress_v_linear]:
+            nn.init.trunc_normal_(
+                w.weight,
+                mean=0.0,
+                std=qkv_std,
+                a=-3 * qkv_std,
+                b=3 * qkv_std,
+            )
+        
+        # Initialize output projection with scaled std
+        nn.init.trunc_normal_(
+            self.proj.weight,
+            mean=0.0,
+            std=init_std / factor,
+            a=-3 * init_std,
+            b=3 * init_std,
+        )
+
 
 class MLA_Inference(MultiHeadLatentAttention):
     def __init__(self,config:Config):

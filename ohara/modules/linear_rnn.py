@@ -15,15 +15,16 @@ def scan(x: Tensor, h: Tensor) -> Tensor:
 
 class RG_LRU(nn.Module):
     def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
         self.input_proj = nn.Linear(dim, dim)
         self.gate_proj = nn.Linear(dim, dim)
         self.forget_lambda = nn.Parameter(torch.linspace(-4.323, -9, dim))
 
         # Why this Constant is 8 Paper offer no explaintion
         self.C = 8
-        with torch.no_grad():
-            self.input_proj.weight.normal_(std=dim**-0.5)
-            self.gate_proj.weight.normal_(std=dim**-0.5)
+        self.reset_parameters()
+
 
     def forward(self, x: Tensor, *args, **kwargs) -> Tensor:
         input_gate: torch.Tensor = self.input_proj(x)
@@ -41,26 +42,39 @@ class RG_LRU(nn.Module):
         # TODO: wirte recurrence for inference
         return h
 
+    def reset_parameters(self, init_std=None):
+        init_std = init_std or (self.dim ** (-0.5))
+        
+        for w in [self.input_proj, self.gate_proj]:
+            nn.init.trunc_normal_(
+                w.weight,
+                mean=0.0,
+                std=init_std,
+                a=-3 * init_std,
+                b=3 * init_std,
+            )
+
 
 class Hawk(nn.Module):
     def __init__(self, *, dim: int = 1024, expansion_factor: float = 1.5, kernel_size: int = 4):
         super().__init__()
-        hidden = int(dim * expansion_factor)
-        self.proj = nn.Linear(dim, 2 * hidden, bias=False)
+        self.dim = dim
+        self.hidden = int(dim * expansion_factor)
+        self.proj = nn.Linear(dim, 2 * self.hidden, bias=False)
         self.conv = nn.Conv1d(
-            in_channels=hidden,
-            out_channels=hidden,
+            in_channels=self.hidden,
+            out_channels=self.hidden,
             bias=True,
             kernel_size=kernel_size,
-            groups=hidden,
+            groups=self.hidden,
             padding=kernel_size - 1,
         )
-        self.linear_rnn = RG_LRU(hidden)
-        self.output = nn.Linear(hidden, dim, bias=False)
+        self.linear_rnn = RG_LRU(self.hidden)
+        self.output = nn.Linear(self.hidden, dim, bias=False)
 
-        with torch.no_grad():
-            self.proj.weight.normal_(std=dim**-0.5)
-            self.output.weight.normal_(std=hidden**-0.5)
+        self.reset_parameters()
+
+
 
     def forward(self, x: Tensor) -> Tensor:
         B, T, C = x.shape
@@ -73,7 +87,25 @@ class Hawk(nn.Module):
         x = self.output(F.gelu(gate) * h)
         return x
 
+    def reset_parameters(self, init_std=None):
+        init_std = init_std or (self.dim ** (-0.5))
+        
+        nn.init.trunc_normal_(
+            self.proj.weight,
+            mean=0.0,
+            std=init_std,
+            a=-3 * init_std,
+            b=3 * init_std,
+        )
 
+        nn.init.trunc_normal_(
+            self.output.weight,
+            mean=0.0,
+            std=(self.hidden ** (-0.5)),
+            a=-3 * init_std,
+            b=3 * init_std,
+        )
+        
 class Griffin(nn.Module):
     ...
     # TODO

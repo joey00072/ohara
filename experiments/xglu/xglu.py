@@ -33,7 +33,8 @@ class XGLU(nn.Module):
         **kwargs,
     ):
         super().__init__()
-
+        self.dim = dim
+        self.hidden_dim = hidden_dim
         if hidden_dim is None:
             hidden_dim = 4 * dim
             hidden_dim = int(2 * hidden_dim / 3)
@@ -41,7 +42,7 @@ class XGLU(nn.Module):
 
         self.compress = nn.Linear(dim, xglu_rank, bias=bias)
         self.compress_norm = RMSNorm(xglu_rank)
-        self.up = nn.Linear(xglu_rank, hidden_dim, bias=bias)
+        self.up = nn.Linear(dim, hidden_dim, bias=bias)
         self.gate = nn.Linear(xglu_rank, hidden_dim, bias=bias)
         self.down = nn.Linear(hidden_dim, dim, bias=bias)
 
@@ -50,13 +51,34 @@ class XGLU(nn.Module):
         self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
 
     def forward(self, x):
-        x = self.compress(x)
-        x = self.compress_norm(x)
-        up = self.up(x) * self.scale
-        gate = self.gate(x) * self.scale
+        xc = self.compress(x)
+        xc = self.compress_norm(xc)
+        up = self.up(x)
+        gate = self.gate(xc)
         gate = self.activation(gate)
         down = self.down(gate * up)
         return self.dropout(down)
+    
+    def reset_parameters(self, init_std=None, factor=1.0):
+        in_init_std = init_std or (self.dim ** (-0.5))
+        out_init_std = init_std or (self.hidden_dim ** (-0.5))
+        in_init_std = in_init_std
+        out_init_std = out_init_std / factor
+        for w in [self.up, self.gate]:
+            nn.init.trunc_normal_(
+                w.weight,
+                mean=0.0,
+                std=in_init_std,
+                a=-3 * in_init_std,
+                b=3 * in_init_std,
+            )
+        nn.init.trunc_normal_(
+            self.down.weight,
+            mean=0.0,
+            std=out_init_std,
+            a=-3 * out_init_std,
+            b=3 * out_init_std,
+        )
     
 class GLU(nn.Module):
     def __init__(
@@ -140,9 +162,9 @@ if __name__ == "__main__":
     print(f"glu: {sum(p.numel() for p in glu.parameters()) / 1e6:.2f}M")
     print(f"glu: {glu(x).shape}")
 
-    expand_ratio = 5
-    xglu_rank = 144
-    xglu = XGLU(dim=dim, hidden_dim=dim * expand_ratio, xglu_rank=xglu_rank)
+    expand_ratio = 4.6
+    xglu_rank = 256
+    xglu = XGLU(dim=dim, hidden_dim=int(dim * expand_ratio), xglu_rank=xglu_rank)
     print(f"xglu: {sum(p.numel() for p in xglu.parameters()) / 1e6:.2f}M")
     print(f"xglu: {xglu(x).shape}")
 

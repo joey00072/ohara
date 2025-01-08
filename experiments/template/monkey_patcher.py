@@ -32,6 +32,15 @@ class MLP(nn.Module):
         x = self.down(x)
         x = self.dropout(x)
         return x
+    
+    def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
+        init_std = init_std or (self.dim ** (-0.5))
+        nn.init.trunc_normal_(self.up.weight, mean=0.0, std=init_std, a=-3 * init_std, b=3 * init_std)
+        nn.init.trunc_normal_(self.down.weight, mean=0.0, std=init_std, a=-3 * init_std, b=3 * init_std)
+        if self.up.bias is not None:
+            nn.init.zeros_(self.up.bias)
+        if self.down.bias is not None:
+            nn.init.zeros_(self.down.bias)
 
 
 class StackedMLP(nn.Module):

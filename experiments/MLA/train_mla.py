@@ -38,7 +38,7 @@ from ohara.trainer import Trainer
 
 traceback.install()
 
-torch.manual_seed(42)
+torch.manual_seed(742)
 
 torch.set_float32_matmul_precision("high")
 
@@ -48,7 +48,7 @@ torch.set_float32_matmul_precision("high")
 attn_type = "mha" # "mha"
 
 ### CONFIGS
-wandb_project_name = "Ohara-MLA2"
+wandb_project_name = "Ohara-MLA4"
 wandb_run_name = random_name()
 
 learning_rate: float = 5e-4
