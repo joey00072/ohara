@@ -16,11 +16,13 @@ class MLP(nn.Module):
         bias: bool = True,
     ):
         super().__init__()
+        self.dim = dim
 
         if hidden_dim is None:
             hidden_dim = 4 * dim
             hidden_dim = int(2 * hidden_dim / 3)
             hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        self.hidden_dim = hidden_dim
 
         self.up = nn.Linear(dim, hidden_dim, bias=bias)
         self.down = nn.Linear(hidden_dim, dim, bias=bias)
@@ -75,11 +77,13 @@ class GLU(nn.Module):
         order in which W1,W2,W3 are multiplied is as per llama (for compatiblity)
         """
         super().__init__()
-
+        self.dim = dim
+        
         if hidden_dim is None:
             hidden_dim = 4 * dim
             hidden_dim = int(2 * hidden_dim / 3)
             hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        self.hidden_dim = hidden_dim
 
         self.up = nn.Linear(dim, hidden_dim, bias=bias)
         self.gate = nn.Linear(dim, hidden_dim, bias=bias)
@@ -130,11 +134,12 @@ class SwiGLU(nn.Module):
         https://arxiv.org/abs/2002.05202v1
         """
         super().__init__()
-
+        self.dim = dim
         if hidden_dim is None:
             hidden_dim = 4 * dim
             hidden_dim = int(2 * hidden_dim / 3)
             hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        self.hidden_dim = hidden_dim
 
         self.up = nn.Linear(dim, hidden_dim, bias=bias)
         self.down = nn.Linear(hidden_dim, dim, bias=bias)
@@ -180,11 +185,12 @@ class BiLinear(nn.Module):
         https://arxiv.org/abs/2002.05202v1
         """
         super().__init__()
-
+        self.dim = dim
         if hidden_dim is None:
             hidden_dim = 4 * dim
             hidden_dim = int(2 * hidden_dim / 3)
             hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        self.hidden_dim = hidden_dim
 
         self.w1 = nn.Linear(dim, hidden_dim, bias=bias)
         self.w2 = nn.Linear(hidden_dim, dim, bias=bias)
@@ -209,11 +215,13 @@ class ReGLU(nn.Module):
         https://arxiv.org/abs/2002.05202v1
         """
         super().__init__()
+        self.dim = dim
 
         if hidden_dim is None:
             hidden_dim = 4 * dim
             hidden_dim = int(2 * hidden_dim / 3)
             hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        self.hidden_dim = hidden_dim
 
         self.w1 = nn.Linear(dim, hidden_dim, bias=bias)
         self.w2 = nn.Linear(hidden_dim, dim, bias=bias)
@@ -243,11 +251,13 @@ class GEGLU(nn.Module):
         https://arxiv.org/abs/2002.05202v1
         """
         super().__init__()
+        self.dim = dim
 
         if hidden_dim is None:
             hidden_dim = 4 * dim
             hidden_dim = int(2 * hidden_dim / 3)
             hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        self.hidden_dim = hidden_dim
 
         self.gate = nn.Linear(dim, hidden_dim, bias=bias)
         self.up = nn.Linear(dim, hidden_dim, bias=bias)
