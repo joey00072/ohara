@@ -11,6 +11,7 @@ from ohara.embedings_pos.rotatry import precompute_freqs_cis
 from ohara.embedings_pos.rotatry import apply_rope
 
 
+
 @dataclass
 class Config:
     vocab_size: int = 65
@@ -24,6 +25,7 @@ class Config:
     multiple_of: int = 4
     bias: int = False
     weight_tying: bool = False
+    rope_theta: float = 100000
 
 
 class Attention(nn.Module):
@@ -36,10 +38,10 @@ class Attention(nn.Module):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        self.key = nn.Linear(d_model, self.head_dim * self.num_heads, cfg.bias)
-        self.query = nn.Linear(d_model, self.head_dim * self.num_kv_heads, cfg.bias)
+        self.key = nn.Linear(d_model, self.head_dim * self.num_kv_heads, cfg.bias)
+        self.query = nn.Linear(d_model, self.head_dim * self.num_heads, cfg.bias)
         self.value = nn.Linear(d_model, self.head_dim * self.num_kv_heads, cfg.bias)
-        self.proj = nn.Linear(d_model, d_model, cfg.bias)
+        self.proj = nn.Linear(self.head_dim * self.num_heads, d_model, cfg.bias)
 
         self.attn_dropout = nn.Dropout(cfg.dropout)
         self.res_dropout = nn.Dropout(cfg.dropout)
@@ -58,10 +60,10 @@ class Attention(nn.Module):
         v = self.value(x)
 
         k = k.view(
-            batch, seq_len, self.num_heads, self.head_dim
+            batch, seq_len, self.num_kv_heads, self.head_dim
         )  # shape = (B, seq_len, num_heads, head_dim)
         q = q.view(batch, seq_len, self.num_heads, self.head_dim)
-        v = v.view(batch, seq_len, self.num_heads, self.head_dim)
+        v = v.view(batch, seq_len, self.num_kv_heads, self.head_dim)
 
         q, k = apply_rope(q, k, freqs_cis)
 
@@ -92,7 +94,7 @@ class Attention(nn.Module):
             output = torch.matmul(attn_mtx, v)  # (batch, n_head, seq_len, head_dim)
 
         # restore time as batch dimension and concat heads
-        output = output.transpose(1, 2).contiguous().view(batch, seq_len, d_model)
+        output = output.transpose(1, 2).contiguous().view(batch, seq_len, self.head_dim * self.num_heads)
 
         # final projection into the residual stream
         output = self.proj(output)
@@ -171,3 +173,19 @@ class LLAMA(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+
+    @classmethod
+    def from_pretrained(cls, hf_name: str):
+        from ohara.utils.load import download_hf_model
+        import json
+        
+        path_name = download_hf_model(hf_name)
+        with open(path_name + "/config.json", "r") as f:
+            config = json.load(f)
+        print(config)
+        
+        config = Config(
+            
+        )
+        
