@@ -120,7 +120,7 @@ resume_training = False
 push_to_hub = False
 checkpoint_path = "./ckpt/model.pt"
 
-wandb_logger = False
+wandb_logger = True
 tensorboard_logger = True
 
 # ================================================================================================
