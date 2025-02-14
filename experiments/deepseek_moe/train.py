@@ -44,7 +44,7 @@ torch.set_float32_matmul_precision("high")
 # ================================================================================================
 
 ### CONFIGS
-wandb_project_name = "Ohara-MODEL"
+wandb_project_name = "Ohara-DeepSeek-Moe" + (f"-{sys.argv[1]}" if len(sys.argv) > 1 else "")
 wandb_run_name = random_name()
 
 learning_rate: float = 5e-4
@@ -55,7 +55,7 @@ warmup_iters: int = max_iters//10
 
 total_batch_size:int = 2**13 
 seq_len: int = 256
-batch_size: int = 16
+batch_size: int = 4
 micro_batch: int = int(total_batch_size/(seq_len*batch_size))
 eval_iters: int = 100
 save_ckpt_iters: int = 2000
@@ -72,16 +72,30 @@ weight_tying: bool = True
 ##### < MOE >
 mlp: str = "glu" # i want to use swiglu but it make params count 1.5x
 activation_fn: str = "silu"
-multiple_of: int = 1.65
+multiple_of: int = 1
 hidden_dim = int(d_model * multiple_of)
-num_layers: int = 4 #// 3  # 44
-dense_layers: int = 4 # num_layers
+num_layers: int = 8 #// 3  # 44
+dense_layers: int = 1 # num_layers
 ffn_type: str = FFNType.DSMoE
+aux_free_loadbalancing: bool = True
+use_aux_loss: bool = not aux_free_loadbalancing
 num_experts: int = 8
 num_experts_per_tok: int = 2
 num_shared_experts: int = 1
 expert_update_rate: float = 0.001
 train_experts_biases: bool = True   
+
+if len(sys.argv) > 1:
+    if sys.argv[1] == "baseline":
+        ffn_type = FFNType.Dense
+        hidden_dim = int(d_model*8)
+        dense_layers = num_layers
+    elif sys.argv[1] == "use_aux_loss":
+        aux_free_loadbalancing = False
+        use_aux_loss = True
+    elif sys.argv[1] == "aux_free_loadbalancing":
+        aux_free_loadbalancing = True
+        use_aux_loss = False
 
 ##### </ MOE >
 
@@ -91,7 +105,7 @@ model_name = f"joey00072/model_name{'Baseline' if MONKEY_PATCH is None else str(
 
 assert d_model % num_heads == 0
 
-compile_model = True# not bool(sys.platform == "darwin")
+compile_model = False# not bool(sys.platform == "darwin")
 compile_mode:str = None # "reduce-overhead"
 
 ### Dataset and Tokenizer
@@ -127,6 +141,7 @@ class Trainer:
         save_ckpt_iters: int,
         ignore_index: int = -1,
         push_to_hub: bool = False,
+        gamma: float = 1e-3,
         model_name: str = "",
     ):
         self.fabric = fabric
@@ -142,6 +157,7 @@ class Trainer:
         self.ignore_index = ignore_index
         self.push_to_hub = push_to_hub
         self.model_name = model_name
+        self.gamma = gamma
 
         (data, target) = next(self.val_dataloader)
         self.tokens_per_iter = int(math.prod(data.shape) * micro_batch)
@@ -153,7 +169,7 @@ class Trainer:
         for idx, (data, target) in enumerate(dataloader):
             if idx >= num_batches:
                 break
-            logits: torch.Tensor = self.model(data)
+            logits, aux_loss, max_violation = self.model(data)
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 target.reshape(-1),
@@ -162,7 +178,7 @@ class Trainer:
             losses[idx] = loss.item()
         return losses.mean()
 
-    def log_function(self, idx: int, lr: float, elapsed_time: float) -> None:
+    def log_function(self, idx: int, lr: float, elapsed_time: float, aux_loss: float, max_violation: float) -> None:
         train_loss = self.calculate_loss(self.train_dataloader, 100)
         val_loss = self.calculate_loss(self.val_dataloader, 100)
         
@@ -177,6 +193,8 @@ class Trainer:
                     "tokens": idx * self.tokens_per_iter,
                     "lr": lr,
                     "time": elapsed_time,
+                    "aux_loss": aux_loss,
+                    "max_violation": max_violation,
                 },
                 step=idx,
             )
@@ -189,6 +207,8 @@ class Trainer:
         self.calculate_loss(self.val_dataloader, 5)
 
         idx: int = start_iter
+
+        self.model.train()
         while True:
             if idx >= self.max_iters:
                 break
@@ -200,17 +220,22 @@ class Trainer:
                 param_group["lr"] = lr
 
             micro_batch_loss = 0
+            micro_batch_aux_loss = 0
+            micro_batch_max_violation = 0
             for _ in range(self.micro_batch):
                 (data, target) = next(self.train_dataloader)
                 with self.fabric.no_backward_sync(self.model, enabled=_ < self.micro_batch - 1):
-                    logits: torch.Tensor = self.model(data)
+                    logits: torch.Tensor
+                    logits, aux_loss, max_violation = self.model(data)
                     loss = F.cross_entropy(
                         logits.view(-1, logits.size(-1)),
                         target.view(-1),
                         ignore_index=self.ignore_index,
-                    )
+                    )+ self.gamma * aux_loss
                     loss = loss / self.micro_batch
                     micro_batch_loss += loss.item()
+                    micro_batch_aux_loss += aux_loss if isinstance(aux_loss, float) else aux_loss.item()
+                    micro_batch_max_violation += max_violation if isinstance(max_violation, float) else max_violation.item()
                     self.fabric.backward(loss)
 
             self.optimizer.step()
@@ -219,12 +244,25 @@ class Trainer:
             curr_time: float = time.perf_counter()
             elapsed_time: float = curr_time - start_time
             print(
-                f"iter: {idx} | loss: {micro_batch_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s"
+                f"iter: {idx} | loss: {micro_batch_loss:.4f} | aux_loss: {micro_batch_aux_loss:.4f} | max_violation: {micro_batch_max_violation:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s"
             )
-
+        
+            try:
+                self.fabric.log_dict(
+                    {
+                        "iter_idx": idx,
+                        "loss": micro_batch_loss/self.micro_batch,
+                        "aux_loss": micro_batch_aux_loss/self.micro_batch,
+                        "max_violation": micro_batch_max_violation/self.micro_batch,
+                    },
+                    step=idx,
+                )
+            except Exception as e:
+                print(f"Error logging: {e}")
+                
             if idx % self.eval_iters == 0:
                 self.model.eval()
-                self.log_function(idx, lr, elapsed_time)
+                self.log_function(idx, lr, elapsed_time, micro_batch_aux_loss/self.micro_batch, micro_batch_max_violation/self.micro_batch)
                 self.model.train()
 
             if idx % self.save_ckpt_iters == 0:
@@ -267,6 +305,8 @@ def main():
         "num_shared_experts": num_shared_experts,
         "expert_update_rate": expert_update_rate,
         "train_experts_biases": train_experts_biases,
+        "aux_free_loadbalancing": aux_free_loadbalancing,
+        "use_aux_loss": use_aux_loss,
         "mlp": mlp,
         "activation_fn": activation_fn,
         "dense_layers": dense_layers,

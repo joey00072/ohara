@@ -53,10 +53,8 @@ class Config(OrderedDict):
         super().__init__()
         for key, value in kwargs.items():
             setattr(self, key, value)   
-            
-        assert self.aux_free_loadbalancing or self.use_aux_loss, "aux_free_loadbalancing and use_aux_loss cannot both be False"
-        assert self.aux_free_loadbalancing and self.use_aux_loss, "aux_free_loadbalancing and use_aux_loss cannot both be True"
         
+        assert self.aux_free_loadbalancing != self.use_aux_loss, f"aux_free_loadbalancing: {self.aux_free_loadbalancing} and use_aux_loss: {self.use_aux_loss} cannot both be True"
 
 def maximal_violation(expert_indices: Tensor, num_experts: int):
     """
@@ -101,7 +99,7 @@ class DSMoE(nn.Module):
         self.aux_free_loadbalancing = aux_free_loadbalancing
         self.use_aux_loss = use_aux_loss
         
-        assert self.aux_free_loadbalancing or self.use_aux_loss, "aux_free_loadbalancing and use_aux_loss cannot both be False"
+        assert self.aux_free_loadbalancing != self.use_aux_loss, "only one of aux_free_loadbalancing and use_aux_loss can be True"
 
         mlp_block = MLP_MAP[mlp.lower()]  # SwiGLU is default
 
@@ -157,6 +155,10 @@ class DSMoE(nn.Module):
         ## adding router to graph, so model can learn routing
         # router_probs -> (batch_size * seq_len, num_experts_per_tok)
         router_probs, _ = torch.topk(scores, self.num_experts_per_tok, dim=-1)
+        if self.use_aux_loss:
+            aux_loss = self.aux_loss(router_probs)
+        else:
+            aux_loss = 0
         # -> (batch_size * seq_len, num_experts_per_tok)
         router_probs:Tensor = router_probs.sigmoid()
         router_probs = router_probs / router_probs.sum(dim=-1, keepdim=True)
@@ -177,8 +179,11 @@ class DSMoE(nn.Module):
 
         if return_with_info:
             return output, router_probs
+        
+        if self.use_aux_loss:
+            return output, aux_loss, maximal_violation(expert_indices, self.num_experts)
 
-        return output
+        return output, 0, maximal_violation(expert_indices, self.num_experts)
 
     def update_experts_biases(self, expert_indices: Tensor):
         expert_indices = expert_indices.clone().detach().reshape(-1)
@@ -192,11 +197,11 @@ class DSMoE(nn.Module):
         )
         
     def aux_loss(self, router_probs: Tensor):
-        batch_size, seq_len, _ = router_probs.shape
+        total_tokens, _ = router_probs.shape
         # avg over batch and seq_len -> (num_experts)
-        expert_load = router_probs.sum(dim=0).sum(dim=0) / (batch_size * seq_len)
-        ideal_load = router_probs.mean(dim=0).mean(dim=0)
-        return (ideal_load * expert_load).sum()
+        expert_load = router_probs.sum(dim=0) / total_tokens
+        ideal_load = router_probs.mean(dim=0)
+        return (ideal_load * expert_load).sum() / self.num_experts
     
 
     def reset_parameters(self, init_std=None, factor:float=1.0):
