@@ -158,14 +158,22 @@ class Block(nn.Module):
                 dropout=config.dropout,
                 bias=config.bias,
             )
+            
 
         self.norm1 = RMSNorm(config.d_model)
         self.norm2 = RMSNorm(config.d_model)
 
     def forward(self, x, mask, freqs_cis):
+        
         x = x + self.attn(self.norm1(x), mask, freqs_cis)
-        x = x + self.ff(self.norm2(x))
-        return x
+        output = self.ff(self.norm2(x))
+        if isinstance(output, tuple):
+            output, aux_loss, max_violation = output
+        else:
+            aux_loss = 0
+            max_violation = 0
+        x = x + output
+        return x, aux_loss, max_violation
     
     def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
         self.attn.reset_parameters(init_std, factor)
@@ -209,12 +217,16 @@ class Transformer(nn.Module):
         x = self.token_emb(x)
         freqs_cis = self.freq_cos[:seqlen], self.freq_sin[:seqlen]
 
+        total_aux_loss = 0
+        total_max_violation = 0
         for layer in self.layers:
-            x = layer(x, self.mask, freqs_cis)
+            x, aux_loss, max_violation = layer(x, self.mask, freqs_cis)
+            total_aux_loss += aux_loss
+            total_max_violation += max_violation
 
         x = self.norm(x)
         x = self.vocab_proj(x)
-        return x
+        return x, total_aux_loss/len(self.layers), total_max_violation/len(self.layers)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -242,8 +254,7 @@ class ModelingLM(nn.Module, PyTorchModelHubMixin):
         self.reset_parameters()
         
     def forward(self, x: torch.Tensor, return_outputs: bool = False):
-        outputs = self.model(x)
-        return outputs
+        return self.model(x)
 
     def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
         self.model.reset_parameters(init_std, factor)
