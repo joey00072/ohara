@@ -70,19 +70,19 @@ weight_tying: bool = True
 
 
 ##### < MOE >
-mlp: str = "glu" # i want to use swiglu but it make params count 1.5x
+mlp: str = "mlp" # i want to use swiglu but it make params count 1.5x
 activation_fn: str = "silu"
-multiple_of: int = 1
+multiple_of: int = 0.2
 hidden_dim = int(d_model * multiple_of)
-num_layers: int = 8 #// 3  # 44
+num_layers: int = 4 #// 3  # 44
 dense_layers: int = 1 # num_layers
 ffn_type: str = FFNType.DSMoE
 aux_free_loadbalancing: bool = True
 use_aux_loss: bool = not aux_free_loadbalancing
-num_experts: int = 8
-num_experts_per_tok: int = 2
+num_experts: int = 128
+num_experts_per_tok: int = 8
 num_shared_experts: int = 1
-expert_update_rate: float = 0.001
+expert_update_rate: float = 0.0001
 train_experts_biases: bool = True   
 
 if len(sys.argv) > 1:
@@ -120,7 +120,7 @@ resume_training = False
 push_to_hub = False
 checkpoint_path = "./ckpt/model.pt"
 
-wandb_logger = True
+wandb_logger = False
 tensorboard_logger = True
 
 # ================================================================================================

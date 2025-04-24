@@ -28,6 +28,22 @@ class Config:
     rope_theta: float = 100000
 
 
+class KVCache:
+    def __init__(self, shape, max_seq_length, idx: int | None = None, device=None, dtype=None):
+        self.idx = idx
+        self.key: torch.Tensor = torch.zeros(shape, device=device, dtype=dtype)
+        self.value: torch.Tensor = torch.zeros(shape, device=device, dtype=dtype)
+        self.max_seq_length = max_seq_length
+
+    def forward(self, keys: torch.Tensor, values: torch.Tensor, start_pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        bsz, T, _, _ = keys.shape
+        self.key[:bsz, start_pos : start_pos + T] = keys
+        self.value[:bsz, start_pos : start_pos + T] = values
+        keys = self.key[:bsz, : start_pos + T]
+        values = self.value[:bsz, : start_pos + T]
+        return keys, values
+
+
 class Attention(nn.Module):
     def __init__(self, cfg: Config):
         super().__init__()
@@ -48,31 +64,39 @@ class Attention(nn.Module):
 
         self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor, freqs_cis) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: torch.Tensor, freqs_cis, kv_cache: KVCache | None = None, position_ids: torch.Tensor | None = None) -> torch.Tensor:
         batch, seq_len, d_model = x.shape
 
-        k: torch.Tensor  # type hint for lsp
-        q: torch.Tensor  # ignore
+        k: torch.Tensor
+        q: torch.Tensor
         v: torch.Tensor
 
         k = self.key(x)
         q = self.query(x)
         v = self.value(x)
 
-        k = k.view(
-            batch, seq_len, self.num_kv_heads, self.head_dim
-        )  # shape = (B, seq_len, num_heads, head_dim)
+        k = k.view(batch, seq_len, self.num_kv_heads, self.head_dim)
         q = q.view(batch, seq_len, self.num_heads, self.head_dim)
         v = v.view(batch, seq_len, self.num_kv_heads, self.head_dim)
 
-        q, k = apply_rope(q, k, freqs_cis)
+        # Apply RoPE with position offset if using KV cache
+        offset = position_ids if kv_cache else 0
+        freqs_cos, freqs_sin = freqs_cis
+        if offset:
+            freqs_cos = freqs_cos[offset:offset + seq_len]
+            freqs_sin = freqs_sin[offset:offset + seq_len]
+        q, k = apply_rope(q, k, (freqs_cos, freqs_sin))
+
+        # Apply KV cache if provided
+        if kv_cache is not None:
+            k, v = kv_cache.forward(k, v, position_ids)
 
         # Grouped Query Attention
         if self.num_kv_heads != self.num_heads:
             k = torch.repeat_interleave(k, self.num_queries_per_kv, dim=2)
             v = torch.repeat_interleave(v, self.num_queries_per_kv, dim=2)
 
-        k = k.transpose(1, 2)  # shape = (B, num_heads, seq_len, head_dim)
+        k = k.transpose(1, 2)
         q = q.transpose(1, 2)
         v = v.transpose(1, 2)
 
@@ -80,23 +104,20 @@ class Attention(nn.Module):
             output = torch.nn.functional.scaled_dot_product_attention(
                 q,
                 k,
-                v,  # order impotent
+                v,
                 attn_mask=None,
                 dropout_p=self.attn_dropout.p if self.training else 0.0,
                 is_causal=True,
             )
         else:
             attn_mtx = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
-            attn_mtx = attn_mtx + mask[:, :, :seq_len, :seq_len]
+            if mask is not None:
+                attn_mtx = attn_mtx + mask[:, :, :seq_len, :k.size(2)]
             attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(k)
             attn_mtx = self.attn_dropout(attn_mtx)
+            output = torch.matmul(attn_mtx, v)
 
-            output = torch.matmul(attn_mtx, v)  # (batch, n_head, seq_len, head_dim)
-
-        # restore time as batch dimension and concat heads
         output = output.transpose(1, 2).contiguous().view(batch, seq_len, self.head_dim * self.num_heads)
-
-        # final projection into the residual stream
         output = self.proj(output)
         output = self.res_dropout(output)
         return output
@@ -117,8 +138,8 @@ class Block(nn.Module):
         self.norm1 = RMSNorm(cfg.d_model)
         self.norm2 = RMSNorm(cfg.d_model)
 
-    def forward(self, x, mask, freqs_cis):
-        x = x + self.attn(self.norm1(x), mask, freqs_cis)
+    def forward(self, x, mask, freqs_cis, kv_cache: KVCache | None = None, position_ids: torch.Tensor | None = None):
+        x = x + self.attn(self.norm1(x), mask, freqs_cis, kv_cache, position_ids)
         x = x + self.ff(self.norm2(x))
         return x
 
@@ -153,18 +174,42 @@ class LLAMA(nn.Module):
 
         self.apply(self._init_weights)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, kv_cache: list[KVCache] | None = None, position_ids: torch.Tensor | None = None):
         batch, seqlen = x.shape
         x = self.token_emb(x)
         device = self.token_emb.weight.device
         freqs_cis = self.freq_cos[:seqlen], self.freq_sin[:seqlen]
 
-        for layer in self.layers:
-            x = layer(x, self.mask, freqs_cis)
+        # Handle KV caching mask adjustment
+        mask = self.mask
+        if kv_cache is not None:
+            x = x[:, position_ids:]
+            mask = None
+
+        # Forward through layers with KV cache
+        for idx, layer in enumerate(self.layers):
+            cache = kv_cache[idx] if kv_cache is not None else None
+            x = layer(x, mask, freqs_cis, cache, position_ids)
 
         x = self.norm(x)
         x = self.vocab_proj(x)
         return x
+
+    def build_kv_cache(self) -> list[KVCache]:
+        """Build an empty KV cache suitable for the model's configuration."""
+        shape = (
+            1,
+            self.config.seq_len,
+            self.config.num_heads,
+            self.config.d_model // self.config.num_heads,
+        )
+        kv_cache = []
+        dtype = self.token_emb.weight.dtype
+        device = self.token_emb.weight.device
+
+        for idx in range(self.config.num_layers):
+            kv_cache.append(KVCache(shape, self.config.seq_len, idx, device=device, dtype=dtype))
+        return kv_cache
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):

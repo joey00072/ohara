@@ -20,6 +20,7 @@ class LoRALinear(nn.Module):
         self.rank = rank
         self.lora_alpha = lora_alpha
         self.merged = False
+        self.enable_lora = True
 
         self.lora_dropout = nn.Dropout(p=lora_dropout) if lora_dropout > 0.0 else lambda x: x
         self.linear = torch.nn.Linear(in_features, out_features, **kwargs)
@@ -52,13 +53,13 @@ class LoRALinear(nn.Module):
 
     def forward(self, x: torch.Tensor):
         pretrained = self.linear(x)
-        if self.r == 0 or self.merged:
+        if self.rank == 0 or self.merged:
             return pretrained
         lora = (self.lora_dropout(x) @ self.lora_A.T @ self.lora_B.T) * self.scaling
         return pretrained + lora
 
 
-def lora_from_linear(linear: nn.Linear, lora_alpha: int = 1, lora_dropout: float = 0.0):
+def lora_from_linear(linear: nn.Linear, lora_alpha: int = 1, lora_dropout: float = 0.0, rank: int = 16):
     device = linear.weight.device
     dtype = linear.weight.dtype
     lora = LoRALinear(
@@ -66,6 +67,7 @@ def lora_from_linear(linear: nn.Linear, lora_alpha: int = 1, lora_dropout: float
         linear.out_features,
         lora_alpha=lora_alpha,
         lora_dropout=lora_dropout,
+        rank=rank,  # Pass rank 16
     )
     lora = lora.to(device)
     lora.load_state_dict(linear.state_dict(), strict=False)  # Ensure only matching keys are loaded
@@ -77,16 +79,17 @@ def replace_with_lora(
     target_layer: list[str] | None = None,
     lora_alpha: int = 1,
     lora_dropout: float = 0.0,
+    rank: int = 16,  # Pass rank 16
 ):
     if isinstance(model, nn.Linear):
-        return lora_from_linear(model, lora_alpha, lora_dropout)
+        return lora_from_linear(model, lora_alpha, lora_dropout, rank)
 
     if isinstance(model, (nn.Module, nn.ModuleDict)):
         for name, module in model.named_children():
             if isinstance(module, nn.Linear) and (target_layer is None or name in target_layer):
-                setattr(model, name, lora_from_linear(module, lora_alpha, lora_dropout))
+                setattr(model, name, lora_from_linear(module, lora_alpha, lora_dropout, rank))
             else:
-                replace_with_lora(module, target_layer, lora_alpha, lora_dropout)
+                replace_with_lora(module, target_layer, lora_alpha, lora_dropout, rank)
     return model
 
 

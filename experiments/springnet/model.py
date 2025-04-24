@@ -1,22 +1,20 @@
+from typing import assert_type
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 import math
 from dataclasses import dataclass
-from ohara.modules.mlp import GLU, MLP
+from ohara.modules.mlp import GLU, MLP,ACT2FN
 from ohara.modules.norm import RMSNorm
 
 from ohara.embedings_pos.rotatry import precompute_freqs_cis
 from ohara.embedings_pos.rotatry import apply_rope
 
-from typing import Callable
-
 from huggingface_hub import PyTorchModelHubMixin
 
 from collections import OrderedDict
 
-import transformers
 
 @dataclass
 class Config(OrderedDict):
@@ -37,7 +35,40 @@ class Config(OrderedDict):
 
     activation: str = "silu"  # "relu", "gelu", "silu" etc
     mlp: str = "GLU"  # MLP or GLU
+    
+    spring_steps: int = 10
 
+
+
+
+class SpringMLP(nn.Module):
+    def __init__(self, config: Config):
+        super().__init__()
+
+        self.config = config
+        self.mlp = MLP(config.d_model, config.hidden_dim, config.activation, config.dropout, config.bias)
+        self.norm = nn.LayerNorm(config.d_model)
+        
+        self.decay = nn.Sequential(
+            nn.Linear(config.d_model, config.d_model//2),
+            nn.SiLU(),
+            nn.Linear(config.d_model//2, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor):
+        gamma = 1 
+        spring_loss = 0
+        for idx in range(self.config.spring_steps):
+            decay = self.decay(x)
+            gamma = gamma * decay**2
+            spring_loss +=  gamma
+            x = x + self.norm(self.mlp(x)) * gamma
+        return x, spring_loss/self.config.spring_steps
+    
+    def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
+        self.mlp.reset_parameters(init_std, factor)
+        self.norm.reset_parameters()
 
 MLP_BLOCK = {"MLP": MLP, "GLU": GLU}
 
@@ -53,8 +84,8 @@ class Attention(nn.Module):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        self.key = nn.Linear(d_model, self.head_dim * self.num_heads, config.bias)
-        self.query = nn.Linear(d_model, self.head_dim * self.num_kv_heads, config.bias)
+        self.key = nn.Linear(d_model, self.head_dim * self.num_kv_heads, config.bias)
+        self.query = nn.Linear(d_model, self.head_dim * self.num_heads, config.bias)
         self.value = nn.Linear(d_model, self.head_dim * self.num_kv_heads, config.bias)
         self.proj = nn.Linear(d_model, d_model, config.bias)
 
@@ -62,6 +93,29 @@ class Attention(nn.Module):
         self.res_dropout = nn.Dropout(config.dropout)
 
         self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
+
+        self.reset_parameters() 
+    
+    
+    def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
+        init_std = init_std or (self.head_dim ** (-0.5))
+
+        for w in [self.key, self.query, self.value]:
+            nn.init.trunc_normal_(
+                w.weight,
+                mean=0.0,
+                std=init_std,
+                a=-3 * init_std,
+                b=3 * init_std,
+            )
+
+        nn.init.trunc_normal_(
+            self.proj.weight,
+            mean=0.0,
+            std=init_std / factor,
+            a=-3 * init_std,
+            b=3 * init_std,
+        )
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor, freqs_cis) -> torch.Tensor:
         batch, seq_len, d_model = x.shape
@@ -75,10 +129,10 @@ class Attention(nn.Module):
         v = self.value(x)
 
         k = k.view(
-            batch, seq_len, self.num_heads, self.head_dim
-        )  # shape = (B, seq_len, num_heads, head_dim)
+            batch, seq_len, self.num_kv_heads, self.head_dim
+        )  # shape = (B, seq_len, num_kv_heads, head_dim)
         q = q.view(batch, seq_len, self.num_heads, self.head_dim)
-        v = v.view(batch, seq_len, self.num_heads, self.head_dim)
+        v = v.view(batch, seq_len, self.num_kv_heads, self.head_dim)
 
         q, k = apply_rope(q, k, freqs_cis)
 
@@ -95,7 +149,7 @@ class Attention(nn.Module):
             output = torch.nn.functional.scaled_dot_product_attention(
                 q,
                 k,
-                v,  # order impotent
+                v,  # order important
                 attn_mask=None,
                 dropout_p=self.attn_dropout.p if self.training else 0.0,
                 is_causal=True,
@@ -115,6 +169,8 @@ class Attention(nn.Module):
         output = self.proj(output)
         output = self.res_dropout(output)
         return output
+    
+    
 
 
 class Block(nn.Module):
@@ -122,9 +178,10 @@ class Block(nn.Module):
         super().__init__()
 
         self.attn = Attention(config)
-        self.ff = MLP_BLOCK[config.mlp](
+        self.ff:MLP|GLU = MLP_BLOCK[config.mlp](
             dim=config.d_model,
             hidden_dim=config.hidden_dim,
+            activation_fn=config.activation,
             dropout=config.dropout,
             bias=config.bias,
         )
@@ -136,6 +193,10 @@ class Block(nn.Module):
         x = x + self.attn(self.norm1(x), mask, freqs_cis)
         x = x + self.ff(self.norm2(x))
         return x
+    
+    def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
+        self.attn.reset_parameters(init_std, factor)
+        self.ff.reset_parameters(init_std, factor)
 
 
 class Transformer(nn.Module):
@@ -167,11 +228,12 @@ class Transformer(nn.Module):
             self.mask = None
 
         self.apply(self._init_weights)
+        
+
 
     def forward(self, x: torch.Tensor):
         batch, seqlen = x.shape
         x = self.token_emb(x)
-        device = self.token_emb.weight.device
         freqs_cis = self.freq_cos[:seqlen], self.freq_sin[:seqlen]
 
         for layer in self.layers:
@@ -189,22 +251,28 @@ class Transformer(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
+    def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
+        layer:Block
+        torch.nn.init.normal_(self.token_emb.weight, mean=0.0, std=0.02)
+        torch.nn.init.normal_(self.vocab_proj.weight, mean=0.0, std=0.02)
+        for layer in self.layers:
+            layer.reset_parameters(init_std, factor)
+        self.norm.reset_parameters()
 
+        
+        
 class ModelingLM(nn.Module, PyTorchModelHubMixin):
     def __init__(self, config: Config, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.config = config
         self.model = Transformer(self.config)
-
+        self.reset_parameters()
+        
     def forward(self, x: torch.Tensor):
         return self.model(x)
-    
-    @classmethod
-    def from_pretrained(cls, hf_name: str):
-        config = Config.from_pretrained(hf_name)
-        model = cls(config)
-        model.load_state_dict(torch.hub.load_state_dict_from_url(hf_name))
-        return model
+
+    def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
+        self.model.reset_parameters(init_std, factor)
 
 
 if __name__ == "__main__":
@@ -219,17 +287,9 @@ if __name__ == "__main__":
         dropout=0.2,
         bias=False,
         weight_tying=False,
-        activation="silu",
+        activation="relu_squared",
         mlp="GLU",
     )
 
     model = ModelingLM(config).eval()
     print(model)
-    hf_name = "joey00072/test_001"
-    model.push_to_hub(hf_name)
-    x = torch.arange(10).reshape(1, 10)
-    print(model(x).sum(dim=-1))
-    new_model = ModelingLM.from_pretrained(hf_name).eval()
-    print(new_model(x).sum(dim=-1))
-
-    # assert torch.isclose(model.model.vocab_proj.weight, new_model.model.vocab_proj.weight)

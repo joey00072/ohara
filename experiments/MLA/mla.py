@@ -124,7 +124,7 @@ class MultiHeadLatentAttention(nn.Module):
         self.proj = nn.Linear(self.value_dim , self.dim, bias=False)
         self.res_dropout = nn.Dropout(p=config.dropout)
         
-        self.scale = 1/ (self.value_dim**0.5)
+        self.scale = 1/ (self.nope_dim+self.rope_dim)**0.5
         
  
     def forward(self, x: Tensor,mask: torch.Tensor, freqs_cis: Tensor):
@@ -151,10 +151,6 @@ class MultiHeadLatentAttention(nn.Module):
         
         value = value.view(batch_size, seq_len, self.num_heads, self.v_head_dim).transpose(1,2)
 
-        # query_nope = query_nope * self.scale
-        # key_nope = key_nope * self.scale
-        value = value * self.scale
-        
         q_rope,k_rope = apply_rope(query_rope,key_rope, cis=freqs_cis)
         
         q_recombined = torch.empty((batch_size,self.num_heads,seq_len, self.rope_head_dim + self.nope_head_dim), device=x.device)

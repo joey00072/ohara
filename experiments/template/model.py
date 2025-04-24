@@ -22,8 +22,9 @@ class Config(OrderedDict):
     seq_len: int
 
     d_model: int
-    hidden_dim: int
+    mlp_intermediate_dim: int
 
+    head_dim: int
     num_heads: int
     num_kv_heads: int = 0
 
@@ -35,6 +36,8 @@ class Config(OrderedDict):
 
     activation: str = "silu"  # "relu", "gelu", "silu" etc
     mlp: str = "GLU"  # MLP or GLU
+    
+    use_spda: bool = False
 
 MLP_BLOCK = {"MLP": MLP, "GLU": GLU}
 
@@ -45,20 +48,20 @@ class Attention(nn.Module):
 
         d_model = config.d_model
         self.num_heads = config.num_heads
-        self.head_dim = config.d_model // config.num_heads
-        self.num_kv_heads = config.num_heads if config.num_kv_heads == 0 else config.num_kv_heads
+        self.head_dim = config.head_dim
+        self.num_kv_heads = config.num_kv_heads
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         self.key = nn.Linear(d_model, self.head_dim * self.num_kv_heads, config.bias)
         self.query = nn.Linear(d_model, self.head_dim * self.num_heads, config.bias)
         self.value = nn.Linear(d_model, self.head_dim * self.num_kv_heads, config.bias)
-        self.proj = nn.Linear(d_model, d_model, config.bias)
+        self.proj = nn.Linear(self.head_dim * self.num_heads, d_model, config.bias)
 
         self.attn_dropout = nn.Dropout(config.dropout)
         self.res_dropout = nn.Dropout(config.dropout)
 
-        self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
+        self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention") and not config.use_spda
 
         self.reset_parameters() 
     
@@ -234,8 +237,9 @@ class ModelingLM(nn.Module, PyTorchModelHubMixin):
         self.model = Transformer(self.config)
         self.reset_parameters()
         
-    def forward(self, x: torch.Tensor):
-        return self.model(x)
+    def forward(self, x: torch.Tensor, return_outputs: bool = False):
+        logits,outputs = self.model(x)
+        return logits, outputs
 
     def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
         self.model.reset_parameters(init_std, factor)
