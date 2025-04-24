@@ -70,7 +70,6 @@ def maximal_violation(expert_indices: Tensor, num_experts: int):
     max_load = expert_frequencies.max()
     return (max_load - mean_load) / mean_load
     
-
 class DSMoE(nn.Module):
     def __init__(
         self,
@@ -98,18 +97,20 @@ class DSMoE(nn.Module):
         self.train_experts_biases = train_experts_biases
         self.aux_free_loadbalancing = aux_free_loadbalancing
         self.use_aux_loss = use_aux_loss
-        
-        assert self.aux_free_loadbalancing != self.use_aux_loss, "only one of aux_free_loadbalancing and use_aux_loss can be True"
+
+        assert self.aux_free_loadbalancing != self.use_aux_loss, (
+            "only one of aux_free_loadbalancing and use_aux_loss can be True"
+        )
 
         mlp_block = MLP_MAP[mlp.lower()]  # SwiGLU is default
 
         self.experts = nn.ModuleList(
-            [mlp_block(dim, hidden_dim) for i in range(num_experts)]
+            [mlp_block(dim, hidden_dim) for _ in range(num_experts)]
         )
         self.gate = nn.Linear(dim, num_experts, bias=False)
         if self.num_shared_experts > 0:
             self.shared_experts = nn.ModuleList(
-                [mlp_block(dim, hidden_dim) for i in range(self.num_shared_experts)]
+                [mlp_block(dim, hidden_dim) for _ in range(self.num_shared_experts)]
             )
 
         if train_experts_biases:
@@ -121,91 +122,105 @@ class DSMoE(nn.Module):
     def forward(self, x: torch.Tensor, return_with_info: bool = False, *args, **kwargs):
         batch_size, seq_len, dim = x.shape  # (batch_size, seq_len, dim)
 
+        # Compute shared expert outputs if any
         if self.num_shared_experts > 0:
             shared = 0
             for shared_expert in self.shared_experts:
                 shared += shared_expert(x)
+        else:
+            shared = 0
 
-        # (batch_size , seq_len, dim) -> (batch_size * seq_len, dim)
+        # Flatten tokens for processing
         x = x.view(batch_size * seq_len, dim)
 
-        # (batch_size * seq_len, dim) -> (batch_size * seq_len, num_experts)
+        # Compute gating scores: (batch_size * seq_len, num_experts)
         scores = self.gate(x)
 
-        # expert_indices -> (batch_size * seq_len, num_experts_per_tok)
-        _, expert_indices = torch.topk(
+        # Get top experts per token (including expert biases)
+        expert_weights, expert_indices = torch.topk(
             scores + self.e_expert_biases, self.num_experts_per_tok, dim=-1
         )
-
-        #  -> (batch_size * seq_len * num_experts_per_tok ) 1D
+        # Flatten indices so each token-expert pair is a separate entry
         flat_expert_indices = expert_indices.view(-1)
 
-        # (batch_size * seq_len, dim) -> (batch_size * seq_len * num_experts_per_tok, dim)
-        # create copied of inputs for each expert
+        # Repeat tokens to match the number of experts per token
         x = x.repeat_interleave(self.num_experts_per_tok, dim=0)
 
-        # (total_tokens,dim)
-        output = torch.empty_like(x, dtype=x.dtype, device=x.device)
+        # --- Optimized Expert Dispatch ---
+        # Instead of a Python loop over experts filtering tokens one by one,
+        # we sort tokens by expert id so that each expert’s tokens are contiguous.
+        sorted_indices, sort_order = torch.sort(flat_expert_indices)
+        x_sorted = x[sort_order]
 
-        for idx, expert in enumerate(self.experts):
-            # filtered_x - selected toks that to be sent to nth expert
-            filtered_x = x[flat_expert_indices == idx]
-            output[flat_expert_indices == idx] = expert(filtered_x).to(x.dtype)
+        output_sorted = torch.empty_like(x_sorted)
 
-        ## adding router to graph, so model can learn routing
-        # router_probs -> (batch_size * seq_len, num_experts_per_tok)
+        # For each expert, process its contiguous block in a batched manner.
+        # Use torch.searchsorted on the sorted indices to get boundaries.
+        for expert_id in range(self.num_experts):
+            # Find the boundaries where sorted_indices == expert_id.
+            left = torch.searchsorted(sorted_indices, expert_id, right=False)
+            right = torch.searchsorted(sorted_indices, expert_id, right=True)
+            if right > left:
+                block = x_sorted[left:right]
+                # Process all tokens for this expert at once
+                out_block = self.experts[expert_id](block).to(x.dtype)
+                output_sorted[left:right] = out_block
+
+        # Unsort the output to match the original order.
+        inv_sort_order = torch.empty_like(sort_order)
+        inv_sort_order[sort_order] = torch.arange(sort_order.size(0), device=sort_order.device)
+        output = output_sorted[inv_sort_order]
+        # --- End Optimized Expert Dispatch ---
+
+        # Process router probabilities for auxiliary gradient routing.
         router_probs, _ = torch.topk(scores, self.num_experts_per_tok, dim=-1)
         if self.use_aux_loss:
             aux_loss = self.aux_loss(router_probs)
         else:
             aux_loss = 0
-        # -> (batch_size * seq_len, num_experts_per_tok)
-        router_probs:Tensor = router_probs.sigmoid()
+
+        router_probs = router_probs.sigmoid()
         router_probs = router_probs / router_probs.sum(dim=-1, keepdim=True)
 
+        # Reshape expert outputs to have separate expert dimension.
         output = output.view(*router_probs.shape, -1)
         router_probs = router_probs.unsqueeze(-1)
         output = output * router_probs
-
-        # sum up experts outputs
-        # batch_size * seq_len, num_experts_per_tok, dim -> batch_size * seq_len, dim
+        # Sum over experts' outputs.
         output = output.sum(dim=1)
+        output = output.view(batch_size, seq_len, dim)
 
-        ## aux loss free loadbalancing by updating expert biases
+        # Update expert biases for auxiliary load-balancing.
         if self.training and self.train_experts_biases:
             self.update_experts_biases(expert_indices)
 
-        output = shared + output.view(batch_size, seq_len, dim)
+        output = shared + output
 
         if return_with_info:
             return output, router_probs
-        
+
         if self.use_aux_loss:
             return output, aux_loss, maximal_violation(expert_indices, self.num_experts)
 
         return output, 0, maximal_violation(expert_indices, self.num_experts)
 
-    def update_experts_biases(self, expert_indices: Tensor):
+    def update_experts_biases(self, expert_indices: torch.Tensor):
         expert_indices = expert_indices.clone().detach().reshape(-1)
         expert_frequencies = torch.bincount(
             expert_indices, minlength=self.num_experts
         ) / len(expert_indices)
         mean = expert_frequencies.mean()
         error = mean - expert_frequencies
-        self.e_expert_biases.data = (
-            self.e_expert_biases.data + self.expert_update_rate * torch.sign(error)
-        )
-        
-    def aux_loss(self, router_probs: Tensor):
+        self.e_expert_biases.data += self.expert_update_rate * torch.sign(error)
+
+    def aux_loss(self, router_probs: torch.Tensor):
         total_tokens, _ = router_probs.shape
-        # avg over batch and seq_len -> (num_experts)
+        # Average over tokens for each expert.
         expert_load = router_probs.sum(dim=0) / total_tokens
         ideal_load = router_probs.mean(dim=0)
         return (ideal_load * expert_load).sum() / self.num_experts
-    
 
-    def reset_parameters(self, init_std=None, factor:float=1.0):
-        # Initialize gate weights
+    def reset_parameters(self, init_std=None, factor: float = 1.0):
         gate_std = init_std or (self.dim ** (-0.5))
         nn.init.trunc_normal_(
             self.gate.weight,
@@ -214,13 +229,162 @@ class DSMoE(nn.Module):
             a=-3 * gate_std,
             b=3 * gate_std,
         )
-
-        self.experts: list[MLP]
-
-        # Reset parameters for each expert
         for expert in self.experts:
             if hasattr(expert, "reset_parameters"):
                 expert.reset_parameters(init_std=init_std, factor=factor)
+
+
+# class DSMoE(nn.Module):
+#     def __init__(
+#         self,
+#         dim: int,
+#         hidden_dim: int | None = None,
+#         num_experts: int = 4,
+#         num_experts_per_tok: int = 2,
+#         num_shared_experts: int = 1,
+#         expert_update_rate: float = 0.001,
+#         train_experts_biases: bool = True,
+#         aux_free_loadbalancing: bool = False,
+#         use_aux_loss: bool = False,
+#         activation_fn: str = "silu",
+#         dropout: float = 0.2,
+#         bias: bool = False,
+#         mlp: str = "swiglu",
+#     ):
+#         super().__init__()
+#         self.dim = dim
+#         self.hidden_dim = hidden_dim
+#         self.num_experts = num_experts
+#         self.num_experts_per_tok = num_experts_per_tok
+#         self.num_shared_experts = num_shared_experts
+#         self.expert_update_rate = expert_update_rate
+#         self.train_experts_biases = train_experts_biases
+#         self.aux_free_loadbalancing = aux_free_loadbalancing
+#         self.use_aux_loss = use_aux_loss
+        
+#         assert self.aux_free_loadbalancing != self.use_aux_loss, "only one of aux_free_loadbalancing and use_aux_loss can be True"
+
+#         mlp_block = MLP_MAP[mlp.lower()]  # SwiGLU is default
+
+#         self.experts = nn.ModuleList(
+#             [mlp_block(dim, hidden_dim) for i in range(num_experts)]
+#         )
+#         self.gate = nn.Linear(dim, num_experts, bias=False)
+#         if self.num_shared_experts > 0:
+#             self.shared_experts = nn.ModuleList(
+#                 [mlp_block(dim, hidden_dim) for i in range(self.num_shared_experts)]
+#             )
+
+#         if train_experts_biases:
+#             # not part of graph
+#             self.e_expert_biases = nn.Parameter(torch.zeros(self.num_experts))
+#             self.expert_update_rate = expert_update_rate
+#             self.train_experts_biases = train_experts_biases
+
+#     def forward(self, x: torch.Tensor, return_with_info: bool = False, *args, **kwargs):
+#         batch_size, seq_len, dim = x.shape  # (batch_size, seq_len, dim)
+
+#         if self.num_shared_experts > 0:
+#             shared = 0
+#             for shared_expert in self.shared_experts:
+#                 shared += shared_expert(x)
+
+#         # (batch_size , seq_len, dim) -> (batch_size * seq_len, dim)
+#         x = x.view(batch_size * seq_len, dim)
+
+#         # (batch_size * seq_len, dim) -> (batch_size * seq_len, num_experts)
+#         scores = self.gate(x)
+
+#         # expert_indices -> (batch_size * seq_len, num_experts_per_tok)
+#         expert_weights, expert_indices = torch.topk(
+#             scores + self.e_expert_biases, self.num_experts_per_tok, dim=-1
+#         )
+
+#         #  -> (batch_size * seq_len * num_experts_per_tok ) 1D
+#         flat_expert_indices = expert_indices.view(-1)
+
+#         # (batch_size * seq_len, dim) -> (batch_size * seq_len * num_experts_per_tok, dim)
+#         # create copied of inputs for each expert
+#         x = x.repeat_interleave(self.num_experts_per_tok, dim=0)
+
+#         # (total_tokens,dim)
+#         output = torch.empty_like(x, dtype=x.dtype, device=x.device)
+
+#         for idx, expert in enumerate(self.experts):
+#             # filtered_x - selected toks that to be sent to nth expert
+#             filtered_x = x[flat_expert_indices == idx]
+#             output[flat_expert_indices == idx] = expert(filtered_x).to(x.dtype)
+            
+#         ## adding router to graph, so model can learn routing
+#         # router_probs -> (batch_size * seq_len, num_experts_per_tok)
+#         router_probs, _ = torch.topk(scores, self.num_experts_per_tok, dim=-1)
+#         if self.use_aux_loss:
+#             aux_loss = self.aux_loss(router_probs)
+#         else:
+#             aux_loss = 0
+#         # -> (batch_size * seq_len, num_experts_per_tok)
+#         router_probs:Tensor = router_probs.sigmoid()
+
+#         router_probs = router_probs / router_probs.sum(dim=-1, keepdim=True)
+
+#         output = output.view(*router_probs.shape, -1)
+#         router_probs = router_probs.unsqueeze(-1)
+#         output = output * router_probs
+
+#         # sum up experts outputs
+#         # batch_size * seq_len, num_experts_per_tok, dim -> batch_size * seq_len, dim
+#         output = output.sum(dim=1)
+
+#         ## aux loss free loadbalancing by updating expert biases
+#         if self.training and self.train_experts_biases:
+#             self.update_experts_biases(expert_indices)
+
+#         output = shared + output.view(batch_size, seq_len, dim)
+
+#         if return_with_info:
+#             return output, router_probs
+        
+#         if self.use_aux_loss:
+#             return output, aux_loss, maximal_violation(expert_indices, self.num_experts)
+
+#         return output, 0, maximal_violation(expert_indices, self.num_experts)
+
+#     def update_experts_biases(self, expert_indices: Tensor):
+#         expert_indices = expert_indices.clone().detach().reshape(-1)
+#         expert_frequencies = torch.bincount(
+#             expert_indices, minlength=self.num_experts
+#         ) / len(expert_indices)
+#         mean = expert_frequencies.mean()
+#         error = mean - expert_frequencies
+#         self.e_expert_biases.data = (
+#             self.e_expert_biases.data + self.expert_update_rate * torch.sign(error)
+#         )
+        
+#     def aux_loss(self, router_probs: Tensor):
+#         total_tokens, _ = router_probs.shape
+#         # avg over batch and seq_len -> (num_experts)
+#         expert_load = router_probs.sum(dim=0) / total_tokens
+#         ideal_load = router_probs.mean(dim=0)
+#         return (ideal_load * expert_load).sum() / self.num_experts
+    
+
+#     def reset_parameters(self, init_std=None, factor:float=1.0):
+#         # Initialize gate weights
+#         gate_std = init_std or (self.dim ** (-0.5))
+#         nn.init.trunc_normal_(
+#             self.gate.weight,
+#             mean=0.0,
+#             std=gate_std,
+#             a=-3 * gate_std,
+#             b=3 * gate_std,
+#         )
+
+#         self.experts: list[MLP]
+
+#         # Reset parameters for each expert
+#         for expert in self.experts:
+#             if hasattr(expert, "reset_parameters"):
+#                 expert.reset_parameters(init_std=init_std, factor=factor)
 
 
 
@@ -262,7 +426,7 @@ class SparseMoE(nn.Module):
         # expert_weights -> (batch_size * seq_len, num_experts_per_tok)
         # expert_indices -> (batch_size * seq_len, num_experts_per_tok)
         expert_weights, expert_indices = torch.topk(scores, self.num_experts_per_tok, dim=-1)
-
+        
         # -> (batch_size * seq_len, num_experts_per_tok)
         expert_weights = expert_weights.softmax(dim=-1)
 
@@ -351,6 +515,7 @@ if __name__ == "__main__":
 
         for _ in range(iters):
             p = model(x)
+            exit()
             loss = torch.nn.functional.mse_loss(p,y)
             loss.backward()
             optimizer.step()

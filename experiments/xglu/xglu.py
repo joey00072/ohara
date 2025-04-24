@@ -40,6 +40,7 @@ class XGLU(nn.Module):
             hidden_dim = int(2 * hidden_dim / 3)
             hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
+        self.xglu_rank = xglu_rank
         self.compress = nn.Linear(dim, xglu_rank, bias=bias)
         self.compress_norm = RMSNorm(xglu_rank)
         self.up = nn.Linear(dim, hidden_dim, bias=bias)
@@ -52,9 +53,10 @@ class XGLU(nn.Module):
 
     def forward(self, x):
         xc = self.compress(x)
-        xc = self.compress_norm(xc)
+        xc = self.compress_norm(xc) * (self.xglu_rank/self.dim)
         up = self.up(x)
         gate = self.gate(xc)
+        up,gate = gate,up
         gate = self.activation(gate)
         down = self.down(gate * up)
         return self.dropout(down)

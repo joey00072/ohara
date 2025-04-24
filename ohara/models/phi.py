@@ -319,7 +319,7 @@ class Phi(nn.Module):
     @staticmethod
     def from_pretrained(name: str) -> nn.Module:
         config = PhiConfig()
-        with torch.device("cuda"):
+        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
             model = Phi(config).half()
         # return model
 

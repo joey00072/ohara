@@ -72,10 +72,12 @@ class MoE(nn.Module):
             filtered_x = x[flat_expert_indices == idx]
             output[flat_expert_indices == idx] = expert(filtered_x)
 
+        print(f"{output.shape=}, {expert_weights.shape=}")
         # ->B,T,num_experts_per_tok,dim
         output = output.view(*expert_weights.shape, -1)
         expert_weights = expert_weights.unsqueeze(-1)
 
+        
         output = output * expert_weights
 
         # sum up experts outputs

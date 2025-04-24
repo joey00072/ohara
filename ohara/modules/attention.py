@@ -130,6 +130,7 @@ class Attention(nn.Module):
         attn_dropout: float = 0.0,
         res_dropout: float = 0.0,
         idx: int | None = None,
+        **kwargs: dict,
     ) -> None:
         super().__init__()
         self.num_heads: int = num_heads

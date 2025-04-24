@@ -17,7 +17,7 @@ class Inference:
         device: str = None,
         temperature: float = 1.0,
         top_p: float = 0.0,
-        max_tokens: int = 500,
+        max_new_tokens: int = 500,
         use_kv_cache: bool = True,
     ):
         self.model = model.to(device).eval()
@@ -25,7 +25,7 @@ class Inference:
         self.device = device
         self.default_temperature = temperature
         self.default_top_p = top_p
-        self.max_tokens = max_tokens
+        self.max_new_tokens = max_new_tokens
         self.use_kv_cache = use_kv_cache
         if use_kv_cache and hasattr(self.model, "build_kv_cache"):
             self.kv_cache = self.model.build_kv_cache()
@@ -66,6 +66,7 @@ class Inference:
         prompt: str,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
+        max_new_tokens: Optional[int] = None,
         stream: bool = True,
     ):
         if temperature is None:
@@ -84,7 +85,7 @@ class Inference:
         with torch.no_grad():
             if stream:
                 print(self.tokenizer.decode(inputs.tolist()[0]), end="")
-            for _ in range(self.max_tokens):
+            for _ in range(max_new_tokens):
                 logits = (
                     self.model(inputs, self.kv_cache, input_pos)
                     if self.use_kv_cache

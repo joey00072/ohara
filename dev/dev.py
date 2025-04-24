@@ -1,103 +1,95 @@
+from torch import nn
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
 
-from tqdm import tqdm
+from ohara.modules.mlp import MLP_MAP
 
-
-
-class DMLinear(nn.Linear):
+class MoE(nn.Module):
     def __init__(
-        self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None
-    ) -> None:
-        super().__init__(in_features, out_features, bias, device, dtype)
+        self,
+        dim: int,
+        hidden_dim: int | None = None,
+        num_experts: int = 4,
+        num_experts_per_tok: int = 2,
+        mlp: str = "swiglu",
+    ):
+        super().__init__()
+        self.dim = dim
+        self.hidden_dim = hidden_dim
+        self.num_experts = num_experts
+        self.num_experts_per_tok = num_experts_per_tok
 
-        self.scale = nn.Parameter(torch.ones(1, out_features))
+        mlp_block = MLP_MAP[mlp]  # SwiGLU is default
 
-    def forward(self, x):
-        w = self.weight
-
-        w = w / w.norm(dim=1, keepdim=True).detach()
-
-        out = F.linear(x, w) * self.scale
-
-        if self.bias is not None:
-            out = out + self.bias
-        return out
-
-Linear = DMLinear # nn.Linear
-from ohara.modules.norm import RMSNorm
-
-# Define the neural network
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        bias = False
-        self.fc1 = Linear(28 * 28, 128,bias=bias)
-        self.fc2 = Linear(128, 128,bias=bias)
-        self.fc3 = Linear(128, 128,bias=bias)
-        self.fc4 = Linear(128, 128,bias=bias)
-        self.fc5 = Linear(128, 10,bias=bias)
-        self.norm = RMSNorm(128)
-
-    def forward(self, x):
-        x = x.view(-1, 28 * 28)
-        x = self.norm(self.fc1(x))
-        x = x-F.tanh(self.fc4(F.silu(self.fc2(x)) * self.fc3(x)))
-        x = self.fc5(x)
-        return F.sigmoid(x)
-
-# Set device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Load and preprocess the MNIST dataset
-transform = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.1307,), (0.3081,))
-])
-
-train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
-test_dataset = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
-
-train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=1000, shuffle=False)
-
-# Initialize the model, loss function, and optimizer
-model = Net().to(device)
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=3e-5)
-
-# Training loop
-num_epochs = 1
-for epoch in range(num_epochs):
-    model.train()
-    pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}")
-    for batch_idx, (data, target) in enumerate(pbar):
-        data, target = data.to(device), target.to(device)
-        optimizer.zero_grad()
-        output = model(data)
-        loss = criterion(output, target)
-        loss.backward()
-        optimizer.step()
+        self.experts = nn.ModuleList([mlp_block(dim, hidden_dim) for i in range(num_experts)])
+    
+        self.gate = nn.Linear(dim, num_experts, bias=False)
         
-        pbar.set_postfix({'Loss': f'{loss.item():.4f}'})
+    def expert_paralle(self):
+        self.num_devices = torch.cuda.device_count()
+        self.devices = [torch.device(f"cuda:{i}") for i in range(self.num_devices)]
+        for i in range(len(self.experts)):
+            self.experts[i] = self.experts[i].to(self.devices[i%self.num_devices])
 
-    # Evaluate the model
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for data, target in test_loader:
-            data, target = data.to(device), target.to(device)
-            output = model(data)
-            _, predicted = torch.max(output.data, 1)
-            total += target.size(0)
-            correct += (predicted == target).sum().item()
+    def forward(self, x: torch.Tensor):
+        batch_size, seq_len, dim = x.shape  # (batch_size, seq_len, dim)
 
-    accuracy = 100 * correct / total
-    print(f"Epoch {epoch+1}/{num_epochs}, Test Accuracy: {accuracy:.2f}%")
+        # (batch_size , seq_len, dim) -> (batch_size * seq_len, dim)
+        x = x.view(batch_size * seq_len, dim)
 
-print("Training completed!")
+        # (batch_size * seq_len, dim) -> (batch_size * seq_len, num_experts)
+        scores = self.gate(x)
+
+        # expert_weights -> (batch_size * seq_len, num_experts_per_tok)
+        # expert_indices -> (batch_size * seq_len, num_experts_per_tok)
+        expert_weights, expert_indices = torch.topk(scores, self.num_experts_per_tok, dim=-1)
+
+        # -> (batch_size * seq_len, num_experts_per_tok)
+        expert_weights = expert_weights.softmax(dim=-1)
+
+        #  -> (batch_size * seq_len * num_experts_per_tok ) 1D
+        flat_expert_indices = expert_indices.view(-1)
+
+        # (batch_size * seq_len, dim) -> (batch_size * seq_len * num_experts_per_tok, dim)
+        # create copied of inputs for each expert
+        x = x.repeat_interleave(self.num_experts_per_tok, dim=0)
+
+        # (total_tokens,dim)
+        output = torch.empty_like(x, dtype=x.dtype, device=x.device)
+
+        for idx, expert in enumerate(self.experts):
+            # filtered_x - selected toks that to be sent to nth expert
+            filtered_x = x[flat_expert_indices == idx]
+            filtered_x.to(self.devices[idx%self.num_devices])
+            output[flat_expert_indices == idx] = expert(filtered_x)
+
+        print(f"{output.shape=}, {expert_weights.shape=}")
+        # ->B,T,num_experts_per_tok,dim
+        output = output.view(*expert_weights.shape, -1)
+        expert_weights = expert_weights.unsqueeze(-1)
+
+        
+        output = output * expert_weights
+
+        # sum up experts outputs
+        # batch_size * seq_len, num_experts_per_tok, dim -> batch_size * seq_len, dim
+        output = output.sum(dim=1)
+
+        return output.view(batch_size, seq_len, dim)  #  batch_size, seq_len, dim
+
+    def reset_parameters(self, init_std=None):
+        # Initialize gate weights
+        gate_std = init_std or (self.dim ** (-0.5))
+        nn.init.trunc_normal_(
+            self.gate.weight,
+            mean=0.0,
+            std=gate_std,
+            a=-3 * gate_std,
+            b=3 * gate_std,
+        )
+        
+        self.experts:list[MLP]
+        
+        # Reset parameters for each expert
+        for expert in self.experts:
+            if hasattr(expert, 'reset_parameters'):
+                expert.reset_parameters(init_std=init_std)
