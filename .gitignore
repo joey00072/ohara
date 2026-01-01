@@ -32,3 +32,4 @@ hf_cache/
 logs*/
 **/logs*/
 model.pt
+/dev
