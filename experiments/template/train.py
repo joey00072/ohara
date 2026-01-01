@@ -51,20 +51,20 @@ learning_rate: float = 5e-4
 min_learning_rate: float = 0.0
 
 max_iters: int = 10_000
-warmup_iters: int = max_iters//10 
+warmup_iters: int = max_iters // 10
 
-total_batch_size:int = 2**13 
+total_batch_size: int = 2**13
 seq_len: int = 256
-batch_size: int = 1 
-micro_batch: int = int(total_batch_size/(seq_len*batch_size))
+batch_size: int = 1
+micro_batch: int = int(total_batch_size / (seq_len * batch_size))
 eval_iters: int = 100
 save_ckpt_iters: int = 2000
 
 multiple_of: int = 4
-d_model: int = 1024 
-hidden_dim = int(d_model * multiple_of)
-num_layers: int = 16 #// 3  # 44
-num_heads: int = 16
+hidden_size: int = 1024
+intermediate_size = int(hidden_size * multiple_of)
+num_hidden_layers: int = 16  # // 3  # 44
+num_attention_heads: int = 16
 
 mlp: str = "GLU"
 activation_fn: str = "silu"
@@ -76,8 +76,8 @@ model_name = f"joey00072/model_name{'Baseline' if MONKEY_PATCH is None else str(
 
 assert d_model % num_heads == 0
 
-compile_model = True# not bool(sys.platform == "darwin")
-compile_mode:str = "reduce-overhead"
+compile_model = True  # not bool(sys.platform == "darwin")
+compile_mode: str = "reduce-overhead"
 
 ### Dataset and Tokenizer
 dataset_name = "joey00072/pretokenized__JeanKaddour_minipile__EleutherAI__gpt-neo-125m"  # run pretokeinze first
@@ -106,10 +106,10 @@ def main():
         "eval_iters": eval_iters,
         "batch_size": batch_size,
         "micro_batch": micro_batch,
-        "d_model": d_model,
-        "seq_len": seq_len,
-        "num_layers": num_layers,
-        "num_heads": num_heads,
+        "hidden_size": hidden_size,
+        "max_sequence_length": seq_len,
+        "num_hidden_layers": num_hidden_layers,
+        "num_attention_heads": num_attention_heads,
         "multiple_of": multiple_of,
         "compile_model": compile_model,
         "tokenizer_name": tokenizer_name,
@@ -118,12 +118,11 @@ def main():
         "save_ckpt_iters": save_ckpt_iters,
         "weight_tying": weight_tying,
     }
-    
-    print("="*100)  
+
+    print("=" * 100)
     print(hyper_params)
-    print("="*100)
-    
-    
+    print("=" * 100)
+
     loggers = []
 
     if wandb_logger:
@@ -142,12 +141,12 @@ def main():
 
     config = Config(
         vocab_size=tokenizer.vocab_size,
-        seq_len=seq_len,
-        d_model=d_model,
-        hidden_dim=hidden_dim,
-        num_heads=num_heads,
-        num_kv_heads=0,
-        num_layers=num_layers,
+        max_sequence_length=seq_len,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        num_attention_heads=num_attention_heads,
+        num_key_value_heads=0,
+        num_hidden_layers=num_hidden_layers,
         dropout=0.2,
         bias=False,
         weight_tying=weight_tying,
@@ -184,7 +183,7 @@ def main():
     model: L.LightningModule = fabric.setup(model)
     print("=" * 100)
     if compile_model:
-        model = torch.compile(model,mode=compile_mode)
+        model = torch.compile(model, mode=compile_mode)
     # model.gradient_checkpointing_enable()
     print(model)
     print(model_summary(model))
@@ -221,9 +220,9 @@ def main():
     if resume_training and os.path.exists(checkpoint_path):
         print(f"Resuming from checkpoint: {checkpoint_path}")
         checkpoint = fabric.load(checkpoint_path)
-        model.load_state_dict(checkpoint['model'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        start_iter = checkpoint['idx']
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        start_iter = checkpoint["idx"]
         print(f"Resuming from iteration: {start_iter}")
 
     # Let's GO!!
@@ -244,7 +243,7 @@ def main():
 
     end: float = time.time()
 
-    print(f"Time: {end-start}")
+    print(f"Time: {end - start}")
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from ohara.embedings_pos.rotatry import apply_rope, precompute_freqs_cis
+from ohara.embeddings_pos.rotary import apply_rope, precompute_freqs_cis
 from ohara.modules.pscan import pscan
 from ohara.modules.mlp import GEGLU
 from ohara.modules.norm import RMSNorm

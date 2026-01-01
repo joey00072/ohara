@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from ohara.modules.mlp import SwiGLU
 from ohara.modules.norm import RMSNorm
-from ohara.embedings_pos.xpos import XPos
+from ohara.embeddings_pos.xpos import XPos
 
 
 @dataclass

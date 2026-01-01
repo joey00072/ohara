@@ -1,3 +1,3 @@
-from .models.llama import LLAMA, Config
+from .models.llama import Llama, Config
 
 # todo write code so you can import any model

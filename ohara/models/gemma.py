@@ -20,19 +20,19 @@ from typing import Tuple
 
 from ohara.modules.mlp import GEGLU
 from ohara.modules.norm import RMSNorm
-from ohara.embedings_pos.rotatry import precompute_freqs_cis
-from ohara.embedings_pos.rotatry import apply_rope
+from ohara.embeddings_pos.rotary import precompute_freqs_cis
+from ohara.embeddings_pos.rotary import apply_rope
 
 
 @dataclass
 class GemmaConfig:
     vocab_size: int = 51200
-    seq_len: int = 2048
-    d_model: int = 2048
+    max_sequence_length: int = 2048
+    hidden_size: int = 2048
     intermediate_size = 16 * 2048
-    num_heads: int = 32
-    num_kv_heads: int = 1
-    num_layers: int = 32
+    num_attention_heads: int = 32
+    num_key_value_heads: int = 1
+    num_hidden_layers: int = 32
     dropout: float = 0.2
     multiple_of: int = 4
     bias: bool = True
@@ -43,31 +43,32 @@ class GemmaConfig:
 class GemmaAttention(nn.Module):
     def __init__(
         self,
-        d_model: int,
-        num_heads: int,
-        num_kv_heads: int,
+        hidden_size: int,
+        num_attention_heads: int,
+        num_key_value_heads: int,
     ):
         super().__init__()
 
-        self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads
+        self.num_attention_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
 
-        assert self.num_heads % self.num_kv_heads == 0
-        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        assert self.num_attention_heads % self.num_key_value_heads == 0
+        self.num_queries_per_kv = self.num_attention_heads // self.num_key_value_heads
 
-        self.d_model = d_model
-        self.head_dim = self.d_model // num_heads
+        self.hidden_size = hidden_size
+        self.head_dim = self.hidden_size // num_attention_heads
 
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
+        self.q_size = self.num_attention_heads * self.head_dim
+        self.kv_size = self.num_key_value_heads * self.head_dim
 
         self.scaling: float = self.head_dim**-0.5
 
         self.qkv_proj = nn.Linear(
-            self.d_model, (self.num_heads + 2 * self.num_kv_heads) * self.head_dim
+            self.hidden_size,
+            (self.num_attention_heads + 2 * self.num_key_value_heads) * self.head_dim,
         )
 
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.d_model)
+        self.o_proj = nn.Linear(self.num_attention_heads * self.head_dim, self.hidden_size)
 
     def forward(
         self,
@@ -78,14 +79,14 @@ class GemmaAttention(nn.Module):
         input_shape = x.shape
         assert len(input_shape) == 3
 
-        batch_size, seq_len, d_model = x.shape
+        batch_size, seq_len, hidden_size = x.shape
 
         qkv: Tensor = self.qkv_proj(x)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        q: Tensor = q.view(batch_size, -1, self.num_heads, self.head_dim)
-        k: Tensor = k.view(batch_size, -1, self.num_kv_heads, self.head_dim)
-        v: Tensor = v.view(batch_size, -1, self.num_kv_heads, self.head_dim)
+        q: Tensor = q.view(batch_size, -1, self.num_attention_heads, self.head_dim)
+        k: Tensor = k.view(batch_size, -1, self.num_key_value_heads, self.head_dim)
+        v: Tensor = v.view(batch_size, -1, self.num_key_value_heads, self.head_dim)
 
         # Positional embedding.
         q = apply_rope(q, freqs_cis=freqs_cis)
@@ -94,7 +95,7 @@ class GemmaAttention(nn.Module):
         # TODO: add code for kv chache
 
         # Grouped Query Attention
-        if self.num_kv_heads != self.num_heads:
+        if self.num_key_value_heads != self.num_attention_heads:
             key = torch.repeat_interleave(k, self.num_queries_per_kv, dim=2)
             value = torch.repeat_interleave(v, self.num_queries_per_kv, dim=2)
 
@@ -120,16 +121,16 @@ class Block(nn.Module):
     ):
         super().__init__()
         self.self_attn = GemmaAttention(
-            d_model=config.d_model,
-            num_heads=config.num_heads,
-            num_kv_heads=config.num_kv_heads,
+            hidden_size=config.hidden_size,
+            num_attention_heads=config.num_attention_heads,
+            num_key_value_heads=config.num_key_value_heads,
         )
         self.mlp = GEGLU(
-            dim=config.d_model,
+            dim=config.hidden_size,
             hidden_dim=config.intermediate_size,
         )
-        self.ln1 = RMSNorm(config.d_model, eps=config.eps)
-        self.ln2 = RMSNorm(config.d_model, eps=config.eps)
+        self.ln1 = RMSNorm(config.hidden_size, eps=config.eps)
+        self.ln2 = RMSNorm(config.hidden_size, eps=config.eps)
 
     def forward(
         self,
@@ -149,22 +150,28 @@ class Gemma(nn.Module):
 
         self.config = model_args
 
-        self.token_emb = nn.Embedding(model_args.vocab_size, model_args.d_model)
+        self.token_emb = nn.Embedding(model_args.vocab_size, model_args.hidden_size)
 
-        self.layers = nn.ModuleList([Block(model_args) for _ in range(model_args.num_layers)])
+        self.layers = nn.ModuleList(
+            [Block(model_args) for _ in range(model_args.num_hidden_layers)]
+        )
 
-        self.norm = nn.LayerNorm(model_args.d_model)
-        self.vocab_proj = nn.Linear(model_args.d_model, model_args.vocab_size, bias=False)
+        self.norm = nn.LayerNorm(model_args.hidden_size)
+        self.vocab_proj = nn.Linear(model_args.hidden_size, model_args.vocab_size, bias=False)
 
         self.token_emb.weight = self.vocab_proj.weight
 
         self.cos, self.sin = precompute_freqs_cis(
-            model_args.d_model // model_args.num_heads, model_args.seq_len * 2
+            model_args.hidden_size // model_args.num_attention_heads,
+            model_args.max_sequence_length * 2,
         )
 
         if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
             print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
-            mask = torch.full((1, 1, model_args.seq_len, model_args.seq_len), float("-inf"))
+            mask = torch.full(
+                (1, 1, model_args.max_sequence_length, model_args.max_sequence_length),
+                float("-inf"),
+            )
             mask = torch.triu(mask, diagonal=1)
             self.register_buffer("mask", mask)
         else:

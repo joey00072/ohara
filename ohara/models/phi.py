@@ -19,10 +19,10 @@ from tqdm import tqdm
 @dataclass
 class PhiConfig:
     vocab_size: int = 51200
-    seq_len: int = 2048
-    d_model: int = 2560
-    num_heads: int = 32
-    num_layers: int = 32
+    max_sequence_length: int = 2048
+    hidden_size: int = 2560
+    num_attention_heads: int = 32
+    num_hidden_layers: int = 32
     dropout: float = 0.2
     multiple_of: int = 4
     bias: bool = True
@@ -78,7 +78,7 @@ class RoPE(nn.Module):
 
         return rx
 
-    def _compute_traditional_rope(self, costheta, sintheta, x)->Tensor:
+    def _compute_traditional_rope(self, costheta, sintheta, x) -> Tensor:
         x1 = x[..., ::2]
         x2 = x[..., 1::2]
         rx1 = x1 * costheta - x2 * sintheta
@@ -118,7 +118,7 @@ class RoPE(nn.Module):
         scale: float = 1.0,
         dtype=torch.float32,
         device=None,
-    ) -> tuple[Tensor,Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         D = D // 2
         positions = torch.arange(offset, N, dtype=dtype, device=device) * scale
         freqs = torch.exp(-torch.arange(0.0, D, dtype=dtype, device=device) * (math.log(base) / D))
@@ -153,17 +153,17 @@ class LayerNorm(nn.LayerNorm):
 
 
 class PhiMHA(nn.Module):
-    def __init__(self, layer_idx, dim, num_heads, rotary_dim) -> None:
+    def __init__(self, layer_idx, hidden_size, num_attention_heads, rotary_dim) -> None:
         super().__init__()
-        self.dim = dim
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
+        self.hidden_size = hidden_size
+        self.num_attention_heads = num_attention_heads
+        self.head_dim = hidden_size // num_attention_heads
         self.layer_idx = layer_idx
 
-        self.k_proj = nn.Linear(dim, dim)
-        self.q_proj = nn.Linear(dim, dim)
-        self.v_proj = nn.Linear(dim, dim)
-        self.dense = nn.Linear(dim, dim)
+        self.k_proj = nn.Linear(hidden_size, hidden_size)
+        self.q_proj = nn.Linear(hidden_size, hidden_size)
+        self.v_proj = nn.Linear(hidden_size, hidden_size)
+        self.dense = nn.Linear(hidden_size, hidden_size)
 
         self.rope = RoPE(int(rotary_dim * self.head_dim), traditional=False)
 
@@ -174,15 +174,15 @@ class PhiMHA(nn.Module):
         kv_cache: KVCache | None = None,
         position_ids: Tensor | None = None,
     ) -> Tensor:
-        batch_size, seq_length, d_model = x.shape
-        # print(f"{batch_size}, {seq_length}, {d_model}")
+        batch_size, seq_length, hidden_size = x.shape
+        # print(f"{batch_size}, {seq_length}, {hidden_size}")
         k = self.k_proj(x)
         q = self.q_proj(x)
         v = self.v_proj(x)
 
-        k = k.view(batch_size, seq_length, self.num_heads, self.head_dim)
-        q = q.view(batch_size, seq_length, self.num_heads, self.head_dim)
-        v = v.view(batch_size, seq_length, self.num_heads, self.head_dim)
+        k = k.view(batch_size, seq_length, self.num_attention_heads, self.head_dim)
+        q = q.view(batch_size, seq_length, self.num_attention_heads, self.head_dim)
+        v = v.view(batch_size, seq_length, self.num_attention_heads, self.head_dim)
 
         if kv_cache is not None:
             k, v = kv_cache.forward(k, v, position_ids)
@@ -238,11 +238,13 @@ class Block(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.ln = LayerNorm(config.d_model, eps=config.eps)
+        self.ln = LayerNorm(config.hidden_size, eps=config.eps)
         self.block_idx = block_idx
 
-        self.mixer = PhiMHA(block_idx, config.d_model, config.num_heads, config.rotary_dim)
-        self.mlp = MLP(config.d_model, config.multiple_of * config.d_model)
+        self.mixer = PhiMHA(
+            block_idx, config.hidden_size, config.num_attention_heads, config.rotary_dim
+        )
+        self.mlp = MLP(config.hidden_size, config.multiple_of * config.hidden_size)
 
     def forward(
         self,
@@ -260,20 +262,22 @@ class Phi(nn.Module):
     def __init__(self, config: PhiConfig) -> None:
         super().__init__()
         self.config = config
-        self.wte = nn.Embedding(config.vocab_size, config.d_model)
-        self.layers = nn.ModuleList([Block(config, i) for i in range(config.num_layers)])
+        self.wte = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.layers = nn.ModuleList([Block(config, i) for i in range(config.num_hidden_layers)])
 
-        self.ln = LayerNorm(config.d_model, eps=config.eps)
-        self.lm_head = nn.Linear(config.d_model, config.vocab_size)
+        self.ln = LayerNorm(config.hidden_size, eps=config.eps)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size)
         self.loss_fn = nn.CrossEntropyLoss()
 
-        mask = torch.full((1, 1, config.seq_len, config.seq_len), float("-inf"))
+        mask = torch.full(
+            (1, 1, config.max_sequence_length, config.max_sequence_length), float("-inf")
+        )
 
         (
             1,
-            config.seq_len,
-            config.num_heads,
-            config.d_model // config.num_heads,
+            config.max_sequence_length,
+            config.num_attention_heads,
+            config.hidden_size // config.num_attention_heads,
         )
 
         mask = torch.triu(mask, diagonal=1)
@@ -304,16 +308,18 @@ class Phi(nn.Module):
     def build_kv_cache(self) -> list[KVCache]:
         shape = (
             1,
-            self.config.seq_len,
-            self.config.num_heads,
-            self.config.d_model // self.config.num_heads,
+            self.config.max_sequence_length,
+            self.config.num_attention_heads,
+            self.config.hidden_size // self.config.num_attention_heads,
         )
         kv_cache = []
         dtype = self.wte.weight.dtype
         device = self.wte.weight.device
 
-        for idx in range(self.config.num_layers):
-            kv_cache.append(KVCache(shape, self.config.seq_len, idx, device=device, dtype=dtype))
+        for idx in range(self.config.num_hidden_layers):
+            kv_cache.append(
+                KVCache(shape, self.config.max_sequence_length, idx, device=device, dtype=dtype)
+            )
         return kv_cache
 
     @staticmethod
