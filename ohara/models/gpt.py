@@ -11,10 +11,10 @@ from dataclasses import dataclass
 @dataclass
 class Config:
     vocab_size = 65
-    seq_len = 64
-    d_model = 128
-    num_heads = 4
-    num_layers = 4
+    max_sequence_length = 64
+    hidden_size = 128
+    num_attention_heads = 4
+    num_hidden_layers = 4
     dropout = 0.2
     multiple_of = 4
     bias = False
@@ -23,14 +23,14 @@ class Config:
 class Attention(nn.Module):
     def __init__(self, model_args: Config):
         super().__init__()
-        d_model = model_args.d_model
-        self.num_heads = model_args.num_heads
-        self.head_dim = model_args.d_model // model_args.num_heads
+        hidden_size = model_args.hidden_size
+        self.num_attention_heads = model_args.num_attention_heads
+        self.head_dim = model_args.hidden_size // model_args.num_attention_heads
 
-        self.key = nn.Linear(d_model, d_model)
-        self.query = nn.Linear(d_model, d_model)
-        self.value = nn.Linear(d_model, d_model)
-        self.proj = nn.Linear(d_model, d_model)
+        self.key = nn.Linear(hidden_size, hidden_size)
+        self.query = nn.Linear(hidden_size, hidden_size)
+        self.value = nn.Linear(hidden_size, hidden_size)
+        self.proj = nn.Linear(hidden_size, hidden_size)
 
         self.attn_dropout = nn.Dropout(model_args.dropout)
         self.res_dropout = nn.Dropout(model_args.dropout)
@@ -38,7 +38,7 @@ class Attention(nn.Module):
         self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        batch, seq_len, d_model = x.shape
+        batch, seq_len, hidden_size = x.shape
 
         k: torch.Tensor  # type hint for lsp
         q: torch.Tensor  # ignore
@@ -49,10 +49,10 @@ class Attention(nn.Module):
         v = self.value(x)
 
         k = k.view(
-            seq_len, self.num_heads, self.head_dim
-        )  # shape = (B, seq_len, num_heads, head_dim)
-        q = q.view(seq_len, self.num_heads, self.head_dim)
-        v = v.view(seq_len, self.num_heads, self.head_dim)
+            seq_len, self.num_attention_heads, self.head_dim
+        )  # shape = (B, seq_len, num_attention_heads, head_dim)
+        q = q.view(seq_len, self.num_attention_heads, self.head_dim)
+        v = v.view(seq_len, self.num_attention_heads, self.head_dim)
 
         k = k.transpose(0, 1)  # shape = (B, num_heads, seq_len, head_dim)
         q = q.transpose(0, 1)
@@ -76,7 +76,7 @@ class Attention(nn.Module):
             output = torch.matmul(attn_mtx, v)  # (batch, n_head, seq_len, head_dim)
 
         # restore time as batch dimension and concat heads
-        output = output.transpose(1, 2).contiguous().view(batch, seq_len, d_model)
+        output = output.transpose(1, 2).contiguous().view(batch, seq_len, hidden_size)
 
         # final projection into the residual stream
         output = self.proj(output)
@@ -90,13 +90,13 @@ class Block(nn.Module):
 
         self.attn = Attention(model_args)
         self.ff = MLP(
-            dim=model_args.d_model,
+            dim=model_args.hidden_size,
             multiple_of=model_args.multiple_of,
             dropout=model_args.dropout,
         )
 
-        self.norm1 = nn.LayerNorm(model_args.d_model)
-        self.norm2 = nn.LayerNorm(model_args.d_model)
+        self.norm1 = nn.LayerNorm(model_args.hidden_size)
+        self.norm2 = nn.LayerNorm(model_args.hidden_size)
 
     def forward(self, x, mask):
         x = x + self.attn(self.norm1(x), mask)
@@ -108,17 +108,22 @@ class GPT(nn.Module):
     def __init__(self, model_args: Config, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        self.word_emb = nn.Embedding(model_args.vocab_size, model_args.d_model)
-        self.pos_emb = nn.Embedding(model_args.seq_len, model_args.d_model)
+        self.word_emb = nn.Embedding(model_args.vocab_size, model_args.hidden_size)
+        self.pos_emb = nn.Embedding(model_args.max_sequence_length, model_args.hidden_size)
 
-        self.layers = nn.ModuleList([Block(model_args) for _ in range(model_args.num_layers)])
+        self.layers = nn.ModuleList(
+            [Block(model_args) for _ in range(model_args.num_hidden_layers)]
+        )
 
-        self.norm = nn.LayerNorm(model_args.d_model)
-        self.vocab_proj = nn.Linear(model_args.d_model, model_args.vocab_size, bias=False)
+        self.norm = nn.LayerNorm(model_args.hidden_size)
+        self.vocab_proj = nn.Linear(model_args.hidden_size, model_args.vocab_size, bias=False)
 
         if not hasattr(torch.nn.functional, "scaled_dot_product_attention"):
             print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
-            mask = torch.full((1, 1, model_args.seq_len, model_args.seq_len), float("-inf"))
+            mask = torch.full(
+                (1, 1, model_args.max_sequence_length, model_args.max_sequence_length),
+                float("-inf"),
+            )
             mask = torch.triu(mask, diagonal=1)
             self.register_buffer("mask", mask)
         else:

@@ -8,7 +8,7 @@ from torch import Tensor
 
 import math
 
-from ohara.embedings_pos.rotatry import apply_rope
+from ohara.embeddings_pos.rotary import apply_rope
 
 TensorTuple = tuple[Tensor, ...]
 

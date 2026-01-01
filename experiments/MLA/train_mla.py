@@ -93,8 +93,8 @@ model_name = f"joey00072/experiment_{attn_type}"
 
 if attn_type!="mla": assert d_model % num_heads == 0
 
-compile_model = True# not bool(sys.platform == "darwin")
-compile_mode:str = "reduce-overhead"
+compile_model = False# not bool(sys.platform == "darwin")
+compile_mode:str = None
 
 ### Dataset and Tokenizer
 dataset_name = "joey00072/pretokenized__JeanKaddour_minipile__EleutherAI__gpt-neo-125m"  # run pretokeinze first

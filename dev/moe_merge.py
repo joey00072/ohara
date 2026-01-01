@@ -13,12 +13,12 @@ def svd_approx(
 
     Parameters:
     W (torch.Tensor): The input matrix to be approximated.
-    r (int, optional): The rank for the approximation. If None, the full rank is used.
+    r (int, optional): The rank for approximation. If None, full rank is used.
 
     Returns:
     Tuple[torch.Tensor, torch.Tensor, int, torch.Tensor]:
-        A tuple containing the matrices A and B (where A @ B is the approximation of W),
-        the rank used for the approximation, and the Frobenius norm of the difference between W and its approximation.
+        A tuple containing: matrices A and B (where A @ B is the approximation of W),
+        rank used for approximation, and Frobenius norm of the difference between W and its approximation.
     """
     U, S, V = torch.linalg.svd(W, full_matrices=False)
     if r is None:
@@ -57,23 +57,23 @@ r = dim // experts
 
 print(f"experts: {experts}, dim: {dim}, r: {r}")
 
-As = []
-Bs = []
+as_matrices = []
+bs_matrices = []
 for w in ws:
     _, dim = w.shape
     w = w.float().to(device)
     A, B, r, _ = svd_approx(w, r)
-    As.append(A)
-    Bs.append(B)
+    as_matrices.append(A)
+    bs_matrices.append(B)
 
 
-Wp = torch.zeros_like(ws[0])
+w_p = torch.zeros_like(ws[0])
 
 for i in range(experts):
-    Wd = As[i] @ Bs[i]
-    Wp += ws[i] - Wd
-Wp = Wp / experts
+    Wd = as_matrices[i] @ bs_matrices[i]
+    w_p += ws[i] - Wd
+w_p = w_p / experts
 
-for idx, W, A, B in enumerate(zip(ws, As, Bs)):
-    Wapx = Wp + A @ B
+for idx, W, A, B in enumerate(zip(ws, as_matrices, bs_matrices)):
+    Wapx = w_p + A @ B
     print(idx, torch.linalg.norm(W - Wapx))

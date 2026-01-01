@@ -9,7 +9,7 @@ import ohara.models.llama as llama
 from ohara.modules.mlp import SwiGLU, MLP
 from ohara.modules.moe import MoE
 from ohara.modules.norm import RMSNorm
-from ohara.embedings_pos.rotatry import precompute_freqs_cis
+from ohara.embeddings_pos.rotary import precompute_freqs_cis
 
 
 from huggingface_hub import PyTorchModelHubMixin

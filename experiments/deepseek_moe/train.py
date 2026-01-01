@@ -51,18 +51,18 @@ learning_rate: float = 5e-4
 min_learning_rate: float = 0.0
 
 max_iters: int = 10_000
-warmup_iters: int = max_iters//10 
+warmup_iters: int = max_iters // 10
 
-total_batch_size:int = 2**13 
+total_batch_size: int = 2**13
 seq_len: int = 256
 batch_size: int = 4
-micro_batch: int = int(total_batch_size/(seq_len*batch_size))
+micro_batch: int = int(total_batch_size / (seq_len * batch_size))
 eval_iters: int = 100
 save_ckpt_iters: int = 2000
 
 
-d_model: int = 1024 
-num_heads: int = 16
+hidden_size: int = 1024
+num_attention_heads: int = 16
 head_dim: int = 64
 
 
@@ -70,12 +70,12 @@ weight_tying: bool = True
 
 
 ##### < MOE >
-mlp: str = "mlp" # i want to use swiglu but it make params count 1.5x
+mlp: str = "mlp"  # i want to use swiglu but it make params count 1.5x
 activation_fn: str = "silu"
 multiple_of: int = 0.2
-hidden_dim = int(d_model * multiple_of)
-num_layers: int = 4 #// 3  # 44
-dense_layers: int = 1 # num_layers
+intermediate_size = int(hidden_size * multiple_of)
+num_hidden_layers: int = 4  # // 3  # 44
+dense_layers: int = 1  # num_layers
 ffn_type: str = FFNType.DSMoE
 aux_free_loadbalancing: bool = True
 use_aux_loss: bool = not aux_free_loadbalancing
@@ -83,13 +83,13 @@ num_experts: int = 128
 num_experts_per_tok: int = 8
 num_shared_experts: int = 1
 expert_update_rate: float = 0.0001
-train_experts_biases: bool = True   
+train_experts_biases: bool = True
 
 if len(sys.argv) > 1:
     if sys.argv[1] == "baseline":
         ffn_type = FFNType.Dense
-        hidden_dim = int(d_model*8)
-        dense_layers = num_layers
+        intermediate_size = int(hidden_size * 8)
+        dense_layers = num_hidden_layers
     elif sys.argv[1] == "use_aux_loss":
         aux_free_loadbalancing = False
         use_aux_loss = True
@@ -105,8 +105,8 @@ model_name = f"joey00072/model_name{'Baseline' if MONKEY_PATCH is None else str(
 
 assert d_model % num_heads == 0
 
-compile_model = False# not bool(sys.platform == "darwin")
-compile_mode:str = None # "reduce-overhead"
+compile_model = False  # not bool(sys.platform == "darwin")
+compile_mode: str = None  # "reduce-overhead"
 
 ### Dataset and Tokenizer
 dataset_name = "joey00072/pretokenized__JeanKaddour_minipile__EleutherAI__gpt-neo-125m"  # run pretokeinze first
@@ -178,12 +178,16 @@ class Trainer:
             losses[idx] = loss.item()
         return losses.mean()
 
-    def log_function(self, idx: int, lr: float, elapsed_time: float, aux_loss: float, max_violation: float) -> None:
+    def log_function(
+        self, idx: int, lr: float, elapsed_time: float, aux_loss: float, max_violation: float
+    ) -> None:
         train_loss = self.calculate_loss(self.train_dataloader, 100)
         val_loss = self.calculate_loss(self.val_dataloader, 100)
-        
-        print(f"iter: {idx} | train_loss: {train_loss:.4f} | val_loss: {val_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s")
-        
+
+        print(
+            f"iter: {idx} | train_loss: {train_loss:.4f} | val_loss: {val_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s"
+        )
+
         try:
             self.fabric.log_dict(
                 {
@@ -227,15 +231,22 @@ class Trainer:
                 with self.fabric.no_backward_sync(self.model, enabled=_ < self.micro_batch - 1):
                     logits: torch.Tensor
                     logits, aux_loss, max_violation = self.model(data)
-                    loss = F.cross_entropy(
-                        logits.view(-1, logits.size(-1)),
-                        target.view(-1),
-                        ignore_index=self.ignore_index,
-                    )+ self.gamma * aux_loss
+                    loss = (
+                        F.cross_entropy(
+                            logits.view(-1, logits.size(-1)),
+                            target.view(-1),
+                            ignore_index=self.ignore_index,
+                        )
+                        + self.gamma * aux_loss
+                    )
                     loss = loss / self.micro_batch
                     micro_batch_loss += loss.item()
-                    micro_batch_aux_loss += aux_loss if isinstance(aux_loss, float) else aux_loss.item()
-                    micro_batch_max_violation += max_violation if isinstance(max_violation, float) else max_violation.item()
+                    micro_batch_aux_loss += (
+                        aux_loss if isinstance(aux_loss, float) else aux_loss.item()
+                    )
+                    micro_batch_max_violation += (
+                        max_violation if isinstance(max_violation, float) else max_violation.item()
+                    )
                     self.fabric.backward(loss)
 
             self.optimizer.step()
@@ -246,37 +257,49 @@ class Trainer:
             print(
                 f"iter: {idx} | loss: {micro_batch_loss:.4f} | aux_loss: {micro_batch_aux_loss:.4f} | max_violation: {micro_batch_max_violation:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s"
             )
-        
+
             try:
                 self.fabric.log_dict(
                     {
                         "iter_idx": idx,
-                        "loss": micro_batch_loss/self.micro_batch,
-                        "aux_loss": micro_batch_aux_loss/self.micro_batch,
-                        "max_violation": micro_batch_max_violation/self.micro_batch,
+                        "loss": micro_batch_loss / self.micro_batch,
+                        "aux_loss": micro_batch_aux_loss / self.micro_batch,
+                        "max_violation": micro_batch_max_violation / self.micro_batch,
                     },
                     step=idx,
                 )
             except Exception as e:
                 print(f"Error logging: {e}")
-                
+
             if idx % self.eval_iters == 0:
                 self.model.eval()
-                self.log_function(idx, lr, elapsed_time, micro_batch_aux_loss/self.micro_batch, micro_batch_max_violation/self.micro_batch)
+                self.log_function(
+                    idx,
+                    lr,
+                    elapsed_time,
+                    micro_batch_aux_loss / self.micro_batch,
+                    micro_batch_max_violation / self.micro_batch,
+                )
                 self.model.train()
 
             if idx % self.save_ckpt_iters == 0:
-                state = {"model": self.model.state_dict(), "optimizer": self.optimizer.state_dict(), "idx": idx, "lr": lr}
+                state = {
+                    "model": self.model.state_dict(),
+                    "optimizer": self.optimizer.state_dict(),
+                    "idx": idx,
+                    "lr": lr,
+                }
                 self.fabric.save("./ckpt/model.pt", state)
                 self.model.config.ckpt_iter = idx
                 if self.push_to_hub:
-                    self.model.push_to_hub(self.model_name, commit_message=f"checkpoint iter: {idx}")
-
+                    self.model.push_to_hub(
+                        self.model_name, commit_message=f"checkpoint iter: {idx}"
+                    )
 
 
 def main():
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-    
+
     hyper_params = {
         "vocab_size": tokenizer.vocab_size,
         "learning_rate": learning_rate,
@@ -286,12 +309,12 @@ def main():
         "eval_iters": eval_iters,
         "batch_size": batch_size,
         "micro_batch": micro_batch,
-        "d_model": d_model,
-        "seq_len": seq_len,
-        "num_layers": num_layers,
-        "num_heads": num_heads,
+        "hidden_size": hidden_size,
+        "max_sequence_length": seq_len,
+        "num_hidden_layers": num_hidden_layers,
+        "num_attention_heads": num_attention_heads,
         "head_dim": head_dim,
-        "hidden_dim": hidden_dim,
+        "intermediate_size": intermediate_size,
         "multiple_of": multiple_of,
         "compile_model": compile_model,
         "tokenizer_name": tokenizer_name,
@@ -311,12 +334,11 @@ def main():
         "activation_fn": activation_fn,
         "dense_layers": dense_layers,
     }
-    
-    print("="*100)  
+
+    print("=" * 100)
     print(hyper_params)
-    print("="*100)
-    
-    
+    print("=" * 100)
+
     loggers = []
 
     if wandb_logger:
@@ -331,10 +353,8 @@ def main():
     fabric = L.Fabric(loggers=loggers, precision="bf16-mixed")
     fabric.logger.log_hyperparams(hyper_params)
 
-    
-
     config = Config(**hyper_params)
-    
+
     print(config)
 
     train_ds = PreTokenizedDataset(
@@ -365,7 +385,7 @@ def main():
     # model.gradient_checkpointing_enable()
     print(model)
     print(model_summary(model))
-    
+
     # exit()
     import time
 
@@ -400,9 +420,9 @@ def main():
     if resume_training and os.path.exists(checkpoint_path):
         print(f"Resuming from checkpoint: {checkpoint_path}")
         checkpoint = fabric.load(checkpoint_path)
-        model.load_state_dict(checkpoint['model'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        start_iter = checkpoint['idx']
+        model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        start_iter = checkpoint["idx"]
         print(f"Resuming from iteration: {start_iter}")
 
     # Let's GO!!
@@ -423,7 +443,7 @@ def main():
 
     end: float = time.time()
 
-    print(f"Time: {end-start}")
+    print(f"Time: {end - start}")
 
 
 if __name__ == "__main__":

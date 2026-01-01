@@ -11,7 +11,7 @@ import torch.optim as optim
 from torch import Tensor
 from typing import Any, Callable
 
-from ohara.models.llama import LLAMA, Config
+from ohara.models.llama import Llama, Config
 from ohara.lr_scheduler import CosineScheduler
 from ohara.dataset import PreTokenizedDataset
 from ohara.utils import auto_accelerator, model_summary, BetterCycle
@@ -27,7 +27,6 @@ import wandb
 from rich import print, traceback
 
 traceback.install()
-
 
 
 class Trainer:
@@ -83,9 +82,11 @@ class Trainer:
     def log_function(self, idx: int, lr: float, elapsed_time: float) -> None:
         train_loss = self.calculate_loss(self.train_dataloader, 100)
         val_loss = self.calculate_loss(self.val_dataloader, 100)
-        
-        print(f"iter: {idx} | train_loss: {train_loss:.4f} | val_loss: {val_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s")
-        
+
+        print(
+            f"iter: {idx} | train_loss: {train_loss:.4f} | val_loss: {val_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s"
+        )
+
         try:
             self.fabric.log_dict(
                 {
@@ -146,11 +147,18 @@ class Trainer:
                 self.model.train()
 
             if idx % self.save_ckpt_iters == 0:
-                state = {"model": self.model.state_dict(), "optimizer": self.optimizer.state_dict(), "idx": idx, "lr": lr}
+                state = {
+                    "model": self.model.state_dict(),
+                    "optimizer": self.optimizer.state_dict(),
+                    "idx": idx,
+                    "lr": lr,
+                }
                 self.fabric.save("./ckpt/model.pt", state)
                 self.model.config.ckpt_iter = idx
                 if self.push_to_hub:
-                    self.model.push_to_hub(self.model_name, commit_message=f"checkpoint iter: {idx}")
+                    self.model.push_to_hub(
+                        self.model_name, commit_message=f"checkpoint iter: {idx}"
+                    )
 
 
 def main():
@@ -174,10 +182,10 @@ def main():
     micro_batch: int = 4
 
     # Model Args
-    d_model: int = 128
-    seq_len: int = 256
-    num_layers: int = 4
-    num_heads: int = 4
+    hidden_size: int = 128
+    max_sequence_length: int = 256
+    num_hidden_layers: int = 4
+    num_attention_heads: int = 4
     multiple_of: int = 4
     max_length: int = 256
 
@@ -192,14 +200,14 @@ def main():
 
     config: Config = Config(
         vocab_size=tokenizer.vocab_size,
-        d_model=d_model,
-        seq_len=seq_len,
-        num_layers=num_layers,
-        num_heads=num_heads,
+        hidden_size=hidden_size,
+        max_sequence_length=max_sequence_length,
+        num_hidden_layers=num_hidden_layers,
+        num_attention_heads=num_attention_heads,
         multiple_of=multiple_of,
     )
 
-    model: nn.Module = LLAMA(config).to(device)
+    model: nn.Module = Llama(config).to(device)
     if compile_model:
         model = torch.compile(model)
 

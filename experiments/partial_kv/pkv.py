@@ -7,8 +7,8 @@ from collections import OrderedDict
 
 from ohara.modules.norm import RMSNorm
 
-from ohara.embedings_pos.rotatry import precompute_freqs_cis
-from ohara.embedings_pos.rotatry import apply_rope
+from ohara.embeddings_pos.rotary import precompute_freqs_cis
+from ohara.embeddings_pos.rotary import apply_rope
 
 from torch import Tensor
 
