@@ -61,10 +61,12 @@ eval_iters: int = 100
 save_ckpt_iters: int = 2000
 
 multiple_of: int = 4
-hidden_size: int = 1024
+hidden_size: int = 512
 intermediate_size = int(hidden_size * multiple_of)
 num_hidden_layers: int = 16  # // 3  # 44
 num_attention_heads: int = 16
+num_key_value_heads: int = num_attention_heads
+head_dim: int = hidden_size // num_attention_heads
 
 mlp: str = "GLU"
 activation_fn: str = "silu"
@@ -74,9 +76,9 @@ weight_tying: bool = False
 MONKEY_PATCH = False
 model_name = f"joey00072/model_name{'Baseline' if MONKEY_PATCH is None else str(MONKEY_PATCH)}"
 
-assert d_model % num_heads == 0
+assert hidden_size % num_attention_heads == 0
 
-compile_model = True  # not bool(sys.platform == "darwin")
+compile_model = False  # default off to avoid cudagraph overwrite errors
 compile_mode: str = "reduce-overhead"
 
 ### Dataset and Tokenizer
@@ -144,8 +146,9 @@ def main():
         max_sequence_length=seq_len,
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
+        head_dim=head_dim,
         num_attention_heads=num_attention_heads,
-        num_key_value_heads=0,
+        num_key_value_heads=num_key_value_heads,
         num_hidden_layers=num_hidden_layers,
         dropout=0.2,
         bias=False,

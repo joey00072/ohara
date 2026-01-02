@@ -2,6 +2,7 @@ import sys
 import time
 import math
 from datetime import datetime
+from collections import deque
 
 import torch
 import torch.nn as nn
@@ -45,6 +46,9 @@ class Trainer:
         ignore_index: int = -1,
         push_to_hub: bool = False,
         model_name: str = "",
+        log_iter_loss: bool = False,
+        iter_loss_window: int = 100,
+        cudagraph_mark_step_begin: bool = False,
     ):
         self.fabric = fabric
         self.model = model
@@ -59,9 +63,19 @@ class Trainer:
         self.ignore_index = ignore_index
         self.push_to_hub = push_to_hub
         self.model_name = model_name
+        self.log_iter_loss = log_iter_loss
+        self.iter_loss_window = iter_loss_window
+        self.cudagraph_mark_step_begin = cudagraph_mark_step_begin
+        self.iter_loss_history: deque[float] = deque(maxlen=iter_loss_window)
 
         (data, target) = next(self.val_dataloader)
         self.tokens_per_iter = int(math.prod(data.shape) * micro_batch)
+
+    def _maybe_cudagraph_step_begin(self) -> None:
+        if not self.cudagraph_mark_step_begin:
+            return
+        if hasattr(torch, "compiler") and hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+            torch.compiler.cudagraph_mark_step_begin()
 
     @torch.no_grad()
     def calculate_loss(self, dataloader: DataLoader, num_batches: int) -> torch.Tensor:
@@ -70,6 +84,7 @@ class Trainer:
         for idx, (data, target) in enumerate(dataloader):
             if idx >= num_batches:
                 break
+            self._maybe_cudagraph_step_begin()
             logits: torch.Tensor = self.model(data)
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
@@ -122,6 +137,7 @@ class Trainer:
             for _ in range(self.micro_batch):
                 (data, target) = next(self.train_dataloader)
                 with self.fabric.no_backward_sync(self.model, enabled=_ < self.micro_batch - 1):
+                    self._maybe_cudagraph_step_begin()
                     logits: torch.Tensor = self.model(data)
                     loss = F.cross_entropy(
                         logits.view(-1, logits.size(-1)),
@@ -137,9 +153,29 @@ class Trainer:
 
             curr_time: float = time.perf_counter()
             elapsed_time: float = curr_time - start_time
+            tokens_per_sec = self.tokens_per_iter / max(elapsed_time, 1e-9)
             print(
-                f"iter: {idx} | loss: {micro_batch_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s"
+                f"iter: {idx} | loss: {micro_batch_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s | tok/s: {tokens_per_sec:.2f}"
             )
+
+            if self.log_iter_loss:
+                self.iter_loss_history.append(micro_batch_loss)
+                iter_loss_avg = sum(self.iter_loss_history) / len(self.iter_loss_history)
+                try:
+                    self.fabric.log_dict(
+                        {
+                            "train_iter_loss": micro_batch_loss,
+                            "train_iter_loss_100": iter_loss_avg,
+                            "iter": idx,
+                            "tokens": idx * self.tokens_per_iter,
+                            "lr": lr,
+                            "time": elapsed_time,
+                            "tokens_per_sec": tokens_per_sec,
+                        },
+                        step=idx,
+                    )
+                except Exception as e:
+                    print(f"Error logging iter loss: {e}")
 
             if idx % self.eval_iters == 0:
                 self.model.eval()

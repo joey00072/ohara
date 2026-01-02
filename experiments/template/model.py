@@ -48,6 +48,7 @@ class Attention(nn.Module):
         super().__init__()
 
         hidden_size = config.hidden_size
+        self.hidden_size = hidden_size
         self.num_attention_heads = config.num_attention_heads
         self.head_dim = config.head_dim
         self.num_key_value_heads = config.num_key_value_heads
@@ -134,7 +135,7 @@ class Attention(nn.Module):
             output = torch.matmul(attn_mtx, v)  # (batch, n_head, seq_len, head_dim)
 
         # restore time as batch dimension and concat heads
-        output = output.transpose(1, 2).contiguous().view(batch, seq_len, hidden_size)
+        output = output.transpose(1, 2).contiguous().view(batch, seq_len, self.hidden_size)
 
         # final projection into the residual stream
         output = self.proj(output)
@@ -239,21 +240,26 @@ class ModelingLM(nn.Module, PyTorchModelHubMixin):
         self.reset_parameters()
 
     def forward(self, x: torch.Tensor, return_outputs: bool = False):
-        logits, outputs = self.model(x)
-        return logits, outputs
+        logits = self.model(x)
+        if return_outputs:
+            return logits, None
+        return logits
 
     def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
         self.model.reset_parameters(init_std, factor)
 
 
 if __name__ == "__main__":
+    hidden_size = 128
+    num_attention_heads = 4
     config = Config(
         vocab_size=10,
         max_sequence_length=10,
-        hidden_size=128,
+        hidden_size=hidden_size,
         intermediate_size=128,
-        num_attention_heads=4,
-        num_key_value_heads=0,
+        head_dim=hidden_size // num_attention_heads,
+        num_attention_heads=num_attention_heads,
+        num_key_value_heads=num_attention_heads,
         num_hidden_layers=4,
         dropout=0.2,
         bias=False,
