@@ -57,6 +57,7 @@ If you look into [docs](./docs/) you can find some written things. this are most
 - [Alibi Embeddings](./ohara/embeddings_pos/alibi.py) | [md](./ohara/embeddings_pos/alibi/alibi.md)
 - [Rotary Embeddings](./ohara/embeddings_pos/rotatry.py) | [md](./docs/RoFormer.md) 
 - [LoRA ](./ohara/adaptor/lora.py)
+- [DoRA](./ohara/adaptor/dora.py) | [paper](https://arxiv.org/abs/2402.09353)
 - [LLAMA](./ohara/llama/llama.py) | [md](./docs/llama/llama.md)
 - [XPOS](./ohara/embeddings_pos/xpos.py)
 - [Mamba](./ohara/models/mamba.py)
@@ -84,4 +85,3 @@ If you look into [docs](./docs/) you can find some written things. this are most
 - be nice, 
 - code explaintions || docs are appricated
 - memes on pr recommend
-
