@@ -83,15 +83,15 @@ class HyperConnections(nn.Module):
 
     def width_connection(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         norm_h = self.norm(h)
+        b, l, n, d = h.shape
 
         if self.dynamic:
             dynamic_alpha = torch.matmul(norm_h, self.dynamic_alpha_fn) * self.dynamic_scale
             alpha = dynamic_alpha + self.static_alpha[None, None, :, :]
         else:
-            alpha = self.static_alpha[None, None, :, :]
+            alpha = self.static_alpha[None, None, :, :].expand(b, l, -1, -1)
 
         alpha_t = alpha.transpose(-1, -2)
-        b, l, n, d = h.shape
         k = alpha_t.size(-2)
         mix_h = torch.bmm(
             alpha_t.reshape(b * l, k, n),
@@ -102,7 +102,7 @@ class HyperConnections(nn.Module):
             dynamic_beta = (norm_h * self.dynamic_beta_fn).sum(dim=-1) * self.dynamic_scale
             beta = dynamic_beta + self.static_beta[None, None, :]
         else:
-            beta = self.static_beta[None, None, :]
+            beta = self.static_beta[None, None, :].expand(b, l, -1)
 
         return mix_h, beta
 
