@@ -89,8 +89,7 @@ class GemmaAttention(nn.Module):
         v: Tensor = v.view(batch_size, -1, self.num_key_value_heads, self.head_dim)
 
         # Positional embedding.
-        q = apply_rope(q, freqs_cis=freqs_cis)
-        k = apply_rope(k, freqs_cis=freqs_cis)
+        q, k = apply_rope(q, k, freqs_cis)
 
         # TODO: add code for kv chache
 
@@ -98,13 +97,17 @@ class GemmaAttention(nn.Module):
         if self.num_key_value_heads != self.num_attention_heads:
             key = torch.repeat_interleave(k, self.num_queries_per_kv, dim=2)
             value = torch.repeat_interleave(v, self.num_queries_per_kv, dim=2)
+        else:
+            key = k
+            value = v
 
         q = q.transpose(1, 2)
         k = key.transpose(1, 2)
         v = value.transpose(1, 2)
 
         attn_mtx = torch.matmul(q, k.transpose(2, 3)) * self.scaling
-        attn_mtx = attn_mtx + mask
+        if mask is not None:
+            attn_mtx = attn_mtx + mask
         attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(q)
 
         output = torch.matmul(attn_mtx, v)
@@ -166,16 +169,14 @@ class Gemma(nn.Module):
             model_args.max_sequence_length * 2,
         )
 
-        if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
+        if not hasattr(torch.nn.functional, "scaled_dot_product_attention"):
             print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
-            mask = torch.full(
-                (1, 1, model_args.max_sequence_length, model_args.max_sequence_length),
-                float("-inf"),
-            )
-            mask = torch.triu(mask, diagonal=1)
-            self.register_buffer("mask", mask)
-        else:
-            self.mask = None
+        mask = torch.full(
+            (1, 1, model_args.max_sequence_length, model_args.max_sequence_length),
+            float("-inf"),
+        )
+        mask = torch.triu(mask, diagonal=1)
+        self.register_buffer("mask", mask)
 
     def forward(self, x: torch.Tensor):
         batch, seqlen = x.shape
@@ -185,7 +186,7 @@ class Gemma(nn.Module):
         freqs_cis = self.cos[:seqlen].to(device), self.sin[:seqlen].to(device)
 
         for layer in self.layers:
-            x = layer(x, self.mask, freqs_cis)
+            x = layer(x, freqs_cis, self.mask)
 
         x = self.norm(x)
         x = self.vocab_proj(x)

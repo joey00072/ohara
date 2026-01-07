@@ -216,7 +216,7 @@ class PhiMHA(nn.Module):
         # ).type_as(x)
 
         output = output.transpose(1, 2).type_as(x)
-        output = output.reshape(batch_size, seq_length, self.dim)
+        output = output.reshape(batch_size, seq_length, self.hidden_size)
 
         return self.dense(output)
 

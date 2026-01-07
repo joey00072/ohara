@@ -20,21 +20,21 @@ class Inference:
         max_new_tokens: int = 500,
         use_kv_cache: bool = True,
     ):
-        self.model = model.to(device).eval()
-        self.tokenizer = tokenizer
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        elif not isinstance(device, torch.device):
+            device = torch.device(device)
         self.device = device
+        self.model = model.to(self.device).eval()
+        self.tokenizer = tokenizer
         self.default_temperature = temperature
         self.default_top_p = top_p
         self.max_new_tokens = max_new_tokens
         self.use_kv_cache = use_kv_cache
-        if use_kv_cache and hasattr(self.model, "build_kv_cache"):
+        if self.use_kv_cache and hasattr(self.model, "build_kv_cache"):
             self.kv_cache = self.model.build_kv_cache()
         else:
             self.kv_cache = None
-        if device is None:
-            self.device = torch.device("cpu")
-            if torch.cuda.is_available():
-                self.device = torch.device("cuda")
 
     @staticmethod
     @torch.inference_mode()
@@ -73,11 +73,13 @@ class Inference:
             temperature = self.default_temperature
         if top_p is None:
             top_p = self.default_top_p
-        if hasattr(self.model, "build_kv_cache"):
+        if max_new_tokens is None:
+            max_new_tokens = self.max_new_tokens
+        if self.use_kv_cache and hasattr(self.model, "build_kv_cache"):
             self.kv_cache = self.model.build_kv_cache()
         else:
             self.kv_cache = None
-        device = torch.device("cuda")
+        device = self.device
         inputs = self.tokenizer.encode(prompt)
         inputs = torch.tensor(inputs).reshape(1, -1).to(device)
         input_pos = 0

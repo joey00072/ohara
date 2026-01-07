@@ -13,7 +13,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 
-from ohara.models.llama import LLAMA, Config
+from ohara.models.llama import Llama, Config
 from ohara.lr_scheduler import CosineScheduler
 from ohara.dataset import PreTokenizedDataset
 from ohara.utils import BetterCycle
@@ -233,7 +233,7 @@ def main():
     test_dataloader = DataLoader(test_ds, batch_size=batch_size)
     train_dataloader, test_dataloader = fabric.setup_dataloaders(train_dataloader, test_dataloader)
 
-    model = LLAMA(config)
+    model = Llama(config)
     target_layers = ["key", "value", "query", "proj", "w1", "w2", "w3"]
 
     monkey_patch_model(model, target_layers)

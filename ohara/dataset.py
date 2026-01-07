@@ -70,6 +70,8 @@ class PreTokenizedDataset(IterableDataset):
         while True:
             x = next(self.toks_cycle)["input_ids"]
             x = torch.tensor(x, dtype=torch.long)
+            if x.shape[0] > self.max_length:
+                x = x[: self.max_length]
             x = F.pad(x, (0, self.max_length - x.shape[0]), "constant", value=self.PAD)
             yield x[:-1][: self.max_length], x[1:][: self.max_length]
 

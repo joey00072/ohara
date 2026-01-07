@@ -128,7 +128,9 @@ class Attention(nn.Module):
             output = torch.matmul(attn_mtx, v)
 
         output = (
-            output.transpose(1, 2).contiguous().view(batch, seq_len, self.head_dim * self.num_heads)
+            output.transpose(1, 2)
+            .contiguous()
+            .view(batch, seq_len, self.head_dim * self.num_attention_heads)
         )
         output = self.proj(output)
         output = self.res_dropout(output)
@@ -225,10 +227,15 @@ class Llama(nn.Module):
 
     def build_kv_cache(self) -> list[KVCache]:
         """Build an empty KV cache suitable for the model's configuration."""
+        kv_heads = (
+            self.config.num_attention_heads
+            if self.config.num_key_value_heads == 0
+            else self.config.num_key_value_heads
+        )
         shape = (
             1,
             self.config.max_sequence_length,
-            self.config.num_attention_heads,
+            kv_heads,
             self.config.hidden_size // self.config.num_attention_heads,
         )
         kv_cache = []

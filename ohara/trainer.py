@@ -79,6 +79,7 @@ class Trainer:
 
     @torch.no_grad()
     def calculate_loss(self, dataloader: DataLoader, num_batches: int) -> torch.Tensor:
+        was_training = self.model.training
         self.model.eval()
         losses = torch.zeros(num_batches, device=self.fabric.device)
         for idx, (data, target) in enumerate(dataloader):
@@ -92,6 +93,8 @@ class Trainer:
                 ignore_index=self.ignore_index,
             )
             losses[idx] = loss.item()
+        if was_training:
+            self.model.train()
         return losses.mean()
 
     def log_function(self, idx: int, lr: float, elapsed_time: float) -> None:
@@ -121,6 +124,7 @@ class Trainer:
         self.fabric.launch()
         # sanity test
         self.calculate_loss(self.val_dataloader, 5)
+        self.model.train()
 
         idx: int = start_iter
         while True:
