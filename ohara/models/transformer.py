@@ -53,8 +53,8 @@ class Attention(nn.Module):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        self.key = nn.Linear(d_model, self.head_dim * self.num_heads, config.bias)
-        self.query = nn.Linear(d_model, self.head_dim * self.num_kv_heads, config.bias)
+        self.key = nn.Linear(d_model, self.head_dim * self.num_kv_heads, config.bias)
+        self.query = nn.Linear(d_model, self.head_dim * self.num_heads, config.bias)
         self.value = nn.Linear(d_model, self.head_dim * self.num_kv_heads, config.bias)
         self.proj = nn.Linear(d_model, d_model, config.bias)
 
@@ -75,10 +75,10 @@ class Attention(nn.Module):
         v = self.value(x)
 
         k = k.view(
-            batch, seq_len, self.num_heads, self.head_dim
-        )  # shape = (B, seq_len, num_heads, head_dim)
+            batch, seq_len, self.num_kv_heads, self.head_dim
+        )  # shape = (B, seq_len, num_kv_heads, head_dim)
         q = q.view(batch, seq_len, self.num_heads, self.head_dim)
-        v = v.view(batch, seq_len, self.num_heads, self.head_dim)
+        v = v.view(batch, seq_len, self.num_kv_heads, self.head_dim)
 
         q, k = apply_rope(q, k, freqs_cis)
 
