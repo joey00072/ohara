@@ -68,7 +68,8 @@ class HyperConnections(nn.Module):
         self.dynamic = dynamic
         self.dynamic_scale = dynamic_scale
 
-        self.norm = nn.LayerNorm(dim)
+        # Paper uses RMSNorm on the last dimension for HC. (Eq. 5)
+        self.norm = RMSNorm(dim)
 
         self.dynamic_alpha_fn = nn.Parameter(torch.zeros(dim, rate + 1))
         self.dynamic_beta_fn = nn.Parameter(torch.zeros(dim))
@@ -151,7 +152,8 @@ class ManifoldHyperConnections(nn.Module):
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch, seq_len, rate, dim = x.shape
-        flat = x.reshape(batch, seq_len, rate * dim)
+        # Eq. 7: vec(x_l) in R^{1 x nC} then RMSNorm over the flattened nC dim.
+        flat = x.flatten(2)
         flat = self.norm(flat)
         phi = torch.cat((self.phi_pre, self.phi_post, self.phi_res), dim=1)
         proj = flat @ phi
