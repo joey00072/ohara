@@ -3,6 +3,7 @@ import time
 import math
 from datetime import datetime
 import os
+import random
 
 from typing import Any, Dict, Callable
 from dataclasses import dataclass, field
@@ -50,7 +51,7 @@ wandb_run_name = random_name()
 learning_rate: float = 5e-4
 min_learning_rate: float = 0.0
 
-max_iters: int = 10_000
+max_iters: int = 5_000
 warmup_iters: int = max_iters // 10
 
 total_batch_size: int = 2**11
@@ -74,20 +75,12 @@ activation_fn: str = "silu"
 weight_tying: bool = False
 
 MONKEY_PATCH = False
-connection_type: str = "mhc"  # "residual", "hc", "mhc"
+connection_type: str = "residual"  # "residual", "hc", "mhc"
 expansion_rate: int = 1
 hc_dynamic: bool = True
 hc_dynamic_scale: float = 0.01
 mhc_sinkhorn_iters: int = 20
 mhc_sinkhorn_eps: float = 1e-6
-
-if connection_type == "residual":
-    expansion_rate = 1
-
-model_name = (
-    f"joey00072/model_name_{connection_type}_n{expansion_rate}"
-    f"{'Baseline' if MONKEY_PATCH is None else str(MONKEY_PATCH)}"
-)
 
 assert hidden_size % num_attention_heads == 0
 
@@ -107,11 +100,42 @@ wandb_logger = True
 tensorboard_logger = True
 log_iter_loss: bool = True
 iter_loss_window: int = 100
+print_every: int = 100
+seed: int = 1337
+
+# Optional overrides via env for quick experiments.
+connection_type = os.getenv("CONNECTION_TYPE", connection_type)
+expansion_rate = int(os.getenv("EXPANSION_RATE", expansion_rate))
+max_iters = int(os.getenv("MAX_ITERS", max_iters))
+eval_iters = int(os.getenv("EVAL_ITERS", eval_iters))
+print_every = int(os.getenv("PRINT_EVERY", print_every))
+seed = int(os.getenv("SEED", seed))
+save_ckpt_iters = int(os.getenv("SAVE_CKPT_ITERS", save_ckpt_iters))
+
+if connection_type == "residual":
+    expansion_rate = 1
+
+warmup_iters = max_iters // 10
+
+model_name = (
+    f"joey00072/model_name_{connection_type}_n{expansion_rate}"
+    f"{'Baseline' if MONKEY_PATCH is None else str(MONKEY_PATCH)}"
+)
 
 # ================================================================================================
 
 
 def main():
+    random.seed(seed)
+    try:
+        import numpy as np
+        np.random.seed(seed)
+    except Exception:
+        pass
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
     hyper_params = {
         "learning_rate": learning_rate,
         "min_learning_rate": min_learning_rate,
@@ -138,6 +162,8 @@ def main():
         "mhc_sinkhorn_eps": mhc_sinkhorn_eps,
         "log_iter_loss": log_iter_loss,
         "iter_loss_window": iter_loss_window,
+        "print_every": print_every,
+        "seed": seed,
     }
 
     print("=" * 100)
@@ -242,6 +268,7 @@ def main():
         model_name=model_name,
         log_iter_loss=log_iter_loss,
         iter_loss_window=iter_loss_window,
+        print_every=print_every,
     )
 
     start_iter = 0

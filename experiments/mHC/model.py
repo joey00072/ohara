@@ -87,7 +87,8 @@ class HyperConnections(nn.Module):
         b, l, n, d = h.shape
 
         if self.dynamic:
-            dynamic_alpha = torch.matmul(norm_h, self.dynamic_alpha_fn) * self.dynamic_scale
+            # HC: use tanh on dynamic mappings before scaling (paper).
+            dynamic_alpha = torch.tanh(torch.matmul(norm_h, self.dynamic_alpha_fn)) * self.dynamic_scale
             alpha = dynamic_alpha + self.static_alpha[None, None, :, :]
         else:
             alpha = self.static_alpha[None, None, :, :].expand(b, l, -1, -1)
@@ -100,7 +101,7 @@ class HyperConnections(nn.Module):
         ).view(b, l, k, d)
 
         if self.dynamic:
-            dynamic_beta = (norm_h * self.dynamic_beta_fn).sum(dim=-1) * self.dynamic_scale
+            dynamic_beta = torch.tanh((norm_h * self.dynamic_beta_fn).sum(dim=-1)) * self.dynamic_scale
             beta = dynamic_beta + self.static_beta[None, None, :]
         else:
             beta = self.static_beta[None, None, :].expand(b, l, -1)
@@ -143,9 +144,10 @@ class ManifoldHyperConnections(nn.Module):
         self.b_post = nn.Parameter(torch.zeros(rate))
         self.b_res = nn.Parameter(torch.zeros(rate, rate))
 
-        self.alpha_pre = nn.Parameter(torch.ones(1))
-        self.alpha_post = nn.Parameter(torch.ones(1))
-        self.alpha_res = nn.Parameter(torch.ones(1))
+        # mHC: small gating init (paper uses 0.01).
+        self.alpha_pre = nn.Parameter(torch.full((1,), 0.01))
+        self.alpha_post = nn.Parameter(torch.full((1,), 0.01))
+        self.alpha_res = nn.Parameter(torch.full((1,), 0.01))
 
     def _sinkhorn(self, log_alpha: torch.Tensor) -> torch.Tensor:
         return sinkhorn_log(log_alpha, self.sinkhorn_iters, self.sinkhorn_eps)
@@ -164,7 +166,7 @@ class ManifoldHyperConnections(nn.Module):
         res = res.view(batch, seq_len, rate, rate)
 
         h_pre = torch.sigmoid(pre)
-        h_post = 2.0 * torch.sigmoid(post)
+        h_post = torch.sigmoid(post)
         h_res = self._sinkhorn(res)
         return h_pre, h_post, h_res
 
