@@ -48,6 +48,7 @@ class Trainer:
         model_name: str = "",
         log_iter_loss: bool = False,
         iter_loss_window: int = 100,
+        print_every: int = 1,
         cudagraph_mark_step_begin: bool = False,
     ):
         self.fabric = fabric
@@ -65,6 +66,7 @@ class Trainer:
         self.model_name = model_name
         self.log_iter_loss = log_iter_loss
         self.iter_loss_window = iter_loss_window
+        self.print_every = max(1, int(print_every))
         self.cudagraph_mark_step_begin = cudagraph_mark_step_begin
         self.iter_loss_history: deque[float] = deque(maxlen=iter_loss_window)
 
@@ -158,9 +160,10 @@ class Trainer:
             curr_time: float = time.perf_counter()
             elapsed_time: float = curr_time - start_time
             tokens_per_sec = self.tokens_per_iter / max(elapsed_time, 1e-9)
-            print(
-                f"iter: {idx} | loss: {micro_batch_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s | tok/s: {tokens_per_sec:.2f}"
-            )
+            if idx % self.print_every == 0:
+                print(
+                    f"iter: {idx} | loss: {micro_batch_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s | tok/s: {tokens_per_sec:.2f}"
+                )
 
             if self.log_iter_loss:
                 self.iter_loss_history.append(micro_batch_loss)
@@ -186,7 +189,7 @@ class Trainer:
                 self.log_function(idx, lr, elapsed_time)
                 self.model.train()
 
-            if idx % self.save_ckpt_iters == 0:
+            if self.save_ckpt_iters > 0 and idx % self.save_ckpt_iters == 0:
                 state = {
                     "model": self.model.state_dict(),
                     "optimizer": self.optimizer.state_dict(),
