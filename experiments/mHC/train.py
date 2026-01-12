@@ -34,7 +34,6 @@ from lightning.fabric.loggers import TensorBoardLogger
 
 from model import ModelingLM, Config
 from monkey_patcher import dm_linear_monkey_patch
-
 from ohara.trainer import Trainer
 
 
@@ -54,7 +53,7 @@ min_learning_rate: float = 0.0
 max_iters: int = 5_000
 warmup_iters: int = max_iters // 10
 
-total_batch_size: int = 2**11
+total_batch_size: int = 2**14
 seq_len: int = 256
 batch_size: int = 1
 micro_batch: int = int(total_batch_size / (seq_len * batch_size))
@@ -111,9 +110,12 @@ eval_iters = int(os.getenv("EVAL_ITERS", eval_iters))
 print_every = int(os.getenv("PRINT_EVERY", print_every))
 seed = int(os.getenv("SEED", seed))
 save_ckpt_iters = int(os.getenv("SAVE_CKPT_ITERS", save_ckpt_iters))
+multiple_of = float(os.getenv("MULTIPLE_OF", multiple_of))
 
 if connection_type == "residual":
     expansion_rate = 1
+
+intermediate_size = int(hidden_size * multiple_of)
 
 warmup_iters = max_iters // 10
 

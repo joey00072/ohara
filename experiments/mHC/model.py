@@ -53,72 +53,6 @@ class Config(OrderedDict):
 
 MLP_BLOCK = {"MLP": MLP, "GLU": GLU}
 
-class HyperConnections(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        rate: int,
-        layer_id: int,
-        dynamic: bool = True,
-        dynamic_scale: float = 0.01,
-    ) -> None:
-        super().__init__()
-        self.dim = dim
-        self.rate = rate
-        self.dynamic = dynamic
-        self.dynamic_scale = dynamic_scale
-
-        # Paper uses RMSNorm on the last dimension for HC. (Eq. 5)
-        self.norm = RMSNorm(dim)
-
-        self.dynamic_alpha_fn = nn.Parameter(torch.zeros(dim, rate + 1))
-        self.dynamic_beta_fn = nn.Parameter(torch.zeros(dim))
-
-        init_alpha0 = torch.zeros(rate, 1)
-        init_alpha0[layer_id % rate, 0] = 1.0
-        init_alphan = torch.eye(rate)
-        static_alpha = torch.cat((init_alpha0, init_alphan), dim=1)
-
-        self.static_alpha = nn.Parameter(static_alpha)
-        self.static_beta = nn.Parameter(torch.ones(rate))
-
-    def width_connection(self, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        norm_h = self.norm(h)
-        b, l, n, d = h.shape
-
-        if self.dynamic:
-            # HC: use tanh on dynamic mappings before scaling (paper).
-            dynamic_alpha = torch.tanh(torch.matmul(norm_h, self.dynamic_alpha_fn)) * self.dynamic_scale
-            alpha = dynamic_alpha + self.static_alpha[None, None, :, :]
-        else:
-            alpha = self.static_alpha[None, None, :, :].expand(b, l, -1, -1)
-
-        alpha_t = alpha.transpose(-1, -2)
-        k = alpha_t.size(-2)
-        mix_h = torch.bmm(
-            alpha_t.reshape(b * l, k, n),
-            h.reshape(b * l, n, d),
-        ).view(b, l, k, d)
-
-        if self.dynamic:
-            dynamic_beta = torch.tanh((norm_h * self.dynamic_beta_fn).sum(dim=-1)) * self.dynamic_scale
-            beta = dynamic_beta + self.static_beta[None, None, :]
-        else:
-            beta = self.static_beta[None, None, :].expand(b, l, -1)
-
-        return mix_h, beta
-
-    def depth_connection(
-        self,
-        mix_h: torch.Tensor,
-        h_o: torch.Tensor,
-        beta: torch.Tensor,
-    ) -> torch.Tensor:
-        h = h_o.unsqueeze(2) * beta.unsqueeze(-1)
-        h = h + mix_h[..., 1:, :]
-        return h
-
-
 class ManifoldHyperConnections(nn.Module):
     def __init__(
         self,
@@ -166,7 +100,7 @@ class ManifoldHyperConnections(nn.Module):
         res = res.view(batch, seq_len, rate, rate)
 
         h_pre = torch.sigmoid(pre)
-        h_post = torch.sigmoid(post)
+        h_post = 2.0 * torch.sigmoid(post)
         h_res = self._sinkhorn(res)
         return h_pre, h_post, h_res
 
@@ -315,51 +249,21 @@ class HyperBlock(nn.Module):
         self.attn_norm = RMSNorm(config.hidden_size)
         self.ffn_norm = RMSNorm(config.hidden_size)
 
-        if self.connection_type == "hc":
-            self.attn_conn = HyperConnections(
-                dim=config.hidden_size,
-                rate=self.rate,
-                layer_id=layer_id,
-                dynamic=config.hc_dynamic,
-                dynamic_scale=config.hc_dynamic_scale,
-            )
-            self.ffn_conn = HyperConnections(
-                dim=config.hidden_size,
-                rate=self.rate,
-                layer_id=layer_id,
-                dynamic=config.hc_dynamic,
-                dynamic_scale=config.hc_dynamic_scale,
-            )
-        elif self.connection_type == "mhc":
-            self.attn_conn = ManifoldHyperConnections(
-                dim=config.hidden_size,
-                rate=self.rate,
-                sinkhorn_iters=config.mhc_sinkhorn_iters,
-                sinkhorn_eps=config.mhc_sinkhorn_eps,
-            )
-            self.ffn_conn = ManifoldHyperConnections(
-                dim=config.hidden_size,
-                rate=self.rate,
-                sinkhorn_iters=config.mhc_sinkhorn_iters,
-                sinkhorn_eps=config.mhc_sinkhorn_eps,
-            )
-        else:
+        if self.connection_type != "mhc":
             raise ValueError(f"Unsupported connection_type: {self.connection_type}")
 
-    def _apply_hc(
-        self,
-        x: torch.Tensor,
-        conn: HyperConnections,
-        norm: RMSNorm,
-        fn,
-        mask: torch.Tensor,
-        freqs_cis,
-    ) -> torch.Tensor:
-        mix_h, beta = conn.width_connection(x)
-        h = norm(mix_h[..., 0, :])
-        h = fn(h, mask, freqs_cis) if fn is self.attn else fn(h)
-        x = conn.depth_connection(mix_h, h, beta)
-        return x
+        self.attn_conn = ManifoldHyperConnections(
+            dim=config.hidden_size,
+            rate=self.rate,
+            sinkhorn_iters=config.mhc_sinkhorn_iters,
+            sinkhorn_eps=config.mhc_sinkhorn_eps,
+        )
+        self.ffn_conn = ManifoldHyperConnections(
+            dim=config.hidden_size,
+            rate=self.rate,
+            sinkhorn_iters=config.mhc_sinkhorn_iters,
+            sinkhorn_eps=config.mhc_sinkhorn_eps,
+        )
 
     def _apply_mhc_attn(
         self,
@@ -399,26 +303,9 @@ class HyperBlock(nn.Module):
         ).view(b, l, n, x.size(-1))
         return res + out
 
-    def _apply_mhc(
-        self,
-        x: torch.Tensor,
-        conn: ManifoldHyperConnections,
-        norm: RMSNorm,
-        fn,
-        mask: torch.Tensor,
-        freqs_cis,
-    ) -> torch.Tensor:
-        if fn is self.attn:
-            return self._apply_mhc_attn(x, conn, norm, mask, freqs_cis)
-        return self._apply_mhc_ffn(x, conn, norm)
-
     def forward(self, x, mask, freqs_cis):
-        if self.connection_type == "hc":
-            x = self._apply_hc(x, self.attn_conn, self.attn_norm, self.attn, mask, freqs_cis)
-            x = self._apply_hc(x, self.ffn_conn, self.ffn_norm, self.ff, mask, freqs_cis)
-        else:
-            x = self._apply_mhc_attn(x, self.attn_conn, self.attn_norm, mask, freqs_cis)
-            x = self._apply_mhc_ffn(x, self.ffn_conn, self.ffn_norm)
+        x = self._apply_mhc_attn(x, self.attn_conn, self.attn_norm, mask, freqs_cis)
+        x = self._apply_mhc_ffn(x, self.ffn_conn, self.ffn_norm)
         return x
 
     def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
@@ -433,11 +320,11 @@ class Transformer(nn.Module):
         super().__init__(*args, **kwargs)
 
         self.config = config
-        if config.connection_type not in {"residual", "hc", "mhc"}:
+        if config.connection_type not in {"residual", "mhc"}:
             raise ValueError(f"Unknown connection_type: {config.connection_type}")
         self.connection_type = config.connection_type
         self.expansion_rate = config.expansion_rate
-        self.use_hyper = self.connection_type in {"hc", "mhc"}
+        self.use_hyper = self.connection_type == "mhc"
 
         self.token_emb = nn.Embedding(config.vocab_size, config.hidden_size)
 

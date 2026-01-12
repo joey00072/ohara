@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from model import Block, Config, HyperBlock, HyperConnections, ManifoldHyperConnections
+from model import Block, Config, HyperBlock, ManifoldHyperConnections
 from sinkhorn import sinkhorn_log
 from ohara.embeddings_pos.rotary import precompute_freqs_cis
 
@@ -21,8 +21,6 @@ class BenchConfig:
     head_dim: int
     mhc_sinkhorn_iters: int
     mhc_sinkhorn_eps: float
-    hc_dynamic: bool
-    hc_dynamic_scale: float
     dropout: float
     include_common: bool
     backward: bool
@@ -103,8 +101,6 @@ def _build_config(cfg: BenchConfig, connection_type: str) -> Config:
         mlp="GLU",
         connection_type=connection_type,
         expansion_rate=cfg.expansion_rate,
-        hc_dynamic=cfg.hc_dynamic,
-        hc_dynamic_scale=cfg.hc_dynamic_scale,
         mhc_sinkhorn_iters=cfg.mhc_sinkhorn_iters,
         mhc_sinkhorn_eps=cfg.mhc_sinkhorn_eps,
     )
@@ -177,81 +173,6 @@ def _bench_components(cfg: BenchConfig):
     res_fn = lambda: res_block(x, mask, freqs_cis)
     res_time = _timeit(res_fn, cfg.iters, cfg.warmup, device, cfg.backward, _zero_grads(res_block, x))
     results.append(("residual/block", res_time))
-
-    # HC parts
-    hc_cfg = _build_config(cfg, "hc")
-    hc_block = HyperBlock(hc_cfg, layer_id=0).to(device=device, dtype=dtype)
-    if not cfg.include_common:
-        _attach_identities(hc_block)
-
-    hc_conn_dyn = HyperConnections(
-        dim=cfg.hidden_size,
-        rate=cfg.expansion_rate,
-        layer_id=0,
-        dynamic=True,
-        dynamic_scale=cfg.hc_dynamic_scale,
-    ).to(device=device, dtype=dtype)
-    hc_conn_static = HyperConnections(
-        dim=cfg.hidden_size,
-        rate=cfg.expansion_rate,
-        layer_id=0,
-        dynamic=False,
-        dynamic_scale=cfg.hc_dynamic_scale,
-    ).to(device=device, dtype=dtype)
-
-    def _hc_width_dyn():
-        mix_h, beta = hc_conn_dyn.width_connection(x_h)
-        return mix_h.sum() + beta.sum()
-
-    def _hc_width_static():
-        mix_h, beta = hc_conn_static.width_connection(x_h)
-        return mix_h.sum() + beta.sum()
-
-    hc_width_dyn = _timeit(
-        _hc_width_dyn, cfg.iters, cfg.warmup, device, cfg.backward, _zero_grads(hc_conn_dyn, x_h)
-    )
-    hc_width_static = _timeit(
-        _hc_width_static, cfg.iters, cfg.warmup, device, cfg.backward, _zero_grads(hc_conn_static, x_h)
-    )
-    results.append(("hc/width_connection(dynamic)", hc_width_dyn))
-    results.append(("hc/width_connection(static)", hc_width_static))
-
-    h_o = torch.randn(
-        cfg.batch_size,
-        cfg.seq_len,
-        cfg.hidden_size,
-        device=device,
-        dtype=dtype,
-        requires_grad=cfg.backward,
-    )
-    if cfg.backward:
-        def depth_fn():
-            # Avoid retaining graph across iterations; isolate depth_connection cost.
-            with torch.no_grad():
-                mix_h, beta = hc_conn_dyn.width_connection(x_h.detach())
-            return hc_conn_dyn.depth_connection(mix_h, h_o, beta).sum()
-    else:
-        mix_h, beta = hc_conn_dyn.width_connection(x_h.detach())
-        depth_fn = lambda: hc_conn_dyn.depth_connection(mix_h, h_o, beta).sum()
-    hc_depth = _timeit(depth_fn, cfg.iters, cfg.warmup, device, cfg.backward, _zero_grads(hc_conn_dyn, h_o))
-    results.append(("hc/depth_connection", hc_depth))
-
-    hc_apply_attn = lambda: hc_block._apply_hc(x_h, hc_block.attn_conn, hc_block.attn_norm, hc_block.attn, mask, freqs_cis).sum()
-    hc_apply_ffn = lambda: hc_block._apply_hc(x_h, hc_block.ffn_conn, hc_block.ffn_norm, hc_block.ff, mask, freqs_cis).sum()
-    hc_apply_attn_time = _timeit(
-        hc_apply_attn, cfg.iters, cfg.warmup, device, cfg.backward, _zero_grads(hc_block, x_h)
-    )
-    hc_apply_ffn_time = _timeit(
-        hc_apply_ffn, cfg.iters, cfg.warmup, device, cfg.backward, _zero_grads(hc_block, x_h)
-    )
-    results.append(("hc/apply_attn_path", hc_apply_attn_time))
-    results.append(("hc/apply_ffn_path", hc_apply_ffn_time))
-
-    hc_block_fn = lambda: hc_block(x_h, mask, freqs_cis)
-    hc_block_time = _timeit(
-        hc_block_fn, cfg.iters, cfg.warmup, device, cfg.backward, _zero_grads(hc_block, x_h)
-    )
-    results.append(("hc/block", hc_block_time))
 
     # mHC parts
     mhc_cfg = _build_config(cfg, "mhc")
@@ -384,7 +305,7 @@ def _print_combined_table(fwd_results, bwd_results, baseline_name: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark mHC/HC components vs residual baseline.")
+    parser = argparse.ArgumentParser(description="Benchmark mHC components vs residual baseline.")
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--seq-len", type=int, default=256)
     parser.add_argument("--hidden-size", type=int, default=512)
@@ -393,9 +314,6 @@ def main():
     parser.add_argument("--num-kv-heads", type=int, default=None)
     parser.add_argument("--mhc-sinkhorn-iters", type=int, default=20)
     parser.add_argument("--mhc-sinkhorn-eps", type=float, default=1e-6)
-    parser.add_argument("--hc-dynamic", dest="hc_dynamic", action="store_true", default=True)
-    parser.add_argument("--no-hc-dynamic", dest="hc_dynamic", action="store_false")
-    parser.add_argument("--hc-dynamic-scale", type=float, default=0.01)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--iters", type=int, default=50)
     parser.add_argument("--warmup", type=int, default=10)
@@ -441,8 +359,6 @@ def main():
             head_dim=args.hidden_size // args.num_attn_heads,
             mhc_sinkhorn_iters=args.mhc_sinkhorn_iters,
             mhc_sinkhorn_eps=args.mhc_sinkhorn_eps,
-            hc_dynamic=args.hc_dynamic,
-            hc_dynamic_scale=args.hc_dynamic_scale,
             dropout=args.dropout,
             include_common=args.include_common,
             backward=backward,
