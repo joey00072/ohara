@@ -40,11 +40,16 @@ class Inference:
     @torch.inference_mode()
     def sampler(logits, temperature=1, top_p=0.0) -> torch.Tensor:
         logits = logits[:, -1]
-        if temperature == 1:
+        if temperature <= 0:
+            return torch.argmax(logits, dim=-1, keepdim=True)
+        if temperature == 1 and top_p <= 0:
+            # Keep existing default behavior deterministic.
             return torch.argmax(logits, dim=-1, keepdim=True)
         logits = logits / temperature
 
         probs = torch.softmax(logits, dim=-1)
+        if top_p <= 0 or top_p >= 1:
+            return torch.multinomial(probs, num_samples=1)
 
         probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)  # (B, vocab_size)
 
@@ -103,43 +108,11 @@ class Inference:
             end_time = time.time()
         if stream:
             print(f"\nTime: {end_time - start_time}s")
-        return self.tokenizer.decode(inputs.tolist()[0][-1])
+        return self.tokenizer.decode(inputs.squeeze(0).tolist())
 
 
 if __name__ == "__main__":
-    torch.manual_seed(0)
-
-    allow_cuda = False
-    device = "cuda" if torch.cuda.is_available() and allow_cuda else "cpu"
-
-    prompts = [
-        "Simply put, the theory of relativity states that ",
-        "If Google was an Italian company founded in Milan, it would",
-        # Few shot promt
-        """Translate English to French:
-
-        sea otter => loutre de mer
-        peppermint => menthe poivrée
-        plush girafe => girafe peluche
-        cheese =>""",
-        # Zero shot prompt
-        """Tell me if the following person is actually Doraemon disguised as human:
-        Name: Umar Jamil
-        Decision:
-        """,
-    ]
-
-    model = LLaMA.build(
-        checkpoints_dir="llama-2-7b/",
-        tokenizer_path="tokenizer.model",
-        load_model=True,
-        max_seq_len=1024,
-        max_batch_size=len(prompts),
-        device=device,
+    raise SystemExit(
+        "This module exposes the `Inference` class. "
+        "See the training/example scripts for end-to-end usage."
     )
-
-    out_tokens, out_texts = model.text_completion(prompts, max_gen_len=64)
-    assert len(out_texts) == len(prompts)
-    for i in range(len(out_texts)):
-        print(f"{out_texts[i]}")
-        print("-" * 50)

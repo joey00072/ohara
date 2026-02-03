@@ -13,11 +13,11 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 
-from ohara.models.llama import LLAMA, Config
+from ohara.models.llama import Llama, Config
 from ohara.lr_scheduler import CosineScheduler
 from ohara.dataset import PreTokenizedDataset
 
-from ohara.utils import auto_accelerator, random_name, model_summary
+from ohara.utils import auto_accelerator, random_name, model_summary, BetterCycle
 
 
 from torch.utils.data import DataLoader
@@ -111,7 +111,8 @@ def train(
     # sanity test
     validate(model, val_dataloader, 5, device=device)
 
-    (data, target) = next(iter(train_dataloader))
+    train_dataloader = BetterCycle(iter(train_dataloader))
+    (data, target) = next(train_dataloader)
     tokerns_per_iter = int(math.prod(data.shape) * micro_batch)
 
     micro_batch_loss = 0
@@ -127,7 +128,7 @@ def train(
             param_group["lr"] = lr
 
         for _ in range(micro_batch):
-            (data, target) = next(iter(train_dataloader))
+            (data, target) = next(train_dataloader)
             data, target = data.to(device), target.to(device)
 
             logits: torch.Tensor = model(data)
@@ -169,10 +170,10 @@ def main():
 
     config = Config(
         vocab_size=tokenizer.vocab_size,
-        d_model=d_model,
-        seq_len=seq_len,
-        num_layers=num_layers,
-        num_heads=num_layers,
+        max_sequence_length=seq_len,
+        hidden_size=d_model,
+        num_hidden_layers=num_layers,
+        num_attention_heads=num_heads,
         multiple_of=multiple_of,
     )
 
@@ -195,7 +196,7 @@ def main():
     train_dataloader = DataLoader(train_ds, batch_size=batch_size)
     test_dataloader = DataLoader(test_ds, batch_size=batch_size)
 
-    model = LLAMA(config).to(device)
+    model = Llama(config).to(device)
 
     if compile_model:
         model = torch.compile(model)

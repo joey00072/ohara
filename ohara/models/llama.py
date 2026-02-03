@@ -258,12 +258,11 @@ class Llama(nn.Module):
 
     @classmethod
     def from_pretrained(cls, hf_name: str):
-        from ohara.utils.load import download_hf_model
-        import json
+        raise NotImplementedError(
+            "Llama.from_pretrained is not implemented yet. "
+            "Use a model-specific loader or initialize `Llama(Config(...))` directly."
+        )
 
-        path_name = download_hf_model(hf_name)
-        with open(path_name + "/config.json", "r") as f:
-            config = json.load(f)
-        print(config)
 
-        config = Config()
+# Backward compatibility for older scripts in this repo.
+LLAMA = Llama

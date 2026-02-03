@@ -13,7 +13,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 
-from ohara.models.llama import LLAMA, Config
+from ohara.models.llama import Llama, Config
 from ohara.lr_scheduler import CosineScheduler
 from ohara.dataset import PreTokenizedDataset
 from ohara.utils import BetterCycle
@@ -150,7 +150,7 @@ def train(
         # ...
         for _ in range(micro_batch):
             (data, target) = next(train_dataloader)
-            with fabric.no_backward_sync(model, enabled=micro_batch == 1):
+            with fabric.no_backward_sync(model, enabled=_ < micro_batch - 1):
                 logits: torch.Tensor = model(data)
                 loss = F.cross_entropy(
                     logits.view(-1, logits.size(-1)),
@@ -204,7 +204,7 @@ def main():
         "d_model": d_model,
         "seq_len": seq_len,
         "num_layers": num_layers,
-        "num_heads": num_layers,
+        "num_heads": num_heads,
         "multiple_of": multiple_of,
         "compile_model": compile_model,
         "tokenizer_name": tokenizer_name,
@@ -224,10 +224,10 @@ def main():
 
     config = Config(
         vocab_size=tokenizer.vocab_size,
-        d_model=d_model,
-        seq_len=seq_len,
-        num_layers=num_layers,
-        num_heads=num_layers,
+        max_sequence_length=seq_len,
+        hidden_size=d_model,
+        num_hidden_layers=num_layers,
+        num_attention_heads=num_heads,
         multiple_of=multiple_of,
         weight_tying=weight_tying,
     )
@@ -249,7 +249,7 @@ def main():
     test_dataloader = DataLoader(test_ds, batch_size=batch_size)
     train_dataloader, test_dataloader = fabric.setup_dataloaders(train_dataloader, test_dataloader)
 
-    model = LLAMA(config)
+    model = Llama(config)
     model: L.LightningModule = fabric.setup(model)
 
     if compile_model:
