@@ -1,15 +1,15 @@
 import sys
 import time
 import math
-from datetime import datetime
 from collections import deque
+from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import torch.distributed as dist
 
-from torch import Tensor
 from typing import Any, Callable
 
 from ohara.models.llama import Llama, Config
@@ -21,8 +21,6 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
 import lightning as L
-from lightning.pytorch.loggers import WandbLogger
-from lightning.fabric.loggers import TensorBoardLogger
 
 import wandb
 from rich import print, traceback
@@ -49,6 +47,9 @@ class Trainer:
         log_iter_loss: bool = False,
         iter_loss_window: int = 100,
         print_every: int = 1,
+        eval_val_batches: int = 100,
+        eval_train_batches: int = 0,
+        grad_clip_norm: float | None = None,
         cudagraph_mark_step_begin: bool = False,
     ):
         self.fabric = fabric
@@ -67,6 +68,9 @@ class Trainer:
         self.log_iter_loss = log_iter_loss
         self.iter_loss_window = iter_loss_window
         self.print_every = max(1, int(print_every))
+        self.eval_val_batches = max(1, int(eval_val_batches))
+        self.eval_train_batches = max(0, int(eval_train_batches))
+        self.grad_clip_norm = grad_clip_norm
         self.cudagraph_mark_step_begin = cudagraph_mark_step_begin
         self.iter_loss_history: deque[float] = deque(maxlen=iter_loss_window)
 
@@ -79,54 +83,140 @@ class Trainer:
         if hasattr(torch, "compiler") and hasattr(torch.compiler, "cudagraph_mark_step_begin"):
             torch.compiler.cudagraph_mark_step_begin()
 
+    @staticmethod
+    def _is_distributed() -> bool:
+        return dist.is_available() and dist.is_initialized()
+
+    def _all_reduce_sum(self, tensor: torch.Tensor) -> torch.Tensor:
+        if self._is_distributed():
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        return tensor
+
     @torch.no_grad()
-    def calculate_loss(self, dataloader: DataLoader, num_batches: int) -> torch.Tensor:
+    def evaluate(self, dataloader: DataLoader, num_batches: int) -> dict[str, float]:
         was_training = self.model.training
         self.model.eval()
-        losses = torch.zeros(num_batches, device=self.fabric.device)
-        for idx, (data, target) in enumerate(dataloader):
-            if idx >= num_batches:
-                break
+
+        total_loss = torch.zeros((), device=self.fabric.device, dtype=torch.float64)
+        total_tokens = torch.zeros((), device=self.fabric.device, dtype=torch.float64)
+        total_correct = torch.zeros((), device=self.fabric.device, dtype=torch.float64)
+
+        for _ in range(max(1, int(num_batches))):
+            data, target = next(dataloader)
             self._maybe_cudagraph_step_begin()
             logits: torch.Tensor = self.model(data)
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                target.reshape(-1),
+
+            flat_logits = logits.view(-1, logits.size(-1))
+            flat_target = target.reshape(-1)
+            valid = flat_target != self.ignore_index
+            valid_count = valid.sum()
+            if valid_count.item() == 0:
+                continue
+
+            loss_sum = F.cross_entropy(
+                flat_logits,
+                flat_target,
                 ignore_index=self.ignore_index,
+                reduction="sum",
             )
-            losses[idx] = loss.item()
+            preds = flat_logits.argmax(dim=-1)
+            correct = (preds.eq(flat_target) & valid).sum()
+
+            total_loss += loss_sum
+            total_tokens += valid_count
+            total_correct += correct
+
+        self._all_reduce_sum(total_loss)
+        self._all_reduce_sum(total_tokens)
+        self._all_reduce_sum(total_correct)
+
+        tokens = max(float(total_tokens.item()), 1.0)
+        mean_loss = float((total_loss / tokens).item())
+        ppl = float(math.exp(min(mean_loss, 20.0)))
+        bpb = float(mean_loss / math.log(2))
+        accuracy = float((total_correct / tokens).item())
+
         if was_training:
             self.model.train()
-        return losses.mean()
 
-    def log_function(self, idx: int, lr: float, elapsed_time: float) -> None:
-        train_loss = self.calculate_loss(self.train_dataloader, 100)
-        val_loss = self.calculate_loss(self.val_dataloader, 100)
+        return {
+            "loss": mean_loss,
+            "ppl": ppl,
+            "bpb": bpb,
+            "accuracy": accuracy,
+            "tokens": float(total_tokens.item()),
+        }
 
-        print(
-            f"iter: {idx} | train_loss: {train_loss:.4f} | val_loss: {val_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s"
+    @torch.no_grad()
+    def calculate_loss(self, dataloader: DataLoader, num_batches: int) -> torch.Tensor:
+        metrics = self.evaluate(dataloader, num_batches)
+        return torch.tensor(metrics["loss"], device=self.fabric.device)
+
+    def log_function(
+        self,
+        idx: int,
+        lr: float,
+        elapsed_time: float,
+        train_step_loss: float | None = None,
+        tokens_per_sec: float | None = None,
+    ) -> None:
+        train_eval = (
+            self.evaluate(self.train_dataloader, self.eval_train_batches)
+            if self.eval_train_batches > 0
+            else None
         )
+        val_eval = self.evaluate(self.val_dataloader, self.eval_val_batches)
+
+        message_parts = [
+            f"iter: {idx}",
+            f"val_loss: {val_eval['loss']:.4f}",
+            f"val_ppl: {val_eval['ppl']:.2f}",
+            f"val_bpb: {val_eval['bpb']:.4f}",
+            f"val_acc: {val_eval['accuracy']:.4f}",
+        ]
+        if train_eval is not None:
+            message_parts.insert(1, f"train_loss: {train_eval['loss']:.4f}")
+            message_parts.insert(2, f"train_ppl: {train_eval['ppl']:.2f}")
+        message_parts.extend([f"lr: {lr:e}", f"time: {elapsed_time:.4f}s"])
+        print(" | ".join(message_parts))
+
+        logs: dict[str, float] = {
+            "validation_loss": val_eval["loss"],
+            "validation_ppl": val_eval["ppl"],
+            "validation_bpb": val_eval["bpb"],
+            "validation_accuracy": val_eval["accuracy"],
+            "iter": idx,
+            "tokens": idx * self.tokens_per_iter,
+            "lr": lr,
+            "time": elapsed_time,
+        }
+        if train_eval is not None:
+            logs.update(
+                {
+                    "training_eval_loss": train_eval["loss"],
+                    "training_eval_ppl": train_eval["ppl"],
+                    "training_eval_bpb": train_eval["bpb"],
+                    "training_eval_accuracy": train_eval["accuracy"],
+                }
+            )
+        if train_step_loss is not None:
+            logs["training_step_loss"] = float(train_step_loss)
+        if tokens_per_sec is not None:
+            logs["tokens_per_sec"] = float(tokens_per_sec)
 
         try:
-            self.fabric.log_dict(
-                {
-                    "training_loss": train_loss,
-                    "validation_loss": val_loss,
-                    "iter": idx,
-                    "tokens": idx * self.tokens_per_iter,
-                    "lr": lr,
-                    "time": elapsed_time,
-                },
-                step=idx,
-            )
+            self.fabric.log_dict(logs, step=idx)
         except Exception as e:
             print(f"Error logging: {e}")
 
     def train(self, start_iter: int = 0):
-        self.fabric.launch()
-        # sanity test
-        self.calculate_loss(self.val_dataloader, 5)
+        if not getattr(self.fabric, "_launched", False):
+            self.fabric.launch()
+
+        # sanity eval
+        _ = self.evaluate(self.val_dataloader, 1)
         self.model.train()
+        self.optimizer.zero_grad(set_to_none=True)
 
         idx: int = start_iter
         while True:
@@ -139,10 +229,15 @@ class Trainer:
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = lr
 
-            micro_batch_loss = 0
-            for _ in range(self.micro_batch):
+            micro_batch_loss = 0.0
+            for micro_step in range(self.micro_batch):
                 (data, target) = next(self.train_dataloader)
-                with self.fabric.no_backward_sync(self.model, enabled=_ < self.micro_batch - 1):
+                sync_context = (
+                    self.fabric.no_backward_sync(self.model, enabled=micro_step < self.micro_batch - 1)
+                    if self.micro_batch > 1
+                    else nullcontext()
+                )
+                with sync_context:
                     self._maybe_cudagraph_step_begin()
                     logits: torch.Tensor = self.model(data)
                     loss = F.cross_entropy(
@@ -150,28 +245,39 @@ class Trainer:
                         target.view(-1),
                         ignore_index=self.ignore_index,
                     )
-                    loss = loss / self.micro_batch
-                    micro_batch_loss += loss.item()
-                    self.fabric.backward(loss)
+                    loss_value = float(loss.detach().item())
+                    if not math.isfinite(loss_value):
+                        raise RuntimeError(f"Non-finite loss detected at iter={idx}: {loss_value}")
+                    micro_batch_loss += loss_value
+                    self.fabric.backward(loss / self.micro_batch)
+
+            if self.grad_clip_norm is not None and self.grad_clip_norm > 0:
+                self.fabric.clip_gradients(
+                    self.model,
+                    self.optimizer,
+                    max_norm=float(self.grad_clip_norm),
+                )
 
             self.optimizer.step()
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
+
+            step_loss = micro_batch_loss / max(1, self.micro_batch)
 
             curr_time: float = time.perf_counter()
             elapsed_time: float = curr_time - start_time
             tokens_per_sec = self.tokens_per_iter / max(elapsed_time, 1e-9)
             if idx % self.print_every == 0:
                 print(
-                    f"iter: {idx} | loss: {micro_batch_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s | tok/s: {tokens_per_sec:.2f}"
+                    f"iter: {idx} | loss: {step_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s | tok/s: {tokens_per_sec:.2f}"
                 )
 
             if self.log_iter_loss:
-                self.iter_loss_history.append(micro_batch_loss)
+                self.iter_loss_history.append(step_loss)
                 iter_loss_avg = sum(self.iter_loss_history) / len(self.iter_loss_history)
                 try:
                     self.fabric.log_dict(
                         {
-                            "train_iter_loss": micro_batch_loss,
+                            "train_iter_loss": step_loss,
                             "train_iter_loss_100": iter_loss_avg,
                             "iter": idx,
                             "tokens": idx * self.tokens_per_iter,
@@ -184,9 +290,15 @@ class Trainer:
                 except Exception as e:
                     print(f"Error logging iter loss: {e}")
 
-            if idx % self.eval_iters == 0:
+            if self.eval_iters > 0 and idx % self.eval_iters == 0:
                 self.model.eval()
-                self.log_function(idx, lr, elapsed_time)
+                self.log_function(
+                    idx=idx,
+                    lr=lr,
+                    elapsed_time=elapsed_time,
+                    train_step_loss=step_loss,
+                    tokens_per_sec=tokens_per_sec,
+                )
                 self.model.train()
 
             if self.save_ckpt_iters > 0 and idx % self.save_ckpt_iters == 0:
@@ -195,6 +307,7 @@ class Trainer:
                     "optimizer": self.optimizer.state_dict(),
                     "idx": idx,
                     "lr": lr,
+                    "train_step_loss": step_loss,
                 }
                 self.fabric.save("./ckpt/model.pt", state)
                 self.model.config.ckpt_iter = idx
@@ -233,9 +346,8 @@ def main():
     max_length: int = 256
 
     # system
-    compile_model: bool = not (sys.platform != "darwin")
+    compile_model: bool = sys.platform != "darwin"
     device: torch.device = auto_accelerator()  # select accelerator eg cuda, mps
-    dtype: torch.dtype = torch.float32  # We will use fancy dtypes in future
 
     logger: Any = wandb.init(project=project_name)
 
@@ -283,8 +395,13 @@ def main():
         max_iters=max_iters,
     )
 
+    fabric = L.Fabric(accelerator="auto", devices="auto", precision="bf16-mixed")
+    train_dataloader, val_dataloader = fabric.setup_dataloaders(train_dataloader, val_dataloader)
+    model = fabric.setup(model)
+    optimizer = fabric.setup_optimizers(optimizer)
+
     trainer: Trainer = Trainer(
-        fabric=L.Fabric(accelerator="auto", devices="auto", precision="bf16-mixed"),
+        fabric=fabric,
         model=model,
         optimizer=optimizer,
         train_dataloader=train_dataloader,
@@ -297,6 +414,9 @@ def main():
         ignore_index=tokenizer.pad_token_id,
         push_to_hub=False,
         model_name="",
+        eval_val_batches=100,
+        eval_train_batches=0,
+        grad_clip_norm=1.0,
     )
 
     trainer.train()
