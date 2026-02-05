@@ -50,6 +50,9 @@ class Trainer:
         eval_val_batches: int = 100,
         eval_train_batches: int = 0,
         grad_clip_norm: float | None = None,
+        flops_per_token: float | None = None,
+        peak_flops: float | None = None,
+        timing_warmup_steps: int = 10,
         cudagraph_mark_step_begin: bool = False,
     ):
         self.fabric = fabric
@@ -71,11 +74,23 @@ class Trainer:
         self.eval_val_batches = max(1, int(eval_val_batches))
         self.eval_train_batches = max(0, int(eval_train_batches))
         self.grad_clip_norm = grad_clip_norm
+        self.flops_per_token = flops_per_token
+        self.peak_flops = peak_flops
+        self.timing_warmup_steps = max(0, int(timing_warmup_steps))
         self.cudagraph_mark_step_begin = cudagraph_mark_step_begin
         self.iter_loss_history: deque[float] = deque(maxlen=iter_loss_window)
+        self.total_training_time_s: float = 0.0
+        self.timed_steps: int = 0
 
         (data, target) = next(self.val_dataloader)
         self.tokens_per_iter = int(math.prod(data.shape) * micro_batch)
+        self.world_size = dist.get_world_size() if self._is_distributed() else 1
+        self.global_tokens_per_iter = self.tokens_per_iter * self.world_size
+
+        if self.flops_per_token is None:
+            self.flops_per_token = self._infer_flops_per_token()
+        if self.peak_flops is None:
+            self.peak_flops = self._infer_peak_flops()
 
     def _maybe_cudagraph_step_begin(self) -> None:
         if not self.cudagraph_mark_step_begin:
@@ -91,6 +106,67 @@ class Trainer:
         if self._is_distributed():
             dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
         return tensor
+
+    def _infer_flops_per_token(self) -> float | None:
+        model = self.model.module if hasattr(self.model, "module") else self.model
+        if hasattr(model, "estimate_flops"):
+            try:
+                return float(model.estimate_flops())
+            except Exception:
+                pass
+        try:
+            # Rough training-rule estimate often used for decoder-only models.
+            num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            return float(6.0 * num_params)
+        except Exception:
+            return None
+
+    def _infer_peak_flops(self) -> float | None:
+        device = self.fabric.device
+        if device.type != "cuda" or not torch.cuda.is_available():
+            return None
+
+        device_index = device.index if device.index is not None else torch.cuda.current_device()
+        name = torch.cuda.get_device_name(device_index).upper()
+        # Approximate BF16 tensor FLOPs/s by SKU family.
+        peak_map = {
+            "H100": 9.89e14,
+            "H200": 9.89e14,
+            "A100": 3.12e14,
+            "A800": 3.12e14,
+            "L40": 1.81e14,
+            "L40S": 3.62e14,
+            "RTX 4090": 1.65e14,
+            "RTX 6000 ADA": 1.46e14,
+        }
+        for key, value in peak_map.items():
+            if key in name:
+                return value
+        return None
+
+    def _compute_perf_metrics(
+        self, idx: int, elapsed_time: float
+    ) -> tuple[float, float | None, float | None, float | None]:
+        tokens_per_sec = self.global_tokens_per_iter / max(elapsed_time, 1e-9)
+
+        mfu = None
+        if self.flops_per_token and self.peak_flops:
+            flops_per_sec = self.flops_per_token * tokens_per_sec
+            denom = self.peak_flops * max(1, self.world_size)
+            if denom > 0:
+                mfu = 100.0 * (flops_per_sec / denom)
+
+        if idx > self.timing_warmup_steps:
+            self.total_training_time_s += elapsed_time
+            self.timed_steps += 1
+
+        eta_seconds = None
+        avg_step = None
+        if self.timed_steps > 0:
+            avg_step = self.total_training_time_s / self.timed_steps
+            eta_seconds = max(self.max_iters - idx, 0) * avg_step
+
+        return tokens_per_sec, mfu, eta_seconds, avg_step
 
     @torch.no_grad()
     def evaluate(self, dataloader: DataLoader, num_batches: int) -> dict[str, float]:
@@ -159,6 +235,8 @@ class Trainer:
         elapsed_time: float,
         train_step_loss: float | None = None,
         tokens_per_sec: float | None = None,
+        mfu: float | None = None,
+        eta_seconds: float | None = None,
     ) -> None:
         train_eval = (
             self.evaluate(self.train_dataloader, self.eval_train_batches)
@@ -178,6 +256,12 @@ class Trainer:
             message_parts.insert(1, f"train_loss: {train_eval['loss']:.4f}")
             message_parts.insert(2, f"train_ppl: {train_eval['ppl']:.2f}")
         message_parts.extend([f"lr: {lr:e}", f"time: {elapsed_time:.4f}s"])
+        if tokens_per_sec is not None:
+            message_parts.append(f"tok/s: {tokens_per_sec:,.0f}")
+        if mfu is not None:
+            message_parts.append(f"mfu: {mfu:.2f}%")
+        if eta_seconds is not None:
+            message_parts.append(f"eta: {eta_seconds / 60.0:.1f}m")
         print(" | ".join(message_parts))
 
         logs: dict[str, float] = {
@@ -186,9 +270,10 @@ class Trainer:
             "validation_bpb": val_eval["bpb"],
             "validation_accuracy": val_eval["accuracy"],
             "iter": idx,
-            "tokens": idx * self.tokens_per_iter,
+            "tokens": idx * self.global_tokens_per_iter,
             "lr": lr,
             "time": elapsed_time,
+            "total_training_time_s": self.total_training_time_s,
         }
         if train_eval is not None:
             logs.update(
@@ -203,6 +288,10 @@ class Trainer:
             logs["training_step_loss"] = float(train_step_loss)
         if tokens_per_sec is not None:
             logs["tokens_per_sec"] = float(tokens_per_sec)
+        if mfu is not None:
+            logs["mfu"] = float(mfu)
+        if eta_seconds is not None:
+            logs["eta_seconds"] = float(eta_seconds)
 
         try:
             self.fabric.log_dict(logs, step=idx)
@@ -265,11 +354,17 @@ class Trainer:
 
             curr_time: float = time.perf_counter()
             elapsed_time: float = curr_time - start_time
-            tokens_per_sec = self.tokens_per_iter / max(elapsed_time, 1e-9)
+            tokens_per_sec, mfu, eta_seconds, _ = self._compute_perf_metrics(idx, elapsed_time)
             if idx % self.print_every == 0:
-                print(
-                    f"iter: {idx} | loss: {step_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s | tok/s: {tokens_per_sec:.2f}"
+                base_msg = (
+                    f"iter: {idx} | loss: {step_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s "
+                    f"| tok/s: {tokens_per_sec:,.2f}"
                 )
+                if mfu is not None:
+                    base_msg += f" | mfu: {mfu:.2f}%"
+                if eta_seconds is not None:
+                    base_msg += f" | eta: {eta_seconds/60.0:.1f}m"
+                print(base_msg)
 
             if self.log_iter_loss:
                 self.iter_loss_history.append(step_loss)
@@ -280,10 +375,11 @@ class Trainer:
                             "train_iter_loss": step_loss,
                             "train_iter_loss_100": iter_loss_avg,
                             "iter": idx,
-                            "tokens": idx * self.tokens_per_iter,
+                            "tokens": idx * self.global_tokens_per_iter,
                             "lr": lr,
                             "time": elapsed_time,
                             "tokens_per_sec": tokens_per_sec,
+                            "total_training_time_s": self.total_training_time_s,
                         },
                         step=idx,
                     )
@@ -298,6 +394,8 @@ class Trainer:
                     elapsed_time=elapsed_time,
                     train_step_loss=step_loss,
                     tokens_per_sec=tokens_per_sec,
+                    mfu=mfu,
+                    eta_seconds=eta_seconds,
                 )
                 self.model.train()
 
