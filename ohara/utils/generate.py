@@ -1,13 +1,19 @@
 import torch
 import torch.nn as nn
 
-from transformers import AutoTokenizer
+from transformers import PreTrainedTokenizerBase
 
 
 def smapler(logits, *args, **kwargs): ...
 
 
-def generate(model: nn.Module, tokenizer: AutoTokenizer, max_tokens: int = 64, *args, **kwargs):
+def generate(
+    model: nn.Module,
+    tokenizer: PreTrainedTokenizerBase,
+    max_tokens: int = 64,
+    *args,
+    **kwargs,
+):
     """
     Generate text from a model
     """

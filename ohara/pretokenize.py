@@ -3,8 +3,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from transformers import AutoTokenizer
+from transformers import PreTrainedTokenizerBase
 from datasets import load_dataset, DownloadMode
+
+from ohara.tokenizer import get_tokenizer
 
 
 class DatasetPreprocessor:
@@ -33,7 +35,11 @@ class DatasetPreprocessor:
         self.hf_cache = hf_cache
         self.revision = revision
 
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.tokenizer: PreTrainedTokenizerBase = get_tokenizer(
+            hf_name=tokenizer_name,
+            prefer_hf=True,
+            cache_dir=hf_cache,
+        )
         self.tokenizer.padding_side = "right"
         self.PAD = self.tokenizer.pad_token_id
         self.length = self.tokenizer.vocab_size

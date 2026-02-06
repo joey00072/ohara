@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 
-from transformers import AutoTokenizer
 from itertools import cycle
 from datasets import load_from_disk, load_dataset
 
@@ -14,26 +13,50 @@ import os
 import requests
 import random
 
+from transformers import PreTrainedTokenizerBase
+
+from ohara.tokenizer import load_tokenizer, TokenizerLoadResult
+
 PATH = Path("./data")
 # "google/byt5-small"
 # "NeelNanda/gpt-neox-tokenizer-digits"
 
 
-def get_tokenizer(self, tokenizer: AutoTokenizer | str = None):
-    self.tokenizer = tokenizer
+def _resolve_tokenizer(
+    tokenizer: PreTrainedTokenizerBase | str | None,
+    *,
+    cache_dir: str | Path | None = None,
+) -> PreTrainedTokenizerBase:
     if tokenizer is None:
         tokenizer = "NeelNanda/gpt-neox-tokenizer-digits"
     if isinstance(tokenizer, str):
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer, cache_dir=self.cache_dir, use_fast=True
+        result: TokenizerLoadResult = load_tokenizer(
+            hf_name=tokenizer,
+            prefer_hf=True,
+            cache_dir=cache_dir,
+            use_fast=True,
         )
+        tokenizer = result.tokenizer
+    if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
+    return tokenizer
+
+
+def get_tokenizer(
+    tokenizer: PreTrainedTokenizerBase | str | None = None,
+    *,
+    cache_dir: str | Path | None = None,
+) -> PreTrainedTokenizerBase:
+    """Backward-compatible tokenizer loader used by older scripts."""
+    return _resolve_tokenizer(tokenizer, cache_dir=cache_dir)
 
 
 class PreTokenizedDataset(IterableDataset):
     def __init__(
         self,
         dataset_name: str = "JeanKaddour/minipile",
-        tokenizer: AutoTokenizer = None,
+        tokenizer: PreTrainedTokenizerBase | str | None = None,
         split: str = "train",
         path: Path = PATH,
         microbatch_size: int = 32,
@@ -42,13 +65,12 @@ class PreTokenizedDataset(IterableDataset):
         hf=False,
         cache_dir=None,
     ):
-        self.tokenizer = tokenizer
-        self.tokenizer.padding_side = "right"
+        self.tokenizer = _resolve_tokenizer(tokenizer, cache_dir=cache_dir)
         self.length = len(self.tokenizer)
-        self.PAD = tokenizer.pad_token_id
+        self.PAD = self.tokenizer.pad_token_id
 
         self.microbatch_size = microbatch_size
-        self.vocab_size = len(tokenizer)
+        self.vocab_size = len(self.tokenizer)
         self.min_length = min_length
         self.max_length = max_length + 1
         self.cache_dir = cache_dir
@@ -79,19 +101,17 @@ class PreTokenizedDataset(IterableDataset):
 class TinyShakespeareDataset(IterableDataset):
     def __init__(
         self,
-        tokenizer: AutoTokenizer = None,
+        tokenizer: PreTrainedTokenizerBase | str | None = None,
         path: Path = PATH,
         min_length: int = 512,
         max_length: int = 512,
         cache_dir=None,
     ):
-        assert tokenizer is not None, "must pass tokenizer"
-        self.tokenizer = tokenizer
-        self.tokenizer.padding_side = "right"
+        self.tokenizer = _resolve_tokenizer(tokenizer, cache_dir=cache_dir)
         self.length = len(self.tokenizer)
-        self.PAD = tokenizer.pad_token_id
+        self.PAD = self.tokenizer.pad_token_id
 
-        self.vocab_size = len(tokenizer)
+        self.vocab_size = len(self.tokenizer)
         self.min_length = min_length
         self.max_length = max_length
         self.cache_dir = cache_dir
@@ -101,11 +121,11 @@ class TinyShakespeareDataset(IterableDataset):
 
         try:  # ugly ik
             with open(self.data_path) as f:
-                self.data = torch.Tensor(tokenizer.encode(f.read())).long()
+                self.data = torch.Tensor(self.tokenizer.encode(f.read())).long()
         except Exception:
             self.download_data()
             with open(self.data_path) as f:
-                self.data = torch.Tensor(tokenizer.encode(f.read())).long()
+                self.data = torch.Tensor(self.tokenizer.encode(f.read())).long()
 
         self.length = len(self.data)
 
@@ -128,7 +148,7 @@ class TinyShakespeareDataset(IterableDataset):
 
 
 if __name__ == "__main__":
-    tokenizer = AutoTokenizer.from_pretrained("microsoft/phi-2")
+    tokenizer = _resolve_tokenizer("microsoft/phi-2")
     dataset = PreTokenizedDataset(
         dataset_name="roneneldan/TinyStories", tokenizer=tokenizer, cache_dir="hf_cache"
     )

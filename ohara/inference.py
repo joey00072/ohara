@@ -6,14 +6,14 @@ from tqdm import tqdm
 from torch import Tensor
 from typing import Optional
 
-from transformers import AutoTokenizer
+from transformers import PreTrainedTokenizerBase
 
 
 class Inference:
     def __init__(
         self,
         model: nn.Module,
-        tokenizer: AutoTokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         device: str = None,
         temperature: float = 1.0,
         top_p: float = 0.0,
