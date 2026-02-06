@@ -15,10 +15,10 @@ from typing import Any, Callable
 from ohara.models.llama import Llama, Config
 from ohara.lr_scheduler import CosineScheduler
 from ohara.dataset import PreTokenizedDataset
+from ohara.tokenizer import get_tokenizer
 from ohara.utils import auto_accelerator, model_summary, BetterCycle
 
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer
 
 import lightning as L
 
@@ -449,7 +449,7 @@ def main():
 
     logger: Any = wandb.init(project=project_name)
 
-    tokenizer: AutoTokenizer = AutoTokenizer.from_pretrained(pretrained_model)
+    tokenizer = get_tokenizer(hf_name=pretrained_model, prefer_hf=True)
 
     config: Config = Config(
         vocab_size=tokenizer.vocab_size,
