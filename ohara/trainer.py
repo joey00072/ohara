@@ -10,17 +10,16 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.distributed as dist
 
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from ohara.models.llama import Llama, Config
 from ohara.lr_scheduler import CosineScheduler
+from ohara.runtime import EngineConfig, OharaEngine
 from ohara.dataset import PreTokenizedDataset
 from ohara.tokenizer import get_tokenizer
-from ohara.utils import auto_accelerator, model_summary, BetterCycle
+from ohara.utils import model_summary, BetterCycle
 
 from torch.utils.data import DataLoader
-
-import lightning as L
 
 import wandb
 from rich import print, traceback
@@ -28,10 +27,28 @@ from rich import print, traceback
 traceback.install()
 
 
+class RuntimeEngine(Protocol):
+    device: torch.device
+    is_global_zero: bool
+
+    def launch(self) -> None: ...
+    def prepare_dataloaders(self, *dataloaders: DataLoader): ...
+    def prepare(self, module: nn.Module, *optimizers: optim.Optimizer): ...
+    def prepare_optimizers(self, *optimizers: optim.Optimizer): ...
+    def no_backward_sync(self, module: nn.Module, enabled: bool = True): ...
+    def backward(self, loss: torch.Tensor) -> None: ...
+    def clip_gradients(
+        self, model: nn.Module, optimizer: optim.Optimizer, max_norm: float
+    ) -> None: ...
+    def optimizer_step(self, optimizer: optim.Optimizer) -> None: ...
+    def save(self, path: str, state: dict[str, Any]) -> None: ...
+    def log_dict(self, payload: dict[str, Any], step: int | None = None) -> None: ...
+
+
 class Trainer:
     def __init__(
         self,
-        fabric: L.Fabric,
+        engine: RuntimeEngine,
         model: nn.Module,
         optimizer: optim.Optimizer,
         train_dataloader: DataLoader,
@@ -55,7 +72,7 @@ class Trainer:
         timing_warmup_steps: int = 10,
         cudagraph_mark_step_begin: bool = False,
     ):
-        self.fabric = fabric
+        self.engine = engine
         self.model = model
         self.optimizer = optimizer
         self.train_dataloader = BetterCycle(iter(train_dataloader))
@@ -122,7 +139,7 @@ class Trainer:
             return None
 
     def _infer_peak_flops(self) -> float | None:
-        device = self.fabric.device
+        device = self.engine.device
         if device.type != "cuda" or not torch.cuda.is_available():
             return None
 
@@ -173,9 +190,9 @@ class Trainer:
         was_training = self.model.training
         self.model.eval()
 
-        total_loss = torch.zeros((), device=self.fabric.device, dtype=torch.float64)
-        total_tokens = torch.zeros((), device=self.fabric.device, dtype=torch.float64)
-        total_correct = torch.zeros((), device=self.fabric.device, dtype=torch.float64)
+        total_loss = torch.zeros((), device=self.engine.device, dtype=torch.float64)
+        total_tokens = torch.zeros((), device=self.engine.device, dtype=torch.float64)
+        total_correct = torch.zeros((), device=self.engine.device, dtype=torch.float64)
 
         for _ in range(max(1, int(num_batches))):
             data, target = next(dataloader)
@@ -226,7 +243,7 @@ class Trainer:
     @torch.no_grad()
     def calculate_loss(self, dataloader: DataLoader, num_batches: int) -> torch.Tensor:
         metrics = self.evaluate(dataloader, num_batches)
-        return torch.tensor(metrics["loss"], device=self.fabric.device)
+        return torch.tensor(metrics["loss"], device=self.engine.device)
 
     def log_function(
         self,
@@ -294,13 +311,12 @@ class Trainer:
             logs["eta_seconds"] = float(eta_seconds)
 
         try:
-            self.fabric.log_dict(logs, step=idx)
+            self.engine.log_dict(logs, step=idx)
         except Exception as e:
             print(f"Error logging: {e}")
 
     def train(self, start_iter: int = 0):
-        if not getattr(self.fabric, "_launched", False):
-            self.fabric.launch()
+        self.engine.launch()
 
         # sanity eval
         _ = self.evaluate(self.val_dataloader, 1)
@@ -322,7 +338,9 @@ class Trainer:
             for micro_step in range(self.micro_batch):
                 (data, target) = next(self.train_dataloader)
                 sync_context = (
-                    self.fabric.no_backward_sync(self.model, enabled=micro_step < self.micro_batch - 1)
+                    self.engine.no_backward_sync(
+                        self.model, enabled=micro_step < self.micro_batch - 1
+                    )
                     if self.micro_batch > 1
                     else nullcontext()
                 )
@@ -338,16 +356,16 @@ class Trainer:
                     if not math.isfinite(loss_value):
                         raise RuntimeError(f"Non-finite loss detected at iter={idx}: {loss_value}")
                     micro_batch_loss += loss_value
-                    self.fabric.backward(loss / self.micro_batch)
+                    self.engine.backward(loss / self.micro_batch)
 
             if self.grad_clip_norm is not None and self.grad_clip_norm > 0:
-                self.fabric.clip_gradients(
+                self.engine.clip_gradients(
                     self.model,
                     self.optimizer,
                     max_norm=float(self.grad_clip_norm),
                 )
 
-            self.optimizer.step()
+            self.engine.optimizer_step(self.optimizer)
             self.optimizer.zero_grad(set_to_none=True)
 
             step_loss = micro_batch_loss / max(1, self.micro_batch)
@@ -363,14 +381,14 @@ class Trainer:
                 if mfu is not None:
                     base_msg += f" | mfu: {mfu:.2f}%"
                 if eta_seconds is not None:
-                    base_msg += f" | eta: {eta_seconds/60.0:.1f}m"
+                    base_msg += f" | eta: {eta_seconds / 60.0:.1f}m"
                 print(base_msg)
 
             if self.log_iter_loss:
                 self.iter_loss_history.append(step_loss)
                 iter_loss_avg = sum(self.iter_loss_history) / len(self.iter_loss_history)
                 try:
-                    self.fabric.log_dict(
+                    self.engine.log_dict(
                         {
                             "train_iter_loss": step_loss,
                             "train_iter_loss_100": iter_loss_avg,
@@ -407,7 +425,7 @@ class Trainer:
                     "lr": lr,
                     "train_step_loss": step_loss,
                 }
-                self.fabric.save("./ckpt/model.pt", state)
+                self.engine.save("./ckpt/model.pt", state)
                 self.model.config.ckpt_iter = idx
                 if self.push_to_hub:
                     self.model.push_to_hub(
@@ -445,7 +463,9 @@ def main():
 
     # system
     compile_model: bool = sys.platform != "darwin"
-    device: torch.device = auto_accelerator()  # select accelerator eg cuda, mps
+    engine = OharaEngine(EngineConfig())
+    engine.launch()
+    device: torch.device = engine.device
 
     logger: Any = wandb.init(project=project_name)
 
@@ -493,13 +513,11 @@ def main():
         max_iters=max_iters,
     )
 
-    fabric = L.Fabric(accelerator="auto", devices="auto", precision="bf16-mixed")
-    train_dataloader, val_dataloader = fabric.setup_dataloaders(train_dataloader, val_dataloader)
-    model = fabric.setup(model)
-    optimizer = fabric.setup_optimizers(optimizer)
+    train_dataloader, val_dataloader = engine.prepare_dataloaders(train_dataloader, val_dataloader)
+    model, optimizer = engine.prepare(model, optimizer)
 
     trainer: Trainer = Trainer(
-        fabric=fabric,
+        engine=engine,
         model=model,
         optimizer=optimizer,
         train_dataloader=train_dataloader,
