@@ -21,8 +21,11 @@ python examples/prepare-dataset.py
 ## look at train.py its fairly easy
 python examples/train_llama.py
 
-# lighting fabric verison is also avalible (recommanded)
-python examples/train_llama_fabric.py 
+# native ohara runtime wrapper (recommended)
+python examples/train_llama_engine.py
+
+# lighting fabric verison is also avalible
+python examples/train_llama_fabric.py
 ```
 ![alt text](./docs/src/image.png)
 
