@@ -1,3 +1,51 @@
+[project]
+name = "ohara"
+version = "0.1.3"
+description = "A collection of implementations of LLMs, papers, and other models."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "joey", email = "00shxf@gmail.com" },
+]
+dependencies = [
+    "datasets>=3.1.0",
+    "huggingface-hub>=0.26.0",
+    "lightning>=2.3.0",
+    "pyyaml>=6.0",
+    "requests>=2.31.0",
+    "rich>=13.0",
+    "safetensors>=0.4.0",
+    "tensorboard>=2.18.0",
+    "torch>=2.5.0",
+    "tqdm>=4.66.0",
+    "transformers>=4.46.0",
+    "wandb>=0.18.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "ruff>=0.8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/joey00072/ohara"
+Repository = "https://github.com/joey00072/ohara"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ohara*"]
+
+[tool.uv]
+required-version = ">=0.8.0"
+constraint-dependencies = [
+    # Keep the shared CUDA 12 environment; newer PyTorch releases may select CUDA 13 wheels.
+    "torch==2.10.0",
+]
+
 [tool.black]
 line-length = 100
 target-version = ['py311']
@@ -55,3 +103,6 @@ unfixable = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401", "F403"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
