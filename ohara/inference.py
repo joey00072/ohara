@@ -1,10 +1,8 @@
-import time
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
-from tqdm import tqdm
-
-from torch import Tensor
-from typing import Optional
+import time
 
 from transformers import PreTrainedTokenizerBase
 
@@ -14,7 +12,7 @@ class Inference:
         self,
         model: nn.Module,
         tokenizer: PreTrainedTokenizerBase,
-        device: str = None,
+        device: str | torch.device | None = None,
         temperature: float = 1.0,
         top_p: float = 0.0,
         max_new_tokens: int = 500,
@@ -69,9 +67,9 @@ class Inference:
     def generate(
         self,
         prompt: str,
-        temperature: Optional[float] = None,
-        top_p: Optional[float] = None,
-        max_new_tokens: Optional[int] = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        max_new_tokens: int | None = None,
         stream: bool = True,
     ):
         if temperature is None:
@@ -80,35 +78,53 @@ class Inference:
             top_p = self.default_top_p
         if max_new_tokens is None:
             max_new_tokens = self.max_new_tokens
+        if max_new_tokens < 0:
+            raise ValueError("max_new_tokens cannot be negative")
         if self.use_kv_cache and hasattr(self.model, "build_kv_cache"):
             self.kv_cache = self.model.build_kv_cache()
         else:
             self.kv_cache = None
         device = self.device
-        inputs = self.tokenizer.encode(prompt)
-        inputs = torch.tensor(inputs).reshape(1, -1).to(device)
+        token_ids = self.tokenizer.encode(prompt)
+        if not token_ids:
+            raise ValueError("prompt must encode to at least one token")
+        inputs = torch.tensor(token_ids, dtype=torch.long, device=device).reshape(1, -1)
+        model_config = getattr(self.model, "config", None)
+        max_sequence_length = getattr(model_config, "max_sequence_length", None)
+        if max_sequence_length is not None:
+            if inputs.size(1) > max_sequence_length:
+                raise ValueError("prompt exceeds model max_sequence_length")
+            max_new_tokens = min(
+                max_new_tokens,
+                max(0, max_sequence_length - inputs.size(1)),
+            )
+
+        generated = inputs
+        model_inputs = inputs
         input_pos = 0
         start_time = time.time()
-        with torch.no_grad():
+        with torch.inference_mode():
             if stream:
-                print(self.tokenizer.decode(inputs.tolist()[0]), end="")
+                print(self.tokenizer.decode(generated.tolist()[0]), end="")
             for _ in range(max_new_tokens):
                 logits = (
-                    self.model(inputs, self.kv_cache, input_pos)
+                    self.model(model_inputs, self.kv_cache, input_pos)
                     if self.use_kv_cache
-                    else self.model(inputs)
+                    else self.model(generated)
                 )
                 next_token = self.sampler(logits, temperature=temperature, top_p=top_p)
-                if next_token[:, -1:].item() == self.tokenizer.eos_token_id:
+                if next_token.item() == self.tokenizer.eos_token_id:
                     break
-                inputs = torch.cat((inputs, next_token[:, -1:]), dim=-1)
-                input_pos = inputs.shape[1] - 1
+                generated = torch.cat((generated, next_token), dim=-1)
+                if self.use_kv_cache:
+                    input_pos += model_inputs.size(1)
+                    model_inputs = next_token
                 if stream:
-                    print(self.tokenizer.decode(inputs.tolist()[0][-1]), end="", flush=True)
+                    print(self.tokenizer.decode([next_token.item()]), end="", flush=True)
             end_time = time.time()
         if stream:
             print(f"\nTime: {end_time - start_time}s")
-        return self.tokenizer.decode(inputs.squeeze(0).tolist())
+        return self.tokenizer.decode(generated.squeeze(0).tolist())
 
 
 if __name__ == "__main__":

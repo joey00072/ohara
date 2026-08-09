@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,7 @@ def load_tokenizer(
     prefer_hf: bool = True,
     fallback_hf_name: str | None = None,
     use_fast: bool = True,
+    local_files_only: bool = False,
     cache_dir: str | Path | None = None,
     **kwargs: Any,
 ) -> TokenizerLoadResult:
@@ -93,7 +95,7 @@ def load_tokenizer(
             tokenizer = _load_hf_tokenizer(
                 identifier,
                 use_fast=use_fast,
-                local_files_only=local_only,
+                local_files_only=local_only or local_files_only,
                 cache_dir=cache_dir,
                 **kwargs,
             )
@@ -116,6 +118,7 @@ def get_tokenizer(
     prefer_hf: bool = True,
     fallback_hf_name: str | None = None,
     use_fast: bool = True,
+    local_files_only: bool = False,
     cache_dir: str | Path | None = None,
     **kwargs: Any,
 ) -> PreTrainedTokenizerBase:
@@ -125,6 +128,7 @@ def get_tokenizer(
         prefer_hf=prefer_hf,
         fallback_hf_name=fallback_hf_name,
         use_fast=use_fast,
+        local_files_only=local_files_only,
         cache_dir=cache_dir,
         **kwargs,
     )
@@ -146,7 +150,24 @@ def get_token_bytes(
         cache_file = Path(cache_path)
         if cache_file.exists():
             with open(cache_file, "rb") as f:
-                return torch.load(f, map_location=device)
+                payload = torch.load(f, map_location="cpu", weights_only=True)
+            if isinstance(payload, dict):
+                token_bytes = payload.get("token_bytes")
+                if not isinstance(token_bytes, torch.Tensor):
+                    raise ValueError(f"invalid token-byte cache: {cache_file}")
+                expected_identifier = str(getattr(tokenizer, "name_or_path", "unknown"))
+                if payload.get("tokenizer") != expected_identifier:
+                    raise ValueError(f"token-byte cache tokenizer mismatch: {cache_file}")
+                if bool(payload.get("include_special")) != include_special:
+                    raise ValueError(f"token-byte cache special-token mode mismatch: {cache_file}")
+            elif isinstance(payload, torch.Tensor):
+                # Backward compatibility with the original tensor-only cache.
+                token_bytes = payload
+            else:
+                raise ValueError(f"invalid token-byte cache: {cache_file}")
+            if token_bytes.ndim != 1 or token_bytes.numel() != len(tokenizer):
+                raise ValueError(f"token-byte cache vocabulary mismatch: {cache_file}")
+            return token_bytes.to(device=device)
 
     vocab_size = len(tokenizer)
     special_ids = set(getattr(tokenizer, "all_special_ids", []) or [])
@@ -161,8 +182,20 @@ def get_token_bytes(
     if cache_path is not None:
         cache_file = Path(cache_path)
         cache_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache_file, "wb") as f:
-            torch.save(token_bytes, f)
+        temporary = cache_file.with_name(f".{cache_file.name}.tmp-{os.getpid()}")
+        try:
+            with open(temporary, "wb") as f:
+                torch.save(
+                    {
+                        "tokenizer": str(getattr(tokenizer, "name_or_path", "unknown")),
+                        "include_special": include_special,
+                        "token_bytes": token_bytes,
+                    },
+                    f,
+                )
+            os.replace(temporary, cache_file)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     return token_bytes.to(device=device)
 

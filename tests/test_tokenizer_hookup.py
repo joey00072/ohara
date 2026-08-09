@@ -1,7 +1,13 @@
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
-from ohara.dataset import PreTokenizedDataset, get_tokenizer as dataset_get_tokenizer
+from ohara.dataset import (
+    PreTokenizedDataset,
+    StreamingTextDataset,
+    get_tokenizer as dataset_get_tokenizer,
+)
 from ohara.pretokenize import DatasetPreprocessor
 from ohara.tokenizer import TokenizerLoadResult
 
@@ -13,6 +19,7 @@ class DummyTokenizer:
         self.pad_token_id = 0
         self.eos_token_id = 2
         self.eos_token = "<eos>"
+        self.bos_token_id = 1
 
     def __len__(self):
         return 32
@@ -21,7 +28,7 @@ class DummyTokenizer:
     def vocab_size(self):
         return 32
 
-    def encode(self, text):
+    def encode(self, text, add_special_tokens=True):
         return [3, 4, 5]
 
     def __call__(self, text, max_length=None, truncation=False):
@@ -79,6 +86,80 @@ class TokenizerHookupTests(unittest.TestCase):
         kwargs = mocked.call_args.kwargs
         self.assertEqual(kwargs["hf_name"], "EleutherAI/gpt-neo-125m")
         self.assertTrue(kwargs["prefer_hf"])
+
+    def test_streaming_text_dataset_packs_shifted_tokens(self):
+        dummy = DummyTokenizer()
+        dataset = StreamingTextDataset(
+            dataset_name="x/y",
+            tokenizer=dummy,
+            split="train",
+            max_length=3,
+        )
+        with patch.object(dataset, "_load_stream", return_value=[{"text": "hello"}]):
+            x, y = next(iter(dataset))
+
+        self.assertEqual(x.tolist(), [1, 3, 4])
+        self.assertEqual(y.tolist(), [3, 4, 5])
+
+    def test_streaming_text_dataset_honors_explicit_data_shard(self):
+        dummy = DummyTokenizer()
+        dataset = StreamingTextDataset(
+            dataset_name="x/y",
+            tokenizer=dummy,
+            split="train",
+            max_length=3,
+            data_rank=1,
+            data_world_size=2,
+        )
+        rows = [{"wrong_column": "rank zero"}, {"text": "rank one"}]
+        with patch.object(dataset, "_load_stream", return_value=rows):
+            x, y = next(iter(dataset))
+
+        self.assertEqual(x.tolist(), [1, 3, 4])
+        self.assertEqual(y.tolist(), [3, 4, 5])
+
+    def test_streaming_text_dataset_skips_consumed_blocks_for_resume(self):
+        dummy = DummyTokenizer()
+        dataset = StreamingTextDataset(
+            dataset_name="x/y",
+            tokenizer=dummy,
+            split="train",
+            max_length=3,
+            start_block=1,
+        )
+        rows = [{"text": "first"}, {"text": "second"}]
+        with (
+            patch.object(dataset, "_load_stream", return_value=rows),
+            patch.object(dummy, "encode", side_effect=[[3, 4, 5], [6, 7, 8]]),
+        ):
+            x, y = next(iter(dataset))
+
+        self.assertEqual(x.tolist(), [1, 6, 7])
+        self.assertEqual(y.tolist(), [6, 7, 8])
+
+    def test_streaming_text_dataset_resolves_local_split_files(self):
+        dummy = DummyTokenizer()
+        with tempfile.TemporaryDirectory() as directory:
+            local_file = Path(directory, "train.jsonl")
+            local_file.write_text('{"text":"hello"}\n', encoding="utf-8")
+            dataset = StreamingTextDataset(
+                dataset_name=directory,
+                tokenizer=dummy,
+                split="train",
+                max_length=3,
+            )
+            with patch(
+                "ohara.dataset.load_dataset",
+                return_value=[{"text": "hello"}],
+            ) as mocked:
+                x, y = next(iter(dataset))
+
+        self.assertEqual(x.tolist(), [1, 3, 4])
+        self.assertEqual(y.tolist(), [3, 4, 5])
+        args, kwargs = mocked.call_args
+        self.assertEqual(args[0], "json")
+        self.assertEqual(kwargs["split"], "train")
+        self.assertEqual(kwargs["data_files"]["train"], [str(local_file)])
 
 
 if __name__ == "__main__":

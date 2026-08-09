@@ -1,4 +1,6 @@
 __pycache__/
+.venv
+.env
 .ruff_cache/
 dataset_cache/
 data/
@@ -32,5 +34,7 @@ hf_cache/
 logs*/
 **/logs*/
 model.pt
+ckpt/
+scaling_results/
 /dev
 ref
