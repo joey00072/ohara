@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from contextlib import nullcontext
+from collections.abc import Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable, cast
@@ -11,13 +12,36 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.nn.utils import clip_grad_norm_
 from torch.optim import Optimizer
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, IterableDataset, RandomSampler
 
 from .config import EngineConfig
 from .enums import Backend, PrecisionMode, ReduceType, StrategyType
 from .strategy import BaseStrategy, DDPStrategy, SingleStrategy
 from .tensor_parallel import TensorParallelPlan, apply_tensor_parallel
 from .topology import ParallelTopology
+
+
+class _DeviceDataLoader:
+    """Yield batches from a dataloader on the engine's compute device."""
+
+    def __init__(self, dataloader: DataLoader, engine: OharaEngine) -> None:
+        self.dataloader = dataloader
+        self.engine = engine
+        self.epoch = 0
+
+    def __iter__(self):
+        sampler = getattr(self.dataloader, "sampler", None)
+        if isinstance(sampler, DistributedSampler):
+            sampler.set_epoch(self.epoch)
+            self.epoch += 1
+        for batch in self.dataloader:
+            yield self.engine.to_device(batch)
+
+    def __len__(self) -> int:
+        return len(self.dataloader)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.dataloader, name)
 
 
 def _to_reduce_op(reduce_type: ReduceType) -> Any:
@@ -85,6 +109,16 @@ class OharaEngine:
     @property
     def is_global_zero(self) -> bool:
         return self.global_rank == 0
+
+    @property
+    def data_parallel_rank(self) -> int:
+        """Rank used to shard input data (TP ranks intentionally share it)."""
+        return self.topology.dp_rank
+
+    @property
+    def data_parallel_world_size(self) -> int:
+        """Number of independent data-parallel replicas."""
+        return self.topology.dp_world_size
 
     def launch(self, function: Callable[..., Any] | None = None, *args: Any, **kwargs: Any) -> Any:
         if self._launched:
@@ -167,7 +201,10 @@ class OharaEngine:
     ) -> torch.nn.Module:
         self.launch()
         if move_to_device:
-            module = module.to(self._device)
+            if self.config.precision.mode == PrecisionMode.BF16_TRUE:
+                module = module.to(device=self._device, dtype=torch.bfloat16)
+            else:
+                module = module.to(self._device)
         module = self._maybe_apply_tensor_parallel(module)
         return self._strategy.setup_module(
             module, device=self._device, process_group=self._dp_group
@@ -268,16 +305,18 @@ class OharaEngine:
         if not hasattr(dataloader, "dataset"):
             return dataloader
         dataset = dataloader.dataset
+        if isinstance(dataset, IterableDataset):
+            return dataloader
         if isinstance(getattr(dataloader, "sampler", None), DistributedSampler):
             return dataloader
-        if getattr(dataloader, "batch_sampler", None) is not None:
+        if dataloader.batch_size is None:
             return dataloader
 
         sampler = DistributedSampler(
             dataset,
             num_replicas=self._dp_world_size,
             rank=self._dp_rank,
-            shuffle=getattr(dataloader, "shuffle", False),
+            shuffle=isinstance(dataloader.sampler, RandomSampler),
             drop_last=dataloader.drop_last,
         )
 
@@ -301,10 +340,37 @@ class OharaEngine:
         self.launch()
         if len(dataloaders) == 0:
             raise ValueError("At least one dataloader is required")
-        if self._dp_world_size <= 1:
-            return dataloaders if len(dataloaders) > 1 else dataloaders[0]
-        wrapped = [self._replace_sampler(dl) for dl in dataloaders]
+        distributed = (
+            [self._replace_sampler(dl) for dl in dataloaders]
+            if self._dp_world_size > 1
+            else list(dataloaders)
+        )
+        wrapped = [
+            dl if isinstance(dl, _DeviceDataLoader) else _DeviceDataLoader(dl, self)
+            for dl in distributed
+        ]
         return tuple(wrapped) if len(wrapped) > 1 else wrapped[0]
+
+    def to_device(self, value: Any) -> Any:
+        """Recursively move tensors in a nested batch to the compute device."""
+        if isinstance(value, torch.Tensor):
+            return value.to(
+                self._device,
+                non_blocking=self._device.type == "cuda",
+            )
+        if isinstance(value, Mapping):
+            moved = {key: self.to_device(item) for key, item in value.items()}
+            try:
+                return type(value)(moved)
+            except TypeError:
+                return moved
+        if isinstance(value, tuple) and hasattr(value, "_fields"):
+            return type(value)(*(self.to_device(item) for item in value))
+        if isinstance(value, tuple):
+            return tuple(self.to_device(item) for item in value)
+        if isinstance(value, list):
+            return [self.to_device(item) for item in value]
+        return value
 
     def backward(self, loss: torch.Tensor) -> None:
         if self._scaler.is_enabled():
@@ -318,10 +384,12 @@ class OharaEngine:
     def no_backward_sync(self, module: torch.nn.Module, enabled: bool = True):
         return self.no_sync(module, enabled=enabled)
 
-    def clip_gradients(self, model: torch.nn.Module, optimizer: Optimizer, max_norm: float) -> None:
+    def clip_gradients(
+        self, model: torch.nn.Module, optimizer: Optimizer, max_norm: float
+    ) -> torch.Tensor:
         if self._scaler.is_enabled():
             self._scaler.unscale_(optimizer)
-        clip_grad_norm_(model.parameters(), max_norm=max_norm)
+        return clip_grad_norm_(model.parameters(), max_norm=max_norm)
 
     def optimizer_step(self, optimizer: Optimizer) -> None:
         if self._scaler.is_enabled():
@@ -336,6 +404,10 @@ class OharaEngine:
                 dist.barrier(device_ids=[self._device.index])
             else:
                 dist.barrier()
+
+    def synchronize(self) -> None:
+        if self._device.type == "cuda":
+            torch.cuda.synchronize(self._device)
 
     def broadcast(self, obj: Any, src: int = 0) -> Any:
         if not dist.is_initialized():
@@ -375,12 +447,21 @@ class OharaEngine:
         path = Path(path)
         if self.is_global_zero:
             path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(state, path)
+            temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+            try:
+                torch.save(state, temporary)
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
         self.barrier()
 
     def load(self, path: str | Path, state: dict[str, Any] | None = None) -> dict[str, Any]:
         path = Path(path)
-        payload: dict[str, Any] = torch.load(path, map_location=self._device)
+        payload: dict[str, Any] = torch.load(
+            path,
+            map_location=self._device,
+            weights_only=False,
+        )
         if state is None:
             return payload
 

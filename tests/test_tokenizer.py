@@ -122,6 +122,9 @@ class TokenizerTests(unittest.TestCase):
             self.assertTrue(cache_path.exists())
             bytes_second = get_token_bytes(tokenizer, cache_path=cache_path)
             self.assertTrue(torch.equal(bytes_first.cpu(), bytes_second.cpu()))
+            self.assertEqual(list(Path(tmp).glob(".*.tmp-*")), [])
+            with self.assertRaises(ValueError):
+                get_token_bytes(DummyTokenizer("different"), cache_path=cache_path)
 
 
 if __name__ == "__main__":

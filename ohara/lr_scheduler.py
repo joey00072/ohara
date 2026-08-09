@@ -19,8 +19,22 @@ class CosineScheduler:
     warmup_iters: int = 1000
     max_iters: int = 100_0000
 
-    def __call__(self, iteration) -> float:
-        if iteration < self.warmup_iters:
+    def __post_init__(self) -> None:
+        if self.learning_rate < 0 or self.min_lr < 0:
+            raise ValueError("learning rates cannot be negative")
+        if self.min_lr > self.learning_rate:
+            raise ValueError("min_lr cannot exceed learning_rate")
+        if self.warmup_iters < 0:
+            raise ValueError("warmup_iters cannot be negative")
+        if self.max_iters < 1:
+            raise ValueError("max_iters must be at least 1")
+        if self.warmup_iters >= self.max_iters:
+            raise ValueError("warmup_iters must be smaller than max_iters")
+
+    def __call__(self, iteration: int) -> float:
+        if iteration < 0:
+            raise ValueError("iteration cannot be negative")
+        if self.warmup_iters > 0 and iteration < self.warmup_iters:
             return self.learning_rate * iteration / self.warmup_iters
 
         if iteration > self.max_iters:

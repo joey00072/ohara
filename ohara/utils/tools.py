@@ -80,6 +80,10 @@ class BetterCycle:
             self._iterator = iter(self.iterable)
             return next(self._iterator)
 
+    def close(self) -> None:
+        """Drop the active iterator so generators and workers can clean up."""
+        self._iterator = None
+
 
 if __name__ == "__main__":
     data = [0, 1, 2, 3]

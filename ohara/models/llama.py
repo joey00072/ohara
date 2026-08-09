@@ -22,9 +22,10 @@ class Config:
     num_hidden_layers: int = 4
     dropout: float = 0.2
     multiple_of: int = 4
-    bias: int = False
+    bias: bool = False
     weight_tying: bool = False
     rope_theta: float = 100000
+    init_style: str = "standard"
 
 
 class KVCache:
@@ -33,15 +34,32 @@ class KVCache:
         self.key: torch.Tensor = torch.zeros(shape, device=device, dtype=dtype)
         self.value: torch.Tensor = torch.zeros(shape, device=device, dtype=dtype)
         self.max_seq_length = max_seq_length
+        self.length = 0
+        self.batch_size: int | None = None
 
     def forward(
-        self, keys: torch.Tensor, values: torch.Tensor, start_pos: torch.Tensor
+        self, keys: torch.Tensor, values: torch.Tensor, start_pos: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        bsz, T, _, _ = keys.shape
-        self.key[:bsz, start_pos : start_pos + T] = keys
-        self.value[:bsz, start_pos : start_pos + T] = values
-        keys = self.key[:bsz, : start_pos + T]
-        values = self.value[:bsz, : start_pos + T]
+        bsz, sequence_length, _, _ = keys.shape
+        if values.shape != keys.shape:
+            raise ValueError("KV cache keys and values must have matching shapes")
+        if bsz > self.key.size(0):
+            raise ValueError("KV cache batch size is smaller than the input batch")
+        if self.batch_size is not None and bsz != self.batch_size:
+            raise ValueError("KV cache batch size cannot change during decoding")
+        if start_pos != self.length:
+            raise ValueError(
+                f"KV cache writes must be sequential: expected position {self.length}, "
+                f"got {start_pos}"
+            )
+        if start_pos < 0 or start_pos + sequence_length > self.max_seq_length:
+            raise ValueError("KV cache position exceeds max_sequence_length")
+        self.key[:bsz, start_pos : start_pos + sequence_length] = keys
+        self.value[:bsz, start_pos : start_pos + sequence_length] = values
+        self.length = start_pos + sequence_length
+        self.batch_size = bsz
+        keys = self.key[:bsz, : start_pos + sequence_length]
+        values = self.value[:bsz, : start_pos + sequence_length]
         return keys, values
 
 
@@ -73,7 +91,7 @@ class Attention(nn.Module):
         mask: torch.Tensor,
         freqs_cis,
         kv_cache: KVCache | None = None,
-        position_ids: torch.Tensor | None = None,
+        position_ids: int | None = None,
     ) -> torch.Tensor:
         batch, seq_len, hidden_size = x.shape
 
@@ -89,16 +107,12 @@ class Attention(nn.Module):
         q = q.view(batch, seq_len, self.num_attention_heads, self.head_dim)
         v = v.view(batch, seq_len, self.num_key_value_heads, self.head_dim)
 
-        # Apply RoPE with position offset if using KV cache
-        offset = position_ids if kv_cache else 0
         freqs_cos, freqs_sin = freqs_cis
-        if offset:
-            freqs_cos = freqs_cos[offset : offset + seq_len]
-            freqs_sin = freqs_sin[offset : offset + seq_len]
         q, k = apply_rope(q, k, (freqs_cos, freqs_sin))
 
         # Apply KV cache if provided
         if kv_cache is not None:
+            assert position_ids is not None
             k, v = kv_cache.forward(k, v, position_ids)
 
         # Grouped Query Attention
@@ -110,18 +124,29 @@ class Attention(nn.Module):
         q = q.transpose(1, 2)
         v = v.transpose(1, 2)
 
+        cache_mask = None
+        if kv_cache is not None:
+            query_positions = position_ids + torch.arange(seq_len, device=q.device)
+            key_positions = torch.arange(k.size(2), device=q.device)
+            cache_mask = key_positions.unsqueeze(0) <= query_positions.unsqueeze(1)
+
         if self.flash_attn:
             output = torch.nn.functional.scaled_dot_product_attention(
                 q,
                 k,
                 v,
-                attn_mask=None,
+                attn_mask=cache_mask,
                 dropout_p=self.attn_dropout.p if self.training else 0.0,
-                is_causal=True,
+                is_causal=kv_cache is None,
             )
         else:
             attn_mtx = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
-            if mask is not None:
+            if cache_mask is not None:
+                attn_mtx = attn_mtx.masked_fill(
+                    ~cache_mask.view(1, 1, seq_len, k.size(2)),
+                    float("-inf"),
+                )
+            elif mask is not None:
                 attn_mtx = attn_mtx + mask[:, :, :seq_len, : k.size(2)]
             attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(k)
             attn_mtx = self.attn_dropout(attn_mtx)
@@ -158,7 +183,7 @@ class Block(nn.Module):
         mask,
         freqs_cis,
         kv_cache: KVCache | None = None,
-        position_ids: torch.Tensor | None = None,
+        position_ids: int | None = None,
     ):
         x = x + self.attn(self.norm1(x), mask, freqs_cis, kv_cache, position_ids)
         x = x + self.ff(self.norm2(x))
@@ -168,6 +193,29 @@ class Block(nn.Module):
 class Llama(nn.Module):
     def __init__(self, cfg: Config, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+
+        if cfg.vocab_size < 2:
+            raise ValueError("vocab_size must be at least 2")
+        if cfg.hidden_size < 1 or cfg.num_hidden_layers < 1:
+            raise ValueError("hidden_size and num_hidden_layers must be positive")
+        if cfg.intermediate_size < 1:
+            raise ValueError("intermediate_size must be positive")
+        if cfg.num_attention_heads < 1 or cfg.hidden_size % cfg.num_attention_heads != 0:
+            raise ValueError("hidden_size must be divisible by num_attention_heads")
+        head_dim = cfg.hidden_size // cfg.num_attention_heads
+        if head_dim % 2 != 0:
+            raise ValueError("attention head dimension must be even for rotary embeddings")
+        if cfg.max_sequence_length < 2:
+            raise ValueError("max_sequence_length must be at least 2")
+        kv_heads = cfg.num_attention_heads if cfg.num_key_value_heads == 0 else cfg.num_key_value_heads
+        if kv_heads < 1 or cfg.num_attention_heads % kv_heads != 0:
+            raise ValueError("num_key_value_heads must divide num_attention_heads")
+        if not 0.0 <= cfg.dropout < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+        if cfg.init_style not in {"standard", "nanochat"}:
+            raise ValueError("init_style must be 'standard' or 'nanochat'")
+        if cfg.init_style == "nanochat" and cfg.weight_tying:
+            raise ValueError("nanochat initialization requires untied embeddings")
 
         self.config = cfg
 
@@ -182,7 +230,9 @@ class Llama(nn.Module):
             self.token_emb.weight = self.vocab_proj.weight
 
         cos, isin = precompute_freqs_cis(
-            cfg.hidden_size // cfg.num_attention_heads, cfg.max_sequence_length * 2
+            head_dim,
+            cfg.max_sequence_length * 2,
+            theta=cfg.rope_theta,
         )
         self.register_buffer("freq_cos", cos)
         self.register_buffer("freq_sin", isin)
@@ -198,42 +248,66 @@ class Llama(nn.Module):
             self.mask = None
 
         self.apply(self._init_weights)
+        if cfg.init_style == "nanochat":
+            self._init_nanochat_weights()
 
     def forward(
         self,
         x: torch.Tensor,
         kv_cache: list[KVCache] | None = None,
-        position_ids: torch.Tensor | None = None,
+        position_ids: int | torch.Tensor | None = None,
     ):
-        batch, seqlen = x.shape
-        x = self.token_emb(x)
-        device = self.token_emb.weight.device
-        freqs_cis = self.freq_cos[:seqlen], self.freq_sin[:seqlen]
+        if x.ndim != 2:
+            raise ValueError("input token IDs must have shape (batch, sequence)")
+        if isinstance(position_ids, torch.Tensor):
+            if position_ids.numel() != 1:
+                raise ValueError("position_ids must be a scalar cache position")
+            position_ids = int(position_ids.item())
 
-        # Handle KV caching mask adjustment
+        start_pos = 0
         mask = self.mask
         if kv_cache is not None:
-            x = x[:, position_ids:]
+            if len(kv_cache) != len(self.layers):
+                raise ValueError("KV cache must contain one entry per model layer")
+            if position_ids is None or position_ids < 0:
+                raise ValueError("a non-negative position_ids is required with KV cache")
+            start_pos = position_ids
             mask = None
+        elif position_ids is not None:
+            raise ValueError("position_ids is only valid when using a KV cache")
+
+        sequence_length = x.size(1)
+        if sequence_length < 1:
+            raise ValueError("input sequence cannot be empty")
+        if start_pos + sequence_length > self.config.max_sequence_length:
+            raise ValueError("input exceeds max_sequence_length")
+
+        x = self.token_emb(x)
+        freqs_cis = (
+            self.freq_cos[start_pos : start_pos + sequence_length],
+            self.freq_sin[start_pos : start_pos + sequence_length],
+        )
 
         # Forward through layers with KV cache
         for idx, layer in enumerate(self.layers):
             cache = kv_cache[idx] if kv_cache is not None else None
-            x = layer(x, mask, freqs_cis, cache, position_ids)
+            x = layer(x, mask, freqs_cis, cache, start_pos if cache is not None else None)
 
         x = self.norm(x)
         x = self.vocab_proj(x)
         return x
 
-    def build_kv_cache(self) -> list[KVCache]:
+    def build_kv_cache(self, batch_size: int = 1) -> list[KVCache]:
         """Build an empty KV cache suitable for the model's configuration."""
+        if batch_size < 1:
+            raise ValueError("batch_size must be at least 1")
         kv_heads = (
             self.config.num_attention_heads
             if self.config.num_key_value_heads == 0
             else self.config.num_key_value_heads
         )
         shape = (
-            1,
+            batch_size,
             self.config.max_sequence_length,
             kv_heads,
             self.config.hidden_size // self.config.num_attention_heads,
@@ -248,6 +322,58 @@ class Llama(nn.Module):
             )
         return kv_cache
 
+    def num_scaling_params(self) -> dict[str, int]:
+        """Return parameter groups used by compute-optimal scaling analysis."""
+        token_embeddings = self.token_emb.weight.numel()
+        lm_head = (
+            0
+            if self.vocab_proj.weight is self.token_emb.weight
+            else self.vocab_proj.weight.numel()
+        )
+        transformer_matrices = sum(
+            parameter.numel()
+            for layer in self.layers
+            for parameter in layer.parameters()
+            if parameter.ndim >= 2
+        )
+        total = sum(parameter.numel() for parameter in self.parameters())
+        norms_and_scalars = total - token_embeddings - lm_head - transformer_matrices
+        if norms_and_scalars < 0:
+            raise RuntimeError("parameter groups overlap")
+        return {
+            "token_embeddings": token_embeddings,
+            "lm_head": lm_head,
+            "transformer_matrices": transformer_matrices,
+            "norms_and_scalars": norms_and_scalars,
+            "total": total,
+            # Match nanochat's cleanest convention: transformer matrices + output head.
+            "effective": transformer_matrices + lm_head,
+        }
+
+    def estimate_flops(self, sequence_length: int | None = None) -> float:
+        """Estimate forward+backward FLOPs per token using nanochat's convention."""
+        sequence_length = sequence_length or self.config.max_sequence_length
+        if not 1 <= sequence_length <= self.config.max_sequence_length:
+            raise ValueError("sequence_length must be within the configured context window")
+
+        # Embedding lookup is not a matmul. The output projection is a matmul even
+        # when its physical weight is tied to the token embedding.
+        layer_matrix_parameters = sum(
+            parameter.numel()
+            for layer in self.layers
+            for parameter in layer.parameters()
+            if parameter.ndim >= 2
+        )
+        matmul_parameters = layer_matrix_parameters + self.vocab_proj.weight.numel()
+        attention_flops = (
+            12
+            * self.config.num_hidden_layers
+            * self.config.num_attention_heads
+            * (self.config.hidden_size // self.config.num_attention_heads)
+            * sequence_length
+        )
+        return float(6 * matmul_parameters + attention_flops)
+
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -255,6 +381,24 @@ class Llama(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    @torch.no_grad()
+    def _init_nanochat_weights(self) -> None:
+        """Apply nanochat's width-transferable initialization to this Llama."""
+        torch.nn.init.normal_(self.token_emb.weight, mean=0.0, std=0.8)
+        torch.nn.init.normal_(self.vocab_proj.weight, mean=0.0, std=0.001)
+        bound = math.sqrt(3.0) * self.config.hidden_size**-0.5
+        for block in self.layers:
+            torch.nn.init.uniform_(block.attn.query.weight, -bound, bound)
+            torch.nn.init.uniform_(block.attn.key.weight, -bound, bound)
+            torch.nn.init.uniform_(block.attn.value.weight, -bound, bound)
+            torch.nn.init.zeros_(block.attn.proj.weight)
+            torch.nn.init.uniform_(block.ff.up.weight, -0.4 * bound, 0.4 * bound)
+            torch.nn.init.uniform_(block.ff.gate.weight, -0.4 * bound, 0.4 * bound)
+            torch.nn.init.zeros_(block.ff.down.weight)
+            block.norm1.reset_parameters()
+            block.norm2.reset_parameters()
+        self.norm.reset_parameters()
 
     @classmethod
     def from_pretrained(cls, hf_name: str):
