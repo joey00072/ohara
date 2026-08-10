@@ -182,8 +182,16 @@ def plan_scaling_run(
     tokens_per_micro_batch = device_batch_size * sequence_length * world_size
     if total_batch_size is None:
         predicted = reference_batch_size * (nominal_tokens / reference_tokens) ** batch_exponent
-        total_batch_size = max(tokens_per_micro_batch, _nearest_power_of_two(predicted))
-        total_batch_size = _round_up(total_batch_size, tokens_per_micro_batch)
+        total_batch_size = _nearest_power_of_two(predicted)
+        if total_batch_size < tokens_per_micro_batch:
+            raise ValueError(
+                f"the scaling law predicts total_batch_size={total_batch_size:,} tokens for "
+                f"depth={depth}, but one distributed micro-batch is already "
+                f"{tokens_per_micro_batch:,} tokens (device_batch_size * sequence_length * "
+                "world_size); flooring to the micro-batch size would silently break the "
+                "batch-size scaling law across the sweep. Reduce device_batch_size or "
+                "world_size for this depth, or pass an explicit total_batch_size."
+            )
     elif total_batch_size < tokens_per_micro_batch:
         raise ValueError("total_batch_size is smaller than one distributed micro-batch")
     if total_batch_size % tokens_per_micro_batch:
@@ -443,7 +451,20 @@ def fit_isoflop_curves(
             continue
         log_params = [math.log10(float(row["params_effective"])) for row in subset]
         losses = [float(row[metric]) for row in subset]
-        a, b, c = _quadratic_fit(log_params, losses)
+
+        # Center the parameter axis before fitting: log-parameters span many
+        # orders of magnitude, and an uncentered quadratic fit ill-conditions
+        # the Vandermonde system solved by _quadratic_fit. Fit in centered
+        # coordinates, then shift the coefficients back onto the original
+        # log-parameter axis so every downstream consumer (including
+        # write_scaling_svg) can keep using absolute log10(params).
+        mean_log_params = sum(log_params) / len(log_params)
+        centered = [value - mean_log_params for value in log_params]
+        centered_a, centered_b, centered_c = _quadratic_fit(centered, losses)
+        a = centered_a
+        b = centered_b - 2 * centered_a * mean_log_params
+        c = centered_a * mean_log_params**2 - centered_b * mean_log_params + centered_c
+
         candidate = -b / (2 * a) if a > 0 else float("nan")
         interior_optimum = a > 0 and log_params[0] <= candidate <= log_params[-1]
         if interior_optimum:
@@ -453,12 +474,19 @@ def fit_isoflop_curves(
             best = min(range(len(losses)), key=losses.__getitem__)
             log_optimum = log_params[best]
             loss_optimum = losses[best]
-        tokens = _interpolate(
+
+        # Derive tokens_trained from the exact budget = flops_per_token * tokens
+        # identity rather than interpolating tokens_trained directly. Near the
+        # optimum, tokens_trained is a steep, convex function of log-parameters
+        # (it is roughly budget / params), while flops_per_token is close to
+        # linear in params; interpolating the latter is far more accurate.
+        flops_per_token = _interpolate(
             log_optimum,
             log_params,
-            [float(row["tokens_trained"]) for row in subset],
+            [float(row["flops_per_token"]) for row in subset],
         )
         params = 10**log_optimum
+        tokens = budget / flops_per_token
         optimums.append(
             {
                 "flops_budget": budget,

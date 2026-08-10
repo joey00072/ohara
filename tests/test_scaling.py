@@ -130,12 +130,16 @@ class ScalingLawTests(unittest.TestCase):
             for offset in (-1.0, 0.0, 1.0):
                 log_params = center + offset
                 params = 10**log_params
+                tokens_trained = scale * 1e6 * 10**offset
                 rows.append(
                     {
                         "flops_budget": budget,
                         "depth": log_params,
                         "params_effective": params,
-                        "tokens_trained": scale * 1e6 * 10**offset,
+                        "tokens_trained": tokens_trained,
+                        # Exactly consistent with flops_budget = flops_per_token * tokens_trained,
+                        # matching the real results.csv schema.
+                        "flops_per_token": budget / tokens_trained,
                         "val_bpb": 1.2 + 0.15 * offset**2,
                     }
                 )
@@ -145,6 +149,14 @@ class ScalingLawTests(unittest.TestCase):
         self.assertAlmostEqual(math.log10(optimums[0]["params_effective"]), 4.0)
         self.assertAlmostEqual(math.log10(optimums[1]["params_effective"]), 4.5)
         self.assertTrue(all(row["interior_optimum"] == 1.0 for row in optimums))
+        # The optimum falls exactly on the offset=0 row, so tokens_trained at
+        # the optimum should recover that row's exact value, not an
+        # interpolation artifact.
+        self.assertLess(abs(optimums[0]["tokens_trained"] - 1.0e6) / 1.0e6, 1e-9)
+        self.assertLess(
+            abs(optimums[1]["tokens_trained"] - math.sqrt(10) * 1e6) / (math.sqrt(10) * 1e6),
+            1e-9,
+        )
 
         analysis = analyze_scaling_results(rows)
         self.assertAlmostEqual(

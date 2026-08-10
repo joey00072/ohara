@@ -21,6 +21,7 @@ A 15-run nanochat-style iso-FLOP sweep across 13M–49M parameter models produce
 all three compute budgets. The fitted compute exponents were 0.656 for optimal model size and 0.298
 for training tokens. This validates the workflow on one A100; the values are specific to TinyStories
 and are not directly comparable to NanoChat's ClimbMix results.
+New scaling corpora are staged from NanoChat's ClimbMix shards by default.
 
 ![TinyStories iso-FLOP scaling curves](./docs/src/tinystories_scaling_laws.svg)
 
