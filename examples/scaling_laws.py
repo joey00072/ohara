@@ -21,7 +21,7 @@ from ohara.tokenizer import get_tokenizer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = PROJECT_ROOT.joinpath("examples", "train_llama_engine.py")
-SCALING_RECIPE_VERSION = 2
+SCALING_RECIPE_VERSION = 3
 
 
 def _int_list(value: str) -> list[int]:
@@ -83,7 +83,11 @@ def parse_args() -> argparse.Namespace:
 
     run_parser = subparsers.add_parser("run", help="execute the fixed-FLOP sweep")
     _add_plan_arguments(run_parser)
-    run_parser.add_argument("--dataset", default="roneneldan/TinyStories")
+    run_parser.add_argument(
+        "--dataset",
+        default="./data/scaling_corpus",
+        help="staged corpus directory (prepare_scaling_data.py defaults to NanoChat ClimbMix)",
+    )
     run_parser.add_argument("--dataset-config", default=None)
     run_parser.add_argument("--tokenizer", default="EleutherAI/gpt-neo-125m")
     run_parser.add_argument("--tokenizer-local-files-only", action="store_true")
@@ -91,7 +95,24 @@ def parse_args() -> argparse.Namespace:
     run_parser.add_argument("--train-split", default="train")
     run_parser.add_argument("--validation-split", default="validation")
     run_parser.add_argument("--eval-batches", type=int, default=20)
-    run_parser.add_argument("--warmup-steps", type=int, default=40)
+    run_parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=40,
+        help="ceiling on LR warmup iterations; scaled down for short runs (see --warmup-fraction)",
+    )
+    run_parser.add_argument(
+        "--warmup-fraction",
+        type=float,
+        default=0.1,
+        help="warmup/momentum-warmup iters are min(ceiling, warmup_fraction * num_iterations)",
+    )
+    run_parser.add_argument(
+        "--muon-momentum-warmup-iters",
+        type=int,
+        default=400,
+        help="ceiling on Muon momentum warmup iterations; scaled down for short runs",
+    )
     run_parser.add_argument("--warmdown-ratio", type=float, default=0.65)
     run_parser.add_argument("--final-lr-fraction", type=float, default=0.05)
     run_parser.add_argument(
@@ -103,6 +124,8 @@ def parse_args() -> argparse.Namespace:
     run_parser.add_argument("--seed", type=int, default=42)
     run_parser.add_argument("--results-dir", default="./scaling_results")
     run_parser.add_argument("--dry-run", action="store_true")
+    run_parser.add_argument("--max-corpus-epochs", type=float, default=3.0)
+    run_parser.add_argument("--allow-repeated-epochs", action="store_true")
 
     analyze_parser = subparsers.add_parser("analyze", help="fit iso-FLOP curves")
     analyze_parser.add_argument("--results-file", default="./scaling_results/results.csv")
@@ -161,11 +184,29 @@ def print_plans(plans: list[ScalingPlan]) -> None:
         )
 
 
+def _scaled_warmup_iters(ceiling: int, num_iterations: int, fraction: float) -> int:
+    """Cap a warmup length so it never dominates the shortest runs in a sweep.
+
+    A sweep's iso-FLOP grid spans depths whose num_iterations can differ by
+    more than 100x. A single fixed warmup/momentum-warmup step count is
+    either negligible on the longest runs or a large fraction of the
+    shortest ones, so points on the same iso-FLOP curve end up trained under
+    different effective schedules.
+    """
+    return max(1, min(ceiling, round(fraction * num_iterations)))
+
+
 def _training_command(
     args: argparse.Namespace,
     plan: ScalingPlan,
     result_json: Path,
 ) -> list[str]:
+    warmup_iters = _scaled_warmup_iters(
+        args.warmup_steps, plan.num_iterations, args.warmup_fraction
+    )
+    momentum_warmup_iters = _scaled_warmup_iters(
+        args.muon_momentum_warmup_iters, plan.num_iterations, args.warmup_fraction
+    )
     if args.nproc_per_node > 1:
         command = [
             sys.executable,
@@ -217,7 +258,9 @@ def _training_command(
             "--weight-decay",
             str(plan.weight_decay),
             "--warmup-iters",
-            str(args.warmup_steps),
+            str(warmup_iters),
+            "--muon-momentum-warmup-iters",
+            str(momentum_warmup_iters),
             "--hidden-size",
             str(plan.hidden_size),
             "--intermediate-size",
@@ -294,7 +337,9 @@ def _experiment_manifest(args: argparse.Namespace) -> dict[str, object]:
         "base_unembedding_learning_rate": args.base_unembedding_learning_rate,
         "base_scalar_learning_rate": args.base_scalar_learning_rate,
         "base_weight_decay": args.base_weight_decay,
-        "warmup_steps": args.warmup_steps,
+        "warmup_steps_ceiling": args.warmup_steps,
+        "muon_momentum_warmup_iters_ceiling": args.muon_momentum_warmup_iters,
+        "warmup_fraction": args.warmup_fraction,
         "warmdown_ratio": args.warmdown_ratio,
         "final_lr_fraction": args.final_lr_fraction,
         "eval_batches": args.eval_batches,
@@ -335,6 +380,45 @@ def _prepare_results_manifest(args: argparse.Namespace, results_dir: Path) -> No
         temporary.unlink(missing_ok=True)
 
 
+def _corpus_token_budget(dataset: str) -> int | None:
+    """Read a token count staged by prepare_scaling_data.py's --tokenizer pass.
+
+    Returns None when the dataset is not a locally staged corpus, or was
+    staged without --tokenizer (no stats file, or a stats file with no
+    token count), in which case the epoch-budget check is skipped.
+    """
+    stats_path = Path(dataset).joinpath("stats.train.json")
+    if not stats_path.exists():
+        return None
+    with open(stats_path, encoding="utf-8") as handle:
+        stats = json.load(handle)
+    tokens = stats.get("tokens")
+    return int(tokens) if tokens is not None else None
+
+
+def _check_corpus_epoch_budget(args: argparse.Namespace, plans: list[ScalingPlan]) -> None:
+    """Fail loudly when a sweep would repeatedly re-epoch a small staged corpus.
+
+    StreamingTextDataset loops its source stream forever with no warning, so
+    a sweep whose iso-FLOP token horizons exceed the corpus size silently
+    trains on memorization rather than the intended token budget, without
+    any signal in val_bpb that this happened.
+    """
+    corpus_tokens = _corpus_token_budget(args.dataset)
+    if corpus_tokens is None:
+        return
+    max_tokens = max(plan.tokens_trained for plan in plans)
+    max_epochs = max_tokens / corpus_tokens
+    print(f"corpus tokens={corpus_tokens:,}; sweep max epochs over corpus={max_epochs:.2f}")
+    if max_epochs > args.max_corpus_epochs and not args.allow_repeated_epochs:
+        raise ValueError(
+            f"sweep would repeat the staged corpus at {args.dataset!r} up to "
+            f"{max_epochs:.1f}x, above --max-corpus-epochs={args.max_corpus_epochs}; "
+            "stage more documents with prepare_scaling_data.py, shrink --depths/"
+            "--flops-budgets, or pass --allow-repeated-epochs to proceed anyway"
+        )
+
+
 def run_sweep(args: argparse.Namespace, plans: list[ScalingPlan]) -> None:
     results_dir = Path(args.results_dir)
     results_file = results_dir.joinpath("results.csv")
@@ -351,6 +435,7 @@ def run_sweep(args: argparse.Namespace, plans: list[ScalingPlan]) -> None:
                 f"--vocab-size={args.vocab_size} does not match tokenizer size "
                 f"{actual_vocab_size}; fix the plan before launching GPU runs"
             )
+        _check_corpus_epoch_budget(args, plans)
         _prepare_results_manifest(args, results_dir)
     completed = set()
     if results_file.exists():
@@ -380,6 +465,8 @@ def run_sweep(args: argparse.Namespace, plans: list[ScalingPlan]) -> None:
             result = json.load(handle)
         if int(result["params_effective"]) != plan.params_effective:
             raise RuntimeError("trained model does not match the planned parameter count")
+        if int(result["total_batch_size"]) != plan.total_batch_size:
+            raise RuntimeError("training result does not match planned total_batch_size")
         if result.get("optimizer_muon") != 1.0 or result.get("initialization_nanochat") != 1.0:
             raise RuntimeError("training result did not use the planned Muon/nanochat recipe")
         for field in (
@@ -388,6 +475,7 @@ def run_sweep(args: argparse.Namespace, plans: list[ScalingPlan]) -> None:
             "unembedding_learning_rate",
             "scalar_learning_rate",
             "weight_decay",
+            "flops_per_token",
         ):
             if not math.isclose(float(result[field]), float(getattr(plan, field))):
                 raise RuntimeError(f"training result does not match planned {field}")
@@ -423,12 +511,21 @@ def main() -> None:
         return
 
     if args.command == "run":
-        if args.eval_batches < 1 or args.num_workers < 0 or args.warmup_steps < 0:
+        if (
+            args.eval_batches < 1
+            or args.num_workers < 0
+            or args.warmup_steps < 0
+            or args.muon_momentum_warmup_iters < 0
+        ):
             raise ValueError("evaluation, worker, and warmup values are invalid")
+        if not 0 < args.warmup_fraction <= 1:
+            raise ValueError("warmup-fraction must be in (0, 1]")
         if not 0 <= args.warmdown_ratio <= 1:
             raise ValueError("warmdown-ratio must be in [0, 1]")
         if not 0 <= args.final_lr_fraction <= 1:
             raise ValueError("final-lr-fraction must be in [0, 1]")
+        if args.max_corpus_epochs <= 0:
+            raise ValueError("max-corpus-epochs must be positive")
 
     plans = build_plans(args)
     print_plans(plans)
