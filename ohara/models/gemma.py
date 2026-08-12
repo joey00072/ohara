@@ -1,27 +1,15 @@
 from __future__ import annotations
 
-import os
-import math
-import json
 from dataclasses import dataclass
-
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
 from torch import Tensor
-from safetensors import safe_open
-from ohara.utils.load import download_hf_model
 
-from tqdm import tqdm
-from typing import Tuple
-
+from ohara.embeddings_pos.rotary import apply_rope, precompute_freqs_cis
 from ohara.modules.mlp import GEGLU
 from ohara.modules.norm import RMSNorm
-from ohara.embeddings_pos.rotary import precompute_freqs_cis
-from ohara.embeddings_pos.rotary import apply_rope
 
 
 @dataclass
@@ -107,7 +95,7 @@ class GemmaAttention(nn.Module):
 
         attn_mtx = torch.matmul(q, k.transpose(2, 3)) * self.scaling
         if mask is not None:
-            attn_mtx = attn_mtx + mask
+            attn_mtx = attn_mtx + mask[:, :, :seq_len, :seq_len]
         attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(q)
 
         output = torch.matmul(attn_mtx, v)
@@ -148,46 +136,49 @@ class Block(nn.Module):
 
 
 class Gemma(nn.Module):
-    def __init__(self, model_args: GemmaConfig, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, config: GemmaConfig) -> None:
+        super().__init__()
+        if config.hidden_size % config.num_attention_heads != 0:
+            raise ValueError("hidden_size must be divisible by num_attention_heads")
 
-        self.config = model_args
+        self.config = config
 
-        self.token_emb = nn.Embedding(model_args.vocab_size, model_args.hidden_size)
+        self.token_emb = nn.Embedding(config.vocab_size, config.hidden_size)
 
-        self.layers = nn.ModuleList(
-            [Block(model_args) for _ in range(model_args.num_hidden_layers)]
-        )
+        self.layers = nn.ModuleList([Block(config) for _ in range(config.num_hidden_layers)])
 
-        self.norm = nn.LayerNorm(model_args.hidden_size)
-        self.vocab_proj = nn.Linear(model_args.hidden_size, model_args.vocab_size, bias=False)
+        self.norm = nn.LayerNorm(config.hidden_size)
+        self.vocab_proj = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
+        # Gemma always ties the embedding to the output projection.
         self.token_emb.weight = self.vocab_proj.weight
 
-        self.cos, self.sin = precompute_freqs_cis(
-            model_args.hidden_size // model_args.num_attention_heads,
-            model_args.max_sequence_length * 2,
+        cos, sin = precompute_freqs_cis(
+            config.hidden_size // config.num_attention_heads,
+            config.max_sequence_length * 2,
         )
+        # Buffers rather than plain attributes, so .to(device) moves them.
+        self.register_buffer("freq_cos", cos, persistent=False)
+        self.register_buffer("freq_sin", sin, persistent=False)
 
-        if not hasattr(torch.nn.functional, "scaled_dot_product_attention"):
-            print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
         mask = torch.full(
-            (1, 1, model_args.max_sequence_length, model_args.max_sequence_length),
+            (1, 1, config.max_sequence_length, config.max_sequence_length),
             float("-inf"),
         )
-        mask = torch.triu(mask, diagonal=1)
-        self.register_buffer("mask", mask)
+        self.register_buffer("mask", torch.triu(mask, diagonal=1), persistent=False)
 
-    def forward(self, x: torch.Tensor):
-        batch, seqlen = x.shape
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 2:
+            raise ValueError("input token IDs must have shape (batch, sequence)")
+        seq_len = x.size(1)
+        if seq_len > self.config.max_sequence_length:
+            raise ValueError("input exceeds max_sequence_length")
+
         x = self.token_emb(x)
-
-        device = self.token_emb.weight.device
-        freqs_cis = self.cos[:seqlen].to(device), self.sin[:seqlen].to(device)
+        freqs_cis = (self.freq_cos[:seq_len], self.freq_sin[:seq_len])
 
         for layer in self.layers:
             x = layer(x, freqs_cis, self.mask)
 
         x = self.norm(x)
-        x = self.vocab_proj(x)
-        return x
+        return self.vocab_proj(x)

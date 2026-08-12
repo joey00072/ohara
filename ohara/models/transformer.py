@@ -1,25 +1,28 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+"""A configurable llama-style transformer, wired up for the HF Hub.
+
+:class:`ModelingLM` wraps :class:`Transformer` with
+``PyTorchModelHubMixin``, so ``save_pretrained``/``push_to_hub``/
+``from_pretrained`` work out of the box. Experiment folders copy this file as
+their starting point.
+"""
+
+from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from huggingface_hub import PyTorchModelHubMixin
+
+from ohara.embeddings_pos.rotary import apply_rope, precompute_freqs_cis
 from ohara.modules.mlp import GLU, MLP
 from ohara.modules.norm import RMSNorm
 
-from ohara.embeddings_pos.rotary import precompute_freqs_cis
-from ohara.embeddings_pos.rotary import apply_rope
-
-from typing import Callable
-
-from huggingface_hub import PyTorchModelHubMixin
-
-from collections import OrderedDict
-
-import transformers
 
 @dataclass
-class Config(OrderedDict):
+class Config:
     vocab_size: int
     seq_len: int
 
@@ -171,7 +174,6 @@ class Transformer(nn.Module):
     def forward(self, x: torch.Tensor):
         batch, seqlen = x.shape
         x = self.token_emb(x)
-        device = self.token_emb.weight.device
         freqs_cis = self.freq_cos[:seqlen], self.freq_sin[:seqlen]
 
         for layer in self.layers:
@@ -191,45 +193,19 @@ class Transformer(nn.Module):
 
 
 class ModelingLM(nn.Module, PyTorchModelHubMixin):
-    def __init__(self, config: Config, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    """Hub-serializable wrapper around :class:`Transformer`.
+
+    ``save_pretrained``/``push_to_hub``/``from_pretrained`` come from
+    ``PyTorchModelHubMixin``, which stores :class:`Config` as ``config.json`` and
+    hands it back as a plain dict on load.
+    """
+
+    def __init__(self, config: Config | dict) -> None:
+        super().__init__()
+        if isinstance(config, dict):
+            config = Config(**config)
         self.config = config
-        self.model = Transformer(self.config)
+        self.model = Transformer(config)
 
     def forward(self, x: torch.Tensor):
         return self.model(x)
-    
-    @classmethod
-    def from_pretrained(cls, hf_name: str):
-        config = Config.from_pretrained(hf_name)
-        model = cls(config)
-        model.load_state_dict(torch.hub.load_state_dict_from_url(hf_name))
-        return model
-
-
-if __name__ == "__main__":
-    config = Config(
-        vocab_size=10,
-        seq_len=10,
-        d_model=128,
-        hidden_dim=128,
-        num_heads=4,
-        num_kv_heads=0,
-        num_layers=4,
-        dropout=0.2,
-        bias=False,
-        weight_tying=False,
-        activation="silu",
-        mlp="GLU",
-    )
-
-    model = ModelingLM(config).eval()
-    print(model)
-    hf_name = "joey00072/test_001"
-    model.push_to_hub(hf_name)
-    x = torch.arange(10).reshape(1, 10)
-    print(model(x).sum(dim=-1))
-    new_model = ModelingLM.from_pretrained(hf_name).eval()
-    print(new_model(x).sum(dim=-1))
-
-    # assert torch.isclose(model.model.vocab_proj.weight, new_model.model.vocab_proj.weight)

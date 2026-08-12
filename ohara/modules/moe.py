@@ -1,4 +1,3 @@
-from re import DEBUG
 import torch
 import torch.nn as nn
 
@@ -10,6 +9,7 @@ from ohara.modules.mlp import MLP_MAP, MLP
 # TODO: Write a more efficient implementation and more types or moe
 
 DEBUG = False
+
 
 class MoE(nn.Module):
     def __init__(
@@ -28,10 +28,8 @@ class MoE(nn.Module):
 
         mlp_block = MLP_MAP[mlp]  # SwiGLU is default
 
-        self.experts = nn.ModuleList([mlp_block(dim, hidden_dim) for i in range(num_experts)])
+        self.experts = nn.ModuleList([mlp_block(dim, hidden_dim) for _ in range(num_experts)])
         self.gate = nn.Linear(dim, num_experts, bias=False)
-
-
 
     def forward(self, x: torch.Tensor):
         batch_size, seq_len, dim = x.shape  # (batch_size, seq_len, dim)
@@ -77,7 +75,6 @@ class MoE(nn.Module):
         output = output.view(*expert_weights.shape, -1)
         expert_weights = expert_weights.unsqueeze(-1)
 
-        
         output = output * expert_weights
 
         # sum up experts outputs
@@ -103,37 +100,3 @@ class MoE(nn.Module):
         for expert in self.experts:
             if hasattr(expert, 'reset_parameters'):
                 expert.reset_parameters(init_std=init_std)
-                
-if __name__ == "__main__":
-    B, T, C = 8, 16, 32 
-
-    with torch.device("cuda"):
-        import torch.optim as optim
-        torch.set_float32_matmul_precision('high')
-        model = MoE(C, C)
-        model = torch.compile(model)
-        optimizer = optim.AdamW(model.parameters())
-
-        x = torch.randn(B, T, C)
-        y = torch.randn(B, T, C)
-
-        iters = 1000
-
-        DEBUG = True
-        model(x)
-        DEBUG = False
-
-        for _ in range(iters):
-            p = model(x)
-            loss = torch.nn.functional.mse_loss(p,y)
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-            # print(f"{loss.item()=}")
-
-        DEBUG = True
-        model(x)
-        DEBUG = False
-
-
-        print(y.shape)

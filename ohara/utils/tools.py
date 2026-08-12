@@ -83,17 +83,3 @@ class BetterCycle:
     def close(self) -> None:
         """Drop the active iterator so generators and workers can clean up."""
         self._iterator = None
-
-
-if __name__ == "__main__":
-    data = [0, 1, 2, 3]
-
-    cyc = BetterCycle(data)
-
-    for idx, item in enumerate(cyc):
-        print(f"{idx}: {item}")
-        if idx == 7:
-            break
-        seq_len = 7
-    # mask = build_mask(seq_len, sliding_window_attention=True, window_size=1)
-    # print(mask)

@@ -125,10 +125,3 @@ class Inference:
         if stream:
             print(f"\nTime: {end_time - start_time}s")
         return self.tokenizer.decode(generated.squeeze(0).tolist())
-
-
-if __name__ == "__main__":
-    raise SystemExit(
-        "This module exposes the `Inference` class. "
-        "See the training/example scripts for end-to-end usage."
-    )

@@ -5,7 +5,7 @@ from datasets import load_from_disk, load_dataset
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import IterableDataset, DataLoader, get_worker_info
+from torch.utils.data import IterableDataset, get_worker_info
 import torch.distributed as dist
 from pathlib import Path
 
@@ -315,16 +315,3 @@ class TinyShakespeareDataset(IterableDataset):
                 file.write(response.text)
         else:
             raise Exception(f"Failed to download data. Status code: {response.status_code}")
-
-
-if __name__ == "__main__":
-    tokenizer = _resolve_tokenizer("microsoft/phi-2")
-    dataset = PreTokenizedDataset(
-        dataset_name="roneneldan/TinyStories", tokenizer=tokenizer, cache_dir="hf_cache"
-    )
-    dataloder = DataLoader(dataset, batch_size=2)
-
-    for data, target in dataloder:
-        print(data.shape, target.shape)
-        exit(0)
-        # print(tokenizer.decode(data.tolist()))

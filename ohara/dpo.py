@@ -87,7 +87,7 @@ def ipo_loss_from_logps(
     return losses, rewards
 
 #######################################################################################################
-# https://arxiv.org/pdf/2305.18290 
+# https://arxiv.org/pdf/2305.18290
 # ... eqn 7
 # dpo_loss = - log( sigmoid( beta * (  log(pi_win/ref_win) - log(pi_lose /ref_lose)  ) ) )
 #
@@ -113,8 +113,8 @@ def ipo_loss_from_logps(
 
 def dpo_loss(
     pi_logps:Tensor,
-    ref_logps:Tensor, 
-    win_output_idxs:Tensor, 
+    ref_logps:Tensor,
+    win_output_idxs:Tensor,
     lose_output_idxs:Tensor,
     beta:float
     ) -> tuple[Tensor, Tensor]:
@@ -135,8 +135,8 @@ def dpo_loss(
 
 def cdpo_loss(
     pi_logps:Tensor,
-    ref_logps:Tensor, 
-    win_output_idxs:Tensor, 
+    ref_logps:Tensor,
+    win_output_idxs:Tensor,
     lose_output_idxs:Tensor,
     beta:float,
     label_smoothing=0.2,
@@ -158,8 +158,8 @@ def cdpo_loss(
 
 def ipo_loss(
     pi_logps:Tensor,
-    ref_logps:Tensor, 
-    win_output_idxs:Tensor, 
+    ref_logps:Tensor,
+    win_output_idxs:Tensor,
     lose_output_idxs:Tensor,
     beta:float
     ) -> tuple[Tensor, Tensor]:
