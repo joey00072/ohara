@@ -25,7 +25,6 @@ class RG_LRU(nn.Module):
         self.C = 8
         self.reset_parameters()
 
-
     def forward(self, x: Tensor, *args, **kwargs) -> Tensor:
         input_gate: torch.Tensor = self.input_proj(x)
         recurrence_gate: torch.Tensor = self.gate_proj(x)
@@ -74,8 +73,6 @@ class Hawk(nn.Module):
 
         self.reset_parameters()
 
-
-
     def forward(self, x: Tensor) -> Tensor:
         B, T, C = x.shape
         # So linear rnn + conv can gets you close to transformer
@@ -106,6 +103,7 @@ class Hawk(nn.Module):
             b=3 * init_std,
         )
         
+
 class Griffin(nn.Module):
     ...
     # TODO

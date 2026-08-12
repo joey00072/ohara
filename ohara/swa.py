@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 from torch import Tensor
-import time
 from torch.nn.attention import flex_attention as flex_attn_mod
 
 
@@ -78,21 +77,3 @@ def compare_swa_mask_vs_flex(
     )
     max_abs = (mask_out - flex_out).abs().max().item()
     return mask_out, flex_out, max_abs
-
-
-if __name__ == "__main__":
-    B, T, C = 5, 1000, 8
-
-    q = torch.rand(B, T, C)
-    k = torch.rand(B, T, C)
-    v = torch.rand(B, T, C)
-
-    window_size = 3
-
-    start = time.perf_counter()
-    mask_out, flex_out, max_abs = compare_swa_mask_vs_flex(
-        q, k, v, window_size=window_size
-    )
-    end = time.perf_counter()
-    print(f"compare_time:{(end-start)}")
-    print(f"max_abs:{max_abs}")

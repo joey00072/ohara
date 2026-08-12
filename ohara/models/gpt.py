@@ -1,70 +1,71 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from ohara.modules.mlp import MLP
+"""A minimal GPT: learned position embeddings, LayerNorm, causal attention.
 
+The feed-forward block is selectable, so this covers both the original GPT-2
+shape (``mlp="mlp"``, a GELU/SiLU MLP) and the SwiGLU variant (``mlp="swiglu"``).
+"""
+
+from __future__ import annotations
 
 import math
 from dataclasses import dataclass
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from ohara.modules.mlp import MLP_MAP
+
 
 @dataclass
 class Config:
-    vocab_size = 65
-    max_sequence_length = 64
-    hidden_size = 128
-    num_attention_heads = 4
-    num_hidden_layers = 4
-    dropout = 0.2
-    multiple_of = 4
-    bias = False
+    vocab_size: int = 65
+    max_sequence_length: int = 64
+    hidden_size: int = 128
+    num_attention_heads: int = 4
+    num_hidden_layers: int = 4
+    dropout: float = 0.2
+    multiple_of: int = 4
+    bias: bool = False
+    mlp: str = "mlp"  # any key of ohara.modules.mlp.MLP_MAP
 
 
 class Attention(nn.Module):
-    def __init__(self, model_args: Config):
+    def __init__(self, config: Config):
         super().__init__()
-        hidden_size = model_args.hidden_size
-        self.num_attention_heads = model_args.num_attention_heads
-        self.head_dim = model_args.hidden_size // model_args.num_attention_heads
+        hidden_size = config.hidden_size
+        self.num_attention_heads = config.num_attention_heads
+        self.head_dim = hidden_size // config.num_attention_heads
 
-        self.key = nn.Linear(hidden_size, hidden_size)
-        self.query = nn.Linear(hidden_size, hidden_size)
-        self.value = nn.Linear(hidden_size, hidden_size)
-        self.proj = nn.Linear(hidden_size, hidden_size)
+        self.key = nn.Linear(hidden_size, hidden_size, bias=config.bias)
+        self.query = nn.Linear(hidden_size, hidden_size, bias=config.bias)
+        self.value = nn.Linear(hidden_size, hidden_size, bias=config.bias)
+        self.proj = nn.Linear(hidden_size, hidden_size, bias=config.bias)
 
-        self.attn_dropout = nn.Dropout(model_args.dropout)
-        self.res_dropout = nn.Dropout(model_args.dropout)
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.res_dropout = nn.Dropout(config.dropout)
 
-        self.flash_attn = hasattr(torch.nn.functional, "scaled_dot_product_attention")
+        self.flash_attn = hasattr(F, "scaled_dot_product_attention")
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         batch, seq_len, hidden_size = x.shape
-
-        k: torch.Tensor  # type hint for lsp
-        q: torch.Tensor  # ignore
-        v: torch.Tensor
 
         k = self.key(x)
         q = self.query(x)
         v = self.value(x)
 
-        k = k.view(
-            seq_len, self.num_attention_heads, self.head_dim
-        )  # shape = (B, seq_len, num_attention_heads, head_dim)
-        q = q.view(seq_len, self.num_attention_heads, self.head_dim)
-        v = v.view(seq_len, self.num_attention_heads, self.head_dim)
-
-        k = k.transpose(0, 1)  # shape = (B, num_heads, seq_len, head_dim)
-        q = q.transpose(0, 1)
-        v = v.transpose(0, 1)
+        # (B, T, C) -> (B, num_heads, T, head_dim)
+        shape = (batch, seq_len, self.num_attention_heads, self.head_dim)
+        k = k.view(shape).transpose(1, 2)
+        q = q.view(shape).transpose(1, 2)
+        v = v.view(shape).transpose(1, 2)
 
         if self.flash_attn:
-            output = torch.nn.functional.scaled_dot_product_attention(
+            output = F.scaled_dot_product_attention(
                 q,
                 k,
-                v,  # order impotent
+                v,
                 attn_mask=None,
-                dropout_p=self.dropout if self.training else 0.0,
+                dropout_p=self.attn_dropout.p if self.training else 0.0,
                 is_causal=True,
             )
         else:
@@ -72,69 +73,73 @@ class Attention(nn.Module):
             attn_mtx = attn_mtx + mask[:, :, :seq_len, :seq_len]
             attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(k)
             attn_mtx = self.attn_dropout(attn_mtx)
+            output = torch.matmul(attn_mtx, v)  # (B, num_heads, T, head_dim)
 
-            output = torch.matmul(attn_mtx, v)  # (batch, n_head, seq_len, head_dim)
-
-        # restore time as batch dimension and concat heads
+        # Concatenate the heads back into the residual stream.
         output = output.transpose(1, 2).contiguous().view(batch, seq_len, hidden_size)
-
-        # final projection into the residual stream
         output = self.proj(output)
-        output = self.res_dropout(output)
-        return output
+        return self.res_dropout(output)
 
 
 class Block(nn.Module):
-    def __init__(self, model_args: Config):
+    def __init__(self, config: Config):
         super().__init__()
 
-        self.attn = Attention(model_args)
-        self.ff = MLP(
-            dim=model_args.hidden_size,
-            multiple_of=model_args.multiple_of,
-            dropout=model_args.dropout,
+        self.attn = Attention(config)
+        self.ff = MLP_MAP[config.mlp](
+            dim=config.hidden_size,
+            multiple_of=config.multiple_of,
+            dropout=config.dropout,
+            bias=config.bias,
         )
 
-        self.norm1 = nn.LayerNorm(model_args.hidden_size)
-        self.norm2 = nn.LayerNorm(model_args.hidden_size)
+        self.norm1 = nn.LayerNorm(config.hidden_size)
+        self.norm2 = nn.LayerNorm(config.hidden_size)
 
-    def forward(self, x, mask):
+    def forward(self, x, mask=None):
         x = x + self.attn(self.norm1(x), mask)
         x = x + self.ff(self.norm2(x))
         return x
 
 
 class GPT(nn.Module):
-    def __init__(self, model_args: Config, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        if config.hidden_size % config.num_attention_heads != 0:
+            raise ValueError("hidden_size must be divisible by num_attention_heads")
+        if config.mlp not in MLP_MAP:
+            raise ValueError(f"mlp must be one of {sorted(MLP_MAP)}, got {config.mlp!r}")
+        self.config = config
 
-        self.word_emb = nn.Embedding(model_args.vocab_size, model_args.hidden_size)
-        self.pos_emb = nn.Embedding(model_args.max_sequence_length, model_args.hidden_size)
+        self.word_emb = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.pos_emb = nn.Embedding(config.max_sequence_length, config.hidden_size)
 
-        self.layers = nn.ModuleList(
-            [Block(model_args) for _ in range(model_args.num_hidden_layers)]
-        )
+        self.layers = nn.ModuleList([Block(config) for _ in range(config.num_hidden_layers)])
 
-        self.norm = nn.LayerNorm(model_args.hidden_size)
-        self.vocab_proj = nn.Linear(model_args.hidden_size, model_args.vocab_size, bias=False)
+        self.norm = nn.LayerNorm(config.hidden_size)
+        self.vocab_proj = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-        if not hasattr(torch.nn.functional, "scaled_dot_product_attention"):
+        if hasattr(F, "scaled_dot_product_attention"):
+            self.mask = None
+        else:
             print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
             mask = torch.full(
-                (1, 1, model_args.max_sequence_length, model_args.max_sequence_length),
-                float("-inf"),
+                (1, 1, config.max_sequence_length, config.max_sequence_length), float("-inf")
             )
-            mask = torch.triu(mask, diagonal=1)
-            self.register_buffer("mask", mask)
-        else:
-            self.mask = None
+            self.register_buffer("mask", torch.triu(mask, diagonal=1), persistent=False)
 
-    def forward(self, x):
-        x = self.word_emb(x) + self.pos_emb(x)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 2:
+            raise ValueError("input token IDs must have shape (batch, sequence)")
+        seq_len = x.size(1)
+        if seq_len > self.config.max_sequence_length:
+            raise ValueError("input exceeds max_sequence_length")
+
+        positions = torch.arange(seq_len, device=x.device)
+        x = self.word_emb(x) + self.pos_emb(positions)
 
         for layer in self.layers:
             x = layer(x, self.mask)
 
         x = self.norm(x)
-        x = self.vocab_proj(x)
-        return x
+        return self.vocab_proj(x)

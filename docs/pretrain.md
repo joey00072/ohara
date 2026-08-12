@@ -1,51 +1,88 @@
+# Pretraining
 
-first you need to download dataset and pretokenize it for fater training
-<br>
+Two ways to feed the trainer:
 
+- **stream** straight from Hugging Face — nothing to prepare, good for getting going.
+- **pretokenize** to disk first — faster per step, worth it once you train the same corpus twice.
 
+## Train (streaming)
 
-## download and pretokenize
-```python
-dataset="roneneldan/TinyStories"
-tokenizer="microsoft/phi-2"
-
-print(f"Pretokenizing {dataset=} with {tokenizer=}")
-
-preprocessor = DatasetPreprocessor(
-    dataset_name=dataset,
-    tokenizer_name=tokenizer,
-    splits=["train", "validation"],
-)
-
-preprocessor.process_and_save()
-
-```
-In example I Do this for tinystoires,<br> 
-just change dataset and tokenizer if you want it will download it from hugging face and start pretokenize it.<br>
-Depending on dataset it will take a while.<br>
-```bash
-python examples/prepare-dataset.py
-```
-
-## train 
-### script
-This contain simple traning code,
-Change the hyper paraqmeters in train.py to fit it on your gpu,
-to `wandb login` for cli,
+`examples/train_llama_engine.py` is the current entrypoint. It tokenizes on the fly, so you can
+start immediately:
 
 ```bash
-python examples/train_llama.py
+uv run python examples/train_llama_engine.py
 ```
 
-### lighting fabric (recommanded)
-recommanded because  <br>
-This uses lighting fabric to train, fabric give me some quality extras whichout too much code changes,<br>
-but also I plan to add more things in the future. eg multi-gpu traning, fp16 training, etc. (shoube easy bcs fabric)
+Everything is a flag; `--help` lists them all. A few worth knowing:
+
 ```bash
-python examples/train_llama_fabric.py 
+uv run python examples/train_llama_engine.py \
+    --dataset roneneldan/TinyStories \
+    --tokenizer EleutherAI/gpt-neo-125m \
+    --hidden-size 512 --num-layers 8 --num-heads 8 \
+    --seq-len 512 --batch-size 16 --grad-accum-steps 4 \
+    --max-iters 20000 \
+    --optimizer muon --lr-schedule wsd \
+    --precision bf16_mixed
 ```
 
-You can check the training in wandb it something like this. this will take a while so grab a cup of coffee.
+The script drives [`ohara.runtime.OharaEngine`](../ohara/runtime/engine.py) for device placement,
+mixed precision, DDP and tensor parallel, and [`ohara.trainer.Trainer`](../ohara/trainer.py) for the
+loop itself (periodic eval, checkpoints, tok/s, MFU, bits-per-byte).
+
+Multi-GPU is torchrun plus the same script:
+
+```bash
+# data parallel across 2 GPUs
+uv run torchrun --nproc-per-node 2 examples/train_llama_engine.py
+
+# tensor parallel instead (--tp also reads the OHARA_TP env var)
+uv run torchrun --nproc-per-node 2 examples/train_llama_engine.py --tp 2
+```
+
+Interrupted run? `--resume` picks the checkpoint back up, including the position in the data stream:
+
+```bash
+uv run python examples/train_llama_engine.py --resume --num-workers 0
+```
+
+To watch it in wandb/tensorboard, `wandb login` first. It looks something like this:
 
 ![train](./src/image.png)
 
+## Pretokenize first (optional)
+
+Download and tokenize a dataset into `./data`:
+
+```bash
+uv run python examples/prepare_dataset.py tinystories
+```
+
+`tinystories`, `minipile`, `fineweb-edu` and `openhermes` are wired up; `--help` shows the flags
+(`--tokenizer` to override, `--push --hf-username you` to upload the result). Depending on the
+dataset this takes a while.
+
+Under the hood that is [`ohara.pretokenize.DatasetPreprocessor`](../ohara/pretokenize.py), which you
+can also call directly for a corpus that is not in the list:
+
+```python
+from ohara.pretokenize import DatasetPreprocessor
+
+DatasetPreprocessor(
+    dataset_name="roneneldan/TinyStories",
+    tokenizer_name="microsoft/phi-2",
+    splits=["train", "validation"],
+).process_and_save()
+```
+
+The result is read back by [`ohara.dataset.PreTokenizedDataset`](../ohara/dataset.py).
+
+## Scaling sweeps
+
+For iso-FLOP sweeps rather than a single run, `examples/scaling_laws.py` plans the grid, shells out
+to the training script for each point, and fits the curves:
+
+```bash
+uv run python examples/scaling_laws.py --help
+```

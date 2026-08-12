@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import torch.nn as nn
 import torch.nn.functional as F
-from collections.abc import Callable
-from ohara.modules.activations import ACT2FN
+
+# Re-exported: several experiments import ACT2FN from this module.
+from ohara.modules.activations import ACT2FN  # noqa: F401
+
 
 class MLP(nn.Module):
     def __init__(
