@@ -26,7 +26,3 @@ def get_alibi_mask(number_of_heads, max_seq_len):
     matrix = matrix.expand(nh, -1, -1) * -1
     m = 1 / 2 ** (torch.arange(1, nh + 1) / (nh / 8))
     return matrix * m.view(nh, 1, 1)
-
-
-if __name__ == "__main__":
-    print(get_alibi_mask(16, 5))

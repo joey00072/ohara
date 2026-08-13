@@ -1,40 +1,54 @@
+# Python
 __pycache__/
-.venv
-.env
-.ruff_cache/
-dataset_cache/
-data/
-wandb/
-build/
-dep
+*.egg
+*.egg-info/
+.eggs/
+.installed.cfg
 .Python
+MANIFEST
 build/
 develop-eggs/
 dist/
 downloads/
 eggs/
-.eggs/
 lib/
 lib64/
 parts/
+pip-wheel-metadata/
 sdist/
+share/python-wheels/
 var/
 wheels/
-pip-wheel-metadata/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+
+# Environments and tooling caches
+.env
+.ruff_cache/
+.venv
 .vscode/
-runs/
-logs/
+
+# OS junk
+.DS_Store
+
+# Datasets and tokenizer caches
+data/
+dataset_cache/
 hf_cache/
-*/media/
-logs*/
-**/logs*/
-model.pt
+# ...but ohara/utils/data holds packaged data, not downloads
+!ohara/utils/data/
+!ohara/utils/data/*.txt
+
+# Run artifacts: checkpoints, logs, metrics
 ckpt/
+logs/
+logs*/
+model.pt
+runs/
 scaling_results/
+wandb/
+**/logs*/
+*/media/
+
+# Local scratch space
 /dev
+dep
 ref

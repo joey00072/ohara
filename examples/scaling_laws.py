@@ -6,6 +6,7 @@ import math
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from ohara.scaling import (
@@ -94,6 +95,27 @@ def parse_args() -> argparse.Namespace:
     run_parser.add_argument("--text-column", default="text")
     run_parser.add_argument("--train-split", default="train")
     run_parser.add_argument("--validation-split", default="validation")
+    run_parser.add_argument(
+        "--optimizer",
+        choices=("muon", "muonh"),
+        default="muon",
+        help=(
+            "muon: nanochat-style Muon+AdamW. muonh: the hyperspherical (constant-norm) "
+            "MuonH+AdamH recipe, whose single relative learning rate the trainer derives "
+            "as sqrt(matrix_lr * weight_decay) from the same planned nanochat recipe"
+        ),
+    )
+    run_parser.add_argument(
+        "--hypersphere-learning-rate",
+        type=float,
+        default=None,
+        help=(
+            "fixed relative step size for --optimizer muonh, held constant across the "
+            "whole depth grid. Omit to let the trainer derive sqrt(matrix_lr * weight_decay) "
+            "per run instead, which ports an additive recipe but does not hold the "
+            "hyperspherical rate constant as the paper's transferability claim expects"
+        ),
+    )
     run_parser.add_argument("--eval-batches", type=int, default=20)
     run_parser.add_argument(
         "--warmup-steps",
@@ -246,7 +268,7 @@ def _training_command(
             "--save-every",
             "0",
             "--optimizer",
-            "muon",
+            args.optimizer,
             "--matrix-learning-rate",
             str(plan.matrix_learning_rate),
             "--embedding-learning-rate",
@@ -303,6 +325,10 @@ def _training_command(
         command.extend(["--dataset-config", args.dataset_config])
     if args.tokenizer_local_files_only:
         command.append("--tokenizer-local-files-only")
+    if args.optimizer == "muonh" and args.hypersphere_learning_rate is not None:
+        command.extend(
+            ["--hypersphere-learning-rate", str(args.hypersphere_learning_rate)]
+        )
     return command
 
 
@@ -310,7 +336,8 @@ def _experiment_manifest(args: argparse.Namespace) -> dict[str, object]:
     """Return fields that must remain fixed within one fitted scaling sweep."""
     return {
         "recipe_version": SCALING_RECIPE_VERSION,
-        "optimizer": "muon_adamw",
+        "optimizer": "muon_adamw" if args.optimizer == "muon" else "muonh_adamh",
+        "hypersphere_learning_rate": args.hypersphere_learning_rate,
         "initialization": "nanochat",
         "dataset": args.dataset,
         "dataset_config": args.dataset_config,
@@ -419,6 +446,21 @@ def _check_corpus_epoch_budget(args: argparse.Namespace, plans: list[ScalingPlan
         )
 
 
+def _numeric_result_row(result: Mapping[str, object]) -> dict[str, object]:
+    """Drop non-numeric result fields before they reach the results CSV.
+
+    load_result_csv coerces every column to float, so a descriptive string
+    field in the training result (such as the optimizer name) would make the
+    whole sweep unreadable at analyze time. The optimizer is already recorded
+    numerically alongside it, and authoritatively in experiment.json.
+    """
+    return {
+        key: value
+        for key, value in result.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+
+
 def run_sweep(args: argparse.Namespace, plans: list[ScalingPlan]) -> None:
     results_dir = Path(args.results_dir)
     results_file = results_dir.joinpath("results.csv")
@@ -440,10 +482,12 @@ def run_sweep(args: argparse.Namespace, plans: list[ScalingPlan]) -> None:
     completed = set()
     if results_file.exists():
         existing_rows = load_result_csv(results_file)
-        if any(row.get("optimizer_muon", 0.0) != 1.0 for row in existing_rows):
+        expected_muon_flag = float(args.optimizer == "muon")
+        if any(row.get("optimizer_muon", 0.0) != expected_muon_flag for row in existing_rows):
             raise ValueError(
-                f"{results_file} contains pre-Muon results; use a fresh --results-dir "
-                "rather than mixing optimizer recipes in one scaling fit"
+                f"{results_file} was produced with a different optimizer recipe than "
+                f"--optimizer={args.optimizer}; use a fresh --results-dir rather than "
+                "mixing optimizer recipes in one scaling fit"
             )
         completed = {
             (float(row["flops_budget"]), int(row["depth"])) for row in existing_rows
@@ -467,8 +511,16 @@ def run_sweep(args: argparse.Namespace, plans: list[ScalingPlan]) -> None:
             raise RuntimeError("trained model does not match the planned parameter count")
         if int(result["total_batch_size"]) != plan.total_batch_size:
             raise RuntimeError("training result does not match planned total_batch_size")
-        if result.get("optimizer_muon") != 1.0 or result.get("initialization_nanochat") != 1.0:
-            raise RuntimeError("training result did not use the planned Muon/nanochat recipe")
+        recorded_optimizer = result.get("optimizer")
+        if recorded_optimizer is not None and recorded_optimizer != args.optimizer:
+            raise RuntimeError(
+                f"training result used optimizer {recorded_optimizer!r}, not the planned "
+                f"{args.optimizer!r}"
+            )
+        if result.get("optimizer_muon") != float(args.optimizer == "muon"):
+            raise RuntimeError("training result did not use the planned optimizer recipe")
+        if result.get("initialization_nanochat") != 1.0:
+            raise RuntimeError("training result did not use the planned nanochat initialization")
         for field in (
             "matrix_learning_rate",
             "embedding_learning_rate",
@@ -479,7 +531,7 @@ def run_sweep(args: argparse.Namespace, plans: list[ScalingPlan]) -> None:
         ):
             if not math.isclose(float(result[field]), float(getattr(plan, field))):
                 raise RuntimeError(f"training result does not match planned {field}")
-        append_result_csv(results_file, result)
+        append_result_csv(results_file, _numeric_result_row(result))
         completed.add(key)
         print(f"recorded {results_file}: budget={plan.flops_budget:.6g} depth={plan.depth}")
 

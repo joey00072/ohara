@@ -1,53 +1,63 @@
+"""Download microsoft/phi-2 and generate from it in fp16.
+
+    uv run python examples/phi_inference.py --prompt "Once upon a time"
+    uv run python examples/phi_inference.py --interactive
+"""
+
+from __future__ import annotations
+
+import argparse
 import time
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-
-from transformers import AutoTokenizer, PreTrainedModel
-from typing import Optional, Union
-
-
-# import pretty_errors
-
 from transformers import AutoTokenizer
-from ohara.models.phi import Phi, Block
-from ohara.utils import auto_accelerator
+
 from ohara.inference import Inference
+from ohara.models.phi import Phi
+from ohara.utils import auto_accelerator
 
-kv = True
-device = auto_accelerator()
 
-model_name = "microsoft/phi-2"
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--model", default="microsoft/phi-2")
+    parser.add_argument("--prompt", default="Once upon a time")
+    parser.add_argument("--max-new-tokens", type=int, default=100)
+    parser.add_argument("--temperature", type=float, default=1.1)
+    parser.add_argument("--top-p", type=float, default=0.2)
+    parser.add_argument("--no-kv-cache", action="store_true", help="disable the KV cache")
+    parser.add_argument("--interactive", action="store_true", help="keep prompting for input")
+    return parser.parse_args()
 
-tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-model: Phi = Phi.from_pretrained(model_name).to(device).eval()
+def main() -> None:
+    args = parse_args()
+    device = auto_accelerator()
 
-print(kv)
-kv_cache = model.build_kv_cache() if kv == True else None
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    # Downloads the checkpoint from the Hub and loads it into ohara's own Phi.
+    model = Phi.from_pretrained(args.model).to(device).eval()
 
-model = model.to(device)
+    engine = Inference(model, tokenizer, device, use_kv_cache=not args.no_kv_cache)
 
-# model = torch.compile(model)
+    while True:
+        prompt = input("Prompt: ") if args.interactive else args.prompt
+        if args.interactive and prompt.strip() in ("", "exit"):
+            break
 
-print("=" * 100)
-print(model)
-print("=" * 100)
+        start = time.perf_counter()
+        print(
+            engine.generate(
+                prompt,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                max_new_tokens=args.max_new_tokens,
+                stream=False,
+            )
+        )
+        print(f"Time taken: {time.perf_counter() - start:.2f}s")
 
-max_new_tokens = 100
+        if not args.interactive:
+            break
 
-infer = Inference(model, tokenizer, device)
 
-while True:
-    prompt = "Once upon a time" #+ input("Prompt: ")
-    if prompt == "":
-        continue
-    if prompt == "exit":
-        break
-    start = time.perf_counter()
-    print(infer.generate(prompt, temperature=1.1, top_p=0.2, stream=False, max_new_tokens=max_new_tokens))
-    end = time.perf_counter()
-    print(f"Time taken: {end - start} seconds")
-    # exit()
+if __name__ == "__main__":
+    main()

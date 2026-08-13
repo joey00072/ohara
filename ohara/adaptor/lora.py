@@ -108,20 +108,3 @@ def merge_lora(model: nn.Module, target_layer: list[str] | None = None):
         if isinstance(module, LoRALinear):
             module.merge()
     return model
-
-
-if __name__ == "__main__":
-
-    class Network(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.linear = nn.Linear(2, 2)
-            self.layers = nn.ModuleList([nn.Linear(2, 2) for _ in range(3)])
-            self.seq = nn.Sequential(nn.Linear(2, 2), nn.Linear(2, 2))
-
-        def forward(self, x):
-            return self.linear(x)
-
-    model = Network()
-    model = replace_with_lora(model)
-    print(model)
