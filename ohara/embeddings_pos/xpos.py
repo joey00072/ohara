@@ -35,13 +35,3 @@ class XPos(nn.Module):
             retention_rel_pos = ((cos, sin), mask)
 
         return retention_rel_pos
-
-
-if __name__ == "__main__":
-    xpos = XPos(64, 4)
-    ((cos, sin), decay) = xpos.forward(8)
-    print(decay)
-
-    for i in range(1, 9):
-        ((sin, cos), decay) = xpos.forward(8, recurrent=True)
-        print(i, decay)

@@ -14,7 +14,7 @@ class DatasetPreprocessor:
         self,
         dataset_name: str = "JeanKaddour/minipile",
         tokenizer_name: str = "NeelNanda/gpt-neox-tokenizer-digits",
-        name:str=None,
+        name: str | None = None,
         min_length: int = 512,
         max_length: int = 2049,
         splits: list[str] | None = None,
@@ -46,9 +46,8 @@ class DatasetPreprocessor:
 
         self.num_proc = num_proc if num_proc else max(os.cpu_count() - 3, 1)
 
-    def load_and_preprocess_dataset(self, split, remove_columns=None):
-        if remove_columns is None:
-            remove_columns = ["text"]
+    def load_and_preprocess_dataset(self, split, remove_columns=("text",)):
+        """Tokenize ``split`` and drop short rows. Pass ``()`` to keep all columns."""
         dataset = load_dataset(
             self.dataset_name,
             split=split,
@@ -62,7 +61,7 @@ class DatasetPreprocessor:
             dataset.map(
                 self.tokenize_fn,
                 batched=True,
-                remove_columns=remove_columns,
+                remove_columns=list(remove_columns),
                 num_proc=self.num_proc,
             )
             .shuffle(seed=31415)
@@ -94,14 +93,11 @@ class DatasetPreprocessor:
         fpath = str(
             f"{hf_username}/pretokenized__{self.dataset_name.replace('/','_')}__{self.tokenizer.name_or_path.replace('/','__')}"
         )
-        # fpath = str(self.output_dir.joinpath(fpath).joinpath(split))
         dataset.push_to_hub(fpath, split=split)
 
-        print(f"Dataset Pused to hf {fpath}")
+        print(f"Dataset pushed to hf {fpath}")
 
-    def process_and_save(self, remove_columns=None, push=False, hf_username=None):
-        if remove_columns is None:
-            remove_columns = ["text"]
+    def process_and_save(self, remove_columns=("text",), push=False, hf_username=None):
         for split in self.splits:
             tokenized_dataset = self.load_and_preprocess_dataset(
                 split, remove_columns=remove_columns
@@ -114,9 +110,8 @@ class DatasetPreprocessor:
 
 
 class OpenHermesDatasetPreprocessor(DatasetPreprocessor):
-    def load_and_preprocess_dataset(self, split, remove_columns=None):
-        if remove_columns is None:
-            remove_columns = ["text"]
+    def load_and_preprocess_dataset(self, split, remove_columns=("text",)):
+        # The chat columns are consumed by the chat template, so nothing is dropped.
         dataset = load_dataset(
             self.dataset_name,
             split=split,
@@ -148,19 +143,3 @@ class OpenHermesDatasetPreprocessor(DatasetPreprocessor):
 
     def filter_fn(self, x):
         return len(x["input_ids"]) >= self.min_length and len(x["input_ids"]) <= self.max_length
-
-
-if __name__ == "__main__":
-    # Example usage
-    # preprocessor = DatasetPreprocessor(splits=["test"])
-    # preprocessor.process_and_save()
-
-    preprocessor = OpenHermesDatasetPreprocessor(
-        dataset_name="teknium/OpenHermes-2.5",
-        tokenizer_name="philschmid/gemma-tokenizer-chatml",
-        revision="f7e624a58ce3642ec50483cb6039468ee8c3c464",
-        splits=["train"],
-        num_proc=1,
-    )
-
-    preprocessor.process_and_save(remove_columns=None)

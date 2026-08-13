@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from ohara.dataset import StreamingTextDataset
 from ohara.lr_scheduler import CosineScheduler
 from ohara.models.llama import Config, Llama
-from ohara.optimizer import build_adamw, build_muon_adamw
+from ohara.optimizer import build_adamh, build_adamw, build_muon_adamw, build_muonh_adamh
 from ohara.scaling import (
     CosineWeightDecayScheduler,
     MuonMomentumScheduler,
@@ -51,12 +51,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-every", type=int, default=1_000)
     parser.add_argument("--checkpoint-path", default="./ckpt/model.pt")
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--optimizer", choices=("adamw", "muon"), default="adamw")
+    parser.add_argument(
+        "--optimizer",
+        choices=("adamw", "muon", "adamh", "muonh"),
+        default="adamw",
+        help="adamh/muonh are the constant-norm variants; they ignore --weight-decay "
+        "and read --hypersphere-learning-rate instead",
+    )
     parser.add_argument("--learning-rate", type=float, default=5e-4)
     parser.add_argument("--matrix-learning-rate", type=float, default=0.02)
     parser.add_argument("--embedding-learning-rate", type=float, default=0.3)
     parser.add_argument("--unembedding-learning-rate", type=float, default=0.008)
     parser.add_argument("--scalar-learning-rate", type=float, default=0.5)
+    parser.add_argument(
+        "--hypersphere-learning-rate",
+        type=float,
+        default=None,
+        help="relative step size for adamh/muonh; defaults to sqrt(lr * weight_decay) "
+        "of the matching additive recipe",
+    )
     parser.add_argument("--min-lr", type=float, default=5e-5)
     parser.add_argument("--weight-decay", type=float, default=0.1)
     parser.add_argument("--muon-momentum-warmup-iters", type=int, default=400)
@@ -166,9 +179,10 @@ def run() -> None:
     raw_model = Llama(model_cfg)
     model = raw_model
     model = engine.prepare(model)
+    if args.optimizer in ("muon", "muonh") and args.tp != 1:
+        raise ValueError("the hybrid Muon optimizers currently require --tp 1")
+
     if args.optimizer == "muon":
-        if args.tp != 1:
-            raise ValueError("the hybrid Muon optimizer currently requires --tp 1")
         optimizer = build_muon_adamw(
             model,
             matrix_learning_rate=args.matrix_learning_rate,
@@ -178,6 +192,28 @@ def run() -> None:
             weight_decay=args.weight_decay,
         )
         scheduler_learning_rate = args.matrix_learning_rate
+    elif args.optimizer in ("adamh", "muonh"):
+        # On a sphere the learning rate is a relative step size, and weight decay
+        # has no first-order effect. sqrt(lr * wd) carries an additive recipe over.
+        additive_lr = (
+            args.matrix_learning_rate if args.optimizer == "muonh" else args.learning_rate
+        )
+        scheduler_learning_rate = args.hypersphere_learning_rate
+        if scheduler_learning_rate is None:
+            scheduler_learning_rate = math.sqrt(additive_lr * args.weight_decay)
+            if scheduler_learning_rate <= 0:
+                raise ValueError(
+                    "cannot derive a hyperspherical learning rate from --weight-decay 0; "
+                    "pass --hypersphere-learning-rate explicitly"
+                )
+        builder = build_muonh_adamh if args.optimizer == "muonh" else build_adamh
+        optimizer = builder(
+            model,
+            learning_rate=scheduler_learning_rate,
+            adam_learning_rate=args.embedding_learning_rate
+            if args.optimizer == "muonh"
+            else args.learning_rate,
+        )
     else:
         optimizer = build_adamw(
             model,
@@ -387,6 +423,7 @@ def run() -> None:
             "tokens_trained": tokens_trained,
             "actual_training_flops": flops_per_token * tokens_trained,
             "tokens_per_effective_param": tokens_trained / counts["effective"],
+            "optimizer": args.optimizer,
             "optimizer_muon": float(args.optimizer == "muon"),
             "initialization_nanochat": float(args.init_style == "nanochat"),
             "learning_rate": scheduler_learning_rate,

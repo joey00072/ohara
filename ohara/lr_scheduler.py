@@ -50,8 +50,3 @@ class CosineScheduler:
 # TODO: jagged cosine learning rate for relora
 # I belive parameter efficiency pretraning is possibe only one way to find out
 # relora would be good start
-
-if __name__ == "__main__":
-    scheduler = CosineScheduler(learning_rate=0.1, min_lr=0.001, warmup_iters=5, max_iters=100)
-
-    print(scheduler)

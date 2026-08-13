@@ -4,11 +4,11 @@ import torch.nn.functional as F
 
 import math
 from dataclasses import dataclass
-from ..modules.mlp import SwiGLU
-from ..modules.norm import RMSNorm
 
-from ohara.embeddings_pos.rotary import precompute_freqs_cis
-from ohara.embeddings_pos.rotary import apply_rope
+from ohara.embeddings_pos.rotary import apply_rope, precompute_freqs_cis
+from ohara.modules.kv_cache import KVCache
+from ohara.modules.mlp import SwiGLU
+from ohara.modules.norm import RMSNorm
 
 
 @dataclass
@@ -26,41 +26,6 @@ class Config:
     weight_tying: bool = False
     rope_theta: float = 100000
     init_style: str = "standard"
-
-
-class KVCache:
-    def __init__(self, shape, max_seq_length, idx: int | None = None, device=None, dtype=None):
-        self.idx = idx
-        self.key: torch.Tensor = torch.zeros(shape, device=device, dtype=dtype)
-        self.value: torch.Tensor = torch.zeros(shape, device=device, dtype=dtype)
-        self.max_seq_length = max_seq_length
-        self.length = 0
-        self.batch_size: int | None = None
-
-    def forward(
-        self, keys: torch.Tensor, values: torch.Tensor, start_pos: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        bsz, sequence_length, _, _ = keys.shape
-        if values.shape != keys.shape:
-            raise ValueError("KV cache keys and values must have matching shapes")
-        if bsz > self.key.size(0):
-            raise ValueError("KV cache batch size is smaller than the input batch")
-        if self.batch_size is not None and bsz != self.batch_size:
-            raise ValueError("KV cache batch size cannot change during decoding")
-        if start_pos != self.length:
-            raise ValueError(
-                f"KV cache writes must be sequential: expected position {self.length}, "
-                f"got {start_pos}"
-            )
-        if start_pos < 0 or start_pos + sequence_length > self.max_seq_length:
-            raise ValueError("KV cache position exceeds max_sequence_length")
-        self.key[:bsz, start_pos : start_pos + sequence_length] = keys
-        self.value[:bsz, start_pos : start_pos + sequence_length] = values
-        self.length = start_pos + sequence_length
-        self.batch_size = bsz
-        keys = self.key[:bsz, : start_pos + sequence_length]
-        values = self.value[:bsz, : start_pos + sequence_length]
-        return keys, values
 
 
 class Attention(nn.Module):
@@ -406,7 +371,3 @@ class Llama(nn.Module):
             "Llama.from_pretrained is not implemented yet. "
             "Use a model-specific loader or initialize `Llama(Config(...))` directly."
         )
-
-
-# Backward compatibility for older scripts in this repo.
-LLAMA = Llama

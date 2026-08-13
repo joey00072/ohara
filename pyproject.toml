@@ -39,6 +39,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["ohara*"]
 
+[tool.setuptools.package-data]
+"ohara.utils" = ["data/*.txt"]
+
 [tool.uv]
 required-version = ">=0.8.0"
 constraint-dependencies = [
@@ -46,19 +49,17 @@ constraint-dependencies = [
     "torch==2.10.0",
 ]
 
-[tool.black]
-line-length = 100
-target-version = ['py311']
-
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# experiments/ holds frozen per-paper research snapshots. They are meant to be
+# read and copied as-is, so they are not held to the library's lint rules.
+extend-exclude = ["experiments"]
 
 [tool.ruff.lint]
 preview = true
 select = [
     "E", "F", "W", "B", "C4", "PIE", "NPY", "PLE",
-    "B035",
     "DTZ003", "DTZ004",
     "G010",
     "PLW0120", "PLW0129", "PLW0711", "PLW2101",

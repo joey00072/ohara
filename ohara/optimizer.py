@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -52,6 +53,64 @@ def build_adamw(
     )
 
 
+def _hypersphere_update_(
+    params: list[Tensor],
+    directions: list[Tensor],
+    learning_rate: float,
+    *,
+    eps: float = 1e-10,
+) -> None:
+    """Take a constant-norm ("hyperspherical") step, in place, over a whole group.
+
+    For each parameter and its update direction::
+
+        p' = p - lr * u * ||p|| / ||u||       # step size is relative to ||p||
+        p  = p' * ||p|| / ||p'||              # project back onto the sphere
+
+    The Frobenius norm of every parameter is therefore preserved exactly, which is
+    what makes weight decay unnecessary: it has no first-order effect once the
+    parameter is renormalized. Because the update is divided by ``||u||``, only the
+    *direction* of ``u`` matters -- any constant rescaling of it cancels.
+
+    Every quantity stays on device (no ``.item()``) and every operation is a
+    ``torch._foreach_*`` call, so one group costs a handful of fused kernels
+    regardless of how many parameters it holds.
+    """
+    if not params:
+        return
+    param_norms = torch._foreach_norm(params)
+    direction_norms = torch._foreach_clamp_min(torch._foreach_norm(directions), eps)
+
+    scales = torch._foreach_div(param_norms, direction_norms)
+    torch._foreach_mul_(scales, learning_rate)
+    torch._foreach_add_(params, torch._foreach_mul(directions, scales), alpha=-1)
+
+    new_norms = torch._foreach_clamp_min(torch._foreach_norm(params), eps)
+    torch._foreach_mul_(params, torch._foreach_div(param_norms, new_norms))
+
+
+def _hypersphere_update_stacked_(
+    stacked: Tensor,
+    updates: Tensor,
+    learning_rate: float,
+    *,
+    eps: float = 1e-10,
+) -> None:
+    """Batched :func:`_hypersphere_update_` for one stack of same-shaped matrices.
+
+    ``stacked`` is ``(num_params, rows, columns)``; norms are taken per matrix, so
+    this matches the per-parameter behaviour of the foreach version exactly while
+    running as single batched kernels.
+    """
+    param_norms = torch.linalg.matrix_norm(stacked, keepdim=True)
+    update_norms = torch.linalg.matrix_norm(updates, keepdim=True).clamp_min(eps)
+
+    stacked.sub_(updates * (param_norms * learning_rate / update_norms))
+
+    new_norms = torch.linalg.matrix_norm(stacked, keepdim=True).clamp_min(eps)
+    stacked.mul_(param_norms / new_norms)
+
+
 def _polar_express(matrix: Tensor, steps: int) -> Tensor:
     """Orthogonalize a stack of matrices with nanochat's Polar Express update."""
     if matrix.ndim != 3:
@@ -80,11 +139,18 @@ def _polar_express(matrix: Tensor, steps: int) -> Tensor:
 
 
 class MuonAdamW(optim.Optimizer):
-    """Nanochat-style hybrid optimizer: Muon for matrices and AdamW elsewhere.
+    """Hybrid optimizer: Muon for matrices, AdamW elsewhere, either optionally on a sphere.
 
     Muon groups must contain same-shaped 2-D parameters. AdamW groups may contain
-    arbitrary dense parameters. Keeping both algorithms in one Optimizer makes
+    arbitrary dense parameters. Keeping every algorithm in one Optimizer makes
     checkpointing and AMP stepping behave exactly like a normal PyTorch optimizer.
+
+    Setting ``hypersphere=True`` on a group switches it from an additive step to a
+    constant-norm one, giving the AdamH / MuonH variants from *Rethinking Language
+    Model Scaling under Transferable Hypersphere Optimization*
+    (https://arxiv.org/abs/2603.28743). See :func:`_hypersphere_update_`. Such a
+    group must have ``weight_decay=0``; its ``lr`` is a relative step size
+    (roughly a rotation angle), not an absolute one.
     """
 
     def __init__(self, param_groups: list[dict[str, Any]]):
@@ -98,6 +164,21 @@ class MuonAdamW(optim.Optimizer):
                 raise ValueError("every optimizer group needs a positive lr")
             if float(group.get("weight_decay", 0.0)) < 0:
                 raise ValueError("weight_decay cannot be negative")
+            if group.get("hypersphere", False):
+                if float(group.get("weight_decay", 0.0)) != 0.0:
+                    raise ValueError(
+                        "hyperspherical groups must use weight_decay=0: renormalizing the "
+                        "parameter cancels decay to first order. Fold it into the learning "
+                        "rate instead (lr = sqrt(lr * weight_decay) of the additive recipe)."
+                    )
+                if any(
+                    parameter.ndim < 2
+                    for parameter in group.get("params", ())
+                ):
+                    raise ValueError(
+                        "hyperspherical groups hold matrix parameters only; keep vectors "
+                        "such as norm gains and biases in a plain AdamW group"
+                    )
             if kind == "muon":
                 params = list(group.get("params", ()))
                 if not params or any(parameter.ndim != 2 for parameter in params):
@@ -140,6 +221,48 @@ class MuonAdamW(optim.Optimizer):
         denominator = (exp_avg_sq / bias_correction2).sqrt().add_(group["eps"])
         parameter.addcdiv_(exp_avg, denominator, value=-learning_rate / bias_correction1)
 
+    def _adamh_step(self, group: dict[str, Any]) -> None:
+        """AdamH: the Adam direction, applied as a constant-norm step.
+
+        Runs the whole group through ``torch._foreach_*`` rather than looping one
+        parameter at a time, so a 40-matrix group costs a fixed number of kernels.
+        """
+        params = [parameter for parameter in group["params"] if parameter.grad is not None]
+        if not params:
+            return
+        gradients = [parameter.grad for parameter in params]
+        if any(gradient.is_sparse for gradient in gradients):
+            raise RuntimeError("MuonAdamW does not support sparse gradients")
+
+        states = [self.state[parameter] for parameter in params]
+        for parameter, state in zip(params, states, strict=True):
+            if not state:
+                state["step"] = 0
+                state["exp_avg"] = torch.zeros_like(parameter)
+                state["exp_avg_sq"] = torch.zeros_like(parameter)
+            state["step"] += 1
+
+        beta1, beta2 = group["betas"]
+        eps = float(group["eps"])
+        step = states[0]["step"]
+        exp_avgs = [state["exp_avg"] for state in states]
+        exp_avg_sqs = [state["exp_avg_sq"] for state in states]
+
+        torch._foreach_lerp_(exp_avgs, gradients, 1.0 - beta1)
+        squared = torch._foreach_mul(gradients, gradients)
+        torch._foreach_lerp_(exp_avg_sqs, squared, 1.0 - beta2)
+
+        # Bias-corrected Adam direction: m_hat / (sqrt(v_hat) + eps).
+        bias_correction1 = 1.0 - beta1**step
+        bias_correction2 = 1.0 - beta2**step
+        denominators = torch._foreach_sqrt(torch._foreach_div(exp_avg_sqs, bias_correction2))
+        torch._foreach_add_(denominators, eps)
+        directions = torch._foreach_div(
+            torch._foreach_div(exp_avgs, bias_correction1), denominators
+        )
+
+        _hypersphere_update_(params, directions, float(group["lr"]))
+
     def _muon_step(self, group: dict[str, Any]) -> None:
         params: list[Tensor] = group["params"]
         active = [parameter for parameter in params if parameter.grad is not None]
@@ -160,8 +283,10 @@ class MuonAdamW(optim.Optimizer):
             state["momentum_buffer"] = torch.zeros(
                 len(params), rows, columns, dtype=first.dtype, device=first.device
             )
+        hyperspherical = bool(group.get("hypersphere", False))
         reduction_dim = -1 if rows >= columns else -2
-        if "second_momentum_buffer" not in state:
+        # MuonH never consumes the second moment, so do not pay for the buffer.
+        if not hyperspherical and "second_momentum_buffer" not in state:
             second_shape = (
                 (len(params), rows, 1)
                 if reduction_dim == -1
@@ -172,7 +297,6 @@ class MuonAdamW(optim.Optimizer):
             )
 
         momentum_buffer = state["momentum_buffer"]
-        second_momentum_buffer = state["second_momentum_buffer"]
         stacked_gradients = torch.stack([parameter.grad for parameter in params])
         stacked_parameters = torch.stack(params)
 
@@ -181,6 +305,20 @@ class MuonAdamW(optim.Optimizer):
         update = stacked_gradients.lerp(momentum_buffer, momentum)
         update = _polar_express(update, int(group["ns_steps"]))
 
+        if hyperspherical:
+            # MuonH: orthogonalized momentum, applied as a constant-norm step.
+            # The second-moment rescaling below is deliberately skipped -- it
+            # changes the update *direction*, which the projection does not
+            # normalize away, so keeping it would no longer be MuonH. The
+            # aspect-ratio learning-rate factor is skipped for the opposite
+            # reason: it is a pure rescaling, so the projection cancels it.
+            _hypersphere_update_stacked_(
+                stacked_parameters, update.to(stacked_parameters.dtype), float(group["lr"])
+            )
+            torch._foreach_copy_(params, list(stacked_parameters.unbind(0)))
+            return
+
+        second_momentum_buffer = state["second_momentum_buffer"]
         beta2 = float(group["beta2"])
         variance = update.float().square().mean(dim=reduction_dim, keepdim=True)
         reduction_size = update.size(reduction_dim)
@@ -212,8 +350,11 @@ class MuonAdamW(optim.Optimizer):
                 loss = closure()
         for group in self.param_groups:
             if group["kind"] == "adamw":
-                for parameter in group["params"]:
-                    self._adamw_step(parameter, group, self.state[parameter])
+                if group.get("hypersphere", False):
+                    self._adamh_step(group)
+                else:
+                    for parameter in group["params"]:
+                        self._adamw_step(parameter, group, self.state[parameter])
             elif group["kind"] == "muon":
                 self._muon_step(group)
             else:  # Protect against malformed state_dicts.
@@ -225,6 +366,79 @@ def _unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
     while hasattr(model, "module") and isinstance(model.module, torch.nn.Module):
         model = model.module
     return model
+
+
+@dataclass(frozen=True)
+class _LlamaParameterGroups:
+    """A Llama's trainable parameters, split by the role each plays in training."""
+
+    embedding: list[torch.nn.Parameter]
+    unembedding: list[torch.nn.Parameter]  # the lm_head; empty when weights are tied
+    matrix: list[torch.nn.Parameter]  # hidden linear weights
+    scalar: list[torch.nn.Parameter]  # norm gains, biases, anything 1-D
+    hidden_size: int
+
+
+def _partition_llama_parameters(model: torch.nn.Module, caller: str) -> _LlamaParameterGroups:
+    """Split an ohara Llama into embedding / lm_head / hidden-matrix / vector groups.
+
+    Every optimizer builder here shares this partition, so they cannot drift apart
+    on which parameter belongs where.
+    """
+    root = _unwrap_model(model)
+    required = ("token_emb", "vocab_proj", "layers", "config")
+    if any(not hasattr(root, attribute) for attribute in required):
+        raise TypeError(f"{caller} expects an ohara Llama-compatible model")
+
+    trainable = [parameter for parameter in root.parameters() if parameter.requires_grad]
+    embedding = [
+        parameter for parameter in root.token_emb.parameters() if parameter.requires_grad
+    ]
+    embedding_ids = {id(parameter) for parameter in embedding}
+    unembedding = [
+        parameter
+        for parameter in root.vocab_proj.parameters()
+        if parameter.requires_grad and id(parameter) not in embedding_ids
+    ]
+    reserved_ids = embedding_ids | {id(parameter) for parameter in unembedding}
+
+    matrix = [
+        parameter
+        for parameter in root.layers.parameters()
+        if parameter.requires_grad and parameter.ndim == 2 and id(parameter) not in reserved_ids
+    ]
+    matrix_ids = {id(parameter) for parameter in matrix}
+    scalar = [
+        parameter
+        for parameter in trainable
+        if id(parameter) not in reserved_ids and id(parameter) not in matrix_ids
+    ]
+
+    assigned = embedding + unembedding + matrix + scalar
+    if len({id(parameter) for parameter in assigned}) != len(assigned):
+        raise RuntimeError("optimizer parameter groups overlap")
+    if {id(parameter) for parameter in assigned} != {id(parameter) for parameter in trainable}:
+        raise RuntimeError("optimizer parameter partition is incomplete")
+    if not embedding or not matrix:
+        raise ValueError("model must have token embeddings and transformer matrices")
+
+    return _LlamaParameterGroups(
+        embedding=embedding,
+        unembedding=unembedding,
+        matrix=matrix,
+        scalar=scalar,
+        hidden_size=int(root.config.hidden_size),
+    )
+
+
+def _group_matrices_by_shape(
+    params: list[torch.nn.Parameter],
+) -> list[tuple[torch.Size, list[torch.nn.Parameter]]]:
+    """Bucket matrices by shape so each bucket can be stacked into one batched step."""
+    by_shape: defaultdict[torch.Size, list[torch.nn.Parameter]] = defaultdict(list)
+    for parameter in params:
+        by_shape[parameter.shape].append(parameter)
+    return [(shape, by_shape[shape]) for shape in sorted(by_shape, key=tuple)]
 
 
 def build_muon_adamw(
@@ -259,45 +473,13 @@ def build_muon_adamw(
     if reference_hidden_size < 1:
         raise ValueError("reference_hidden_size must be positive")
 
-    root = _unwrap_model(model)
-    required = ("token_emb", "vocab_proj", "layers", "config")
-    if any(not hasattr(root, attribute) for attribute in required):
-        raise TypeError("build_muon_adamw expects an ohara Llama-compatible model")
+    partition = _partition_llama_parameters(model, "build_muon_adamw")
+    embedding_params = partition.embedding
+    unembedding_params = partition.unembedding
+    matrix_params = partition.matrix
+    scalar_params = partition.scalar
 
-    trainable = [parameter for parameter in root.parameters() if parameter.requires_grad]
-    embedding_params = [
-        parameter for parameter in root.token_emb.parameters() if parameter.requires_grad
-    ]
-    embedding_ids = {id(parameter) for parameter in embedding_params}
-    unembedding_params = [
-        parameter
-        for parameter in root.vocab_proj.parameters()
-        if parameter.requires_grad and id(parameter) not in embedding_ids
-    ]
-    reserved_ids = embedding_ids | {id(parameter) for parameter in unembedding_params}
-
-    matrix_params = [
-        parameter
-        for parameter in root.layers.parameters()
-        if parameter.requires_grad and parameter.ndim == 2 and id(parameter) not in reserved_ids
-    ]
-    matrix_ids = {id(parameter) for parameter in matrix_params}
-    scalar_params = [
-        parameter
-        for parameter in trainable
-        if id(parameter) not in reserved_ids and id(parameter) not in matrix_ids
-    ]
-
-    assigned = embedding_params + unembedding_params + matrix_params + scalar_params
-    if len({id(parameter) for parameter in assigned}) != len(assigned):
-        raise RuntimeError("optimizer parameter groups overlap")
-    if {id(parameter) for parameter in assigned} != {id(parameter) for parameter in trainable}:
-        raise RuntimeError("optimizer parameter partition is incomplete")
-    if not embedding_params or not matrix_params:
-        raise ValueError("model must have token embeddings and transformer matrices")
-
-    hidden_size = int(root.config.hidden_size)
-    width_scale = math.sqrt(reference_hidden_size / hidden_size)
+    width_scale = math.sqrt(reference_hidden_size / partition.hidden_size)
     groups: list[dict[str, Any]] = []
 
     def add_adamw_group(
@@ -345,11 +527,7 @@ def build_muon_adamw(
         0.0,
     )
 
-    by_shape: defaultdict[torch.Size, list[torch.nn.Parameter]] = defaultdict(list)
-    for parameter in matrix_params:
-        by_shape[parameter.shape].append(parameter)
-    for shape in sorted(by_shape, key=tuple):
-        params = by_shape[shape]
+    for shape, params in _group_matrices_by_shape(matrix_params):
         groups.append(
             {
                 "name": f"matrix_{'x'.join(str(size) for size in shape)}",
@@ -362,6 +540,160 @@ def build_muon_adamw(
                 "ns_steps": ns_steps,
                 "beta2": beta2,
                 "weight_decay": weight_decay,
+            }
+        )
+    return MuonAdamW(groups)
+
+
+def build_adamh(
+    model: torch.nn.Module,
+    *,
+    learning_rate: float = 0.007,
+    adam_learning_rate: float = 6e-4,
+    betas: tuple[float, float] = (0.9, 0.95),
+    eps: float = 1e-8,
+) -> MuonAdamW:
+    """AdamH: constant-norm Adam on every matrix, plain AdamW on everything else.
+
+    From *Rethinking Language Model Scaling under Transferable Hypersphere
+    Optimization* (https://arxiv.org/abs/2603.28743). Each matrix keeps the
+    Frobenius norm it was initialized with, so there is no weight decay to tune;
+    ``learning_rate`` is the *relative* step size ||dW||/||W||.
+
+    To port an AdamW recipe, use ``learning_rate = sqrt(lr * weight_decay)``. The
+    default is that formula applied to ohara's own AdamW defaults
+    (``sqrt(5e-4 * 0.1) = 0.0071``).
+
+    Args:
+        learning_rate: Relative step size for the hyperspherical matrix groups.
+        adam_learning_rate: Absolute LR for embeddings and vector parameters,
+            which stay on ordinary AdamW.
+    """
+    if learning_rate <= 0 or adam_learning_rate <= 0:
+        raise ValueError("all learning rates must be positive")
+
+    partition = _partition_llama_parameters(model, "build_adamh")
+    # The paper puts every Linear weight, lm_head included, on AdamH.
+    matrices = partition.matrix + partition.unembedding
+    groups: list[dict[str, Any]] = []
+
+    for shape, params in _group_matrices_by_shape(matrices):
+        groups.append(
+            {
+                "name": f"adamh_{'x'.join(str(size) for size in shape)}",
+                "kind": "adamw",
+                "hypersphere": True,
+                "params": params,
+                "lr": learning_rate,
+                "initial_lr": learning_rate,
+                "lr_scale": 1.0,
+                "betas": betas,
+                "eps": eps,
+                "weight_decay": 0.0,
+            }
+        )
+
+    adam_params = partition.embedding + partition.scalar
+    if adam_params:
+        groups.append(
+            {
+                "name": "embedding_and_scalars",
+                "kind": "adamw",
+                "params": adam_params,
+                "lr": adam_learning_rate,
+                "initial_lr": adam_learning_rate,
+                "lr_scale": adam_learning_rate / learning_rate,
+                "betas": betas,
+                "eps": eps,
+                "weight_decay": 0.0,
+            }
+        )
+    return MuonAdamW(groups)
+
+
+def build_muonh_adamh(
+    model: torch.nn.Module,
+    *,
+    learning_rate: float = 0.075,
+    adam_learning_rate: float = 6e-4,
+    momentum: float = 0.95,
+    ns_steps: int = 5,
+    betas: tuple[float, float] = (0.9, 0.95),
+    eps: float = 1e-8,
+) -> MuonAdamW:
+    """MuonH on hidden matrices, AdamH on the lm_head, plain AdamW on the rest.
+
+    From *Rethinking Language Model Scaling under Transferable Hypersphere
+    Optimization* (https://arxiv.org/abs/2603.28743). Both hyperspherical
+    algorithms normalize the update to a fixed fraction of ``||W||``, which is why
+    they share one ``learning_rate`` -- the paper's central practical claim, and the
+    reason there is no separate matrix/unembedding rate to retune here.
+
+    To port a Muon recipe, use ``learning_rate = sqrt(lr * weight_decay)``. The
+    default is that formula applied to ohara's nanochat defaults
+    (``sqrt(0.02 * 0.28) = 0.0748``).
+
+    Args:
+        learning_rate: Relative step size shared by the MuonH and AdamH groups.
+        adam_learning_rate: Absolute LR for embeddings and vector parameters.
+        momentum: Muon momentum. Its scale cancels in the projection, so this only
+            sets how much history the update direction carries.
+        ns_steps: Newton-Schulz iterations used to orthogonalize the update.
+    """
+    if learning_rate <= 0 or adam_learning_rate <= 0:
+        raise ValueError("all learning rates must be positive")
+
+    partition = _partition_llama_parameters(model, "build_muonh_adamh")
+    groups: list[dict[str, Any]] = []
+
+    for shape, params in _group_matrices_by_shape(partition.matrix):
+        groups.append(
+            {
+                "name": f"muonh_{'x'.join(str(size) for size in shape)}",
+                "kind": "muon",
+                "hypersphere": True,
+                "params": params,
+                "lr": learning_rate,
+                "initial_lr": learning_rate,
+                "lr_scale": 1.0,
+                "momentum": momentum,
+                "ns_steps": ns_steps,
+                "beta2": 0.9,  # unused on the hyperspherical path
+                "weight_decay": 0.0,
+            }
+        )
+
+    # The lm_head is a matrix but is not orthogonalized: the paper keeps it on
+    # AdamH, at the same relative learning rate.
+    for shape, params in _group_matrices_by_shape(partition.unembedding):
+        groups.append(
+            {
+                "name": f"adamh_unembedding_{'x'.join(str(size) for size in shape)}",
+                "kind": "adamw",
+                "hypersphere": True,
+                "params": params,
+                "lr": learning_rate,
+                "initial_lr": learning_rate,
+                "lr_scale": 1.0,
+                "betas": betas,
+                "eps": eps,
+                "weight_decay": 0.0,
+            }
+        )
+
+    adam_params = partition.embedding + partition.scalar
+    if adam_params:
+        groups.append(
+            {
+                "name": "embedding_and_scalars",
+                "kind": "adamw",
+                "params": adam_params,
+                "lr": adam_learning_rate,
+                "initial_lr": adam_learning_rate,
+                "lr_scale": adam_learning_rate / learning_rate,
+                "betas": betas,
+                "eps": eps,
+                "weight_decay": 0.0,
             }
         )
     return MuonAdamW(groups)
