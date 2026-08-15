@@ -15,6 +15,7 @@ from ohara.chat import add_chat_tokens
 from ohara.dataset import StreamingTextDataset
 from ohara.lr_scheduler import CosineScheduler
 from ohara.tokenbin import TokenBinDataset
+from ohara.tracking import BACKENDS as TRACKING_BACKENDS, create_logger
 from ohara.models.llama import Config, Llama
 from ohara.optimizer import build_adamh, build_adamw, build_muon_adamw, build_muonh_adamh
 from ohara.scaling import (
@@ -110,6 +111,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--result-json", default=None)
     parser.add_argument("--scaling-depth", type=int, default=None)
     parser.add_argument("--flops-budget", type=float, default=None)
+    parser.add_argument(
+        "--logger",
+        choices=TRACKING_BACKENDS,
+        default="auto",
+        help="auto prefers wandb when a key is set, else falls back to local trackio",
+    )
+    parser.add_argument("--project", default="ohara")
+    parser.add_argument("--run", default=None, help="run name shown in the tracker")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument(
         "--compile",
@@ -265,6 +274,24 @@ def run() -> None:
         )
         scheduler_learning_rate = args.learning_rate
     optimizer = engine.prepare_optimizers(optimizer)[0]
+
+    # Only rank zero opens a tracking run; the other ranks would create duplicate
+    # runs for the same job. engine.log_dict already forwards from rank zero only.
+    if engine.is_global_zero:
+        tracker = create_logger(
+            args.logger,
+            project=args.project,
+            run_name=args.run,
+            config={
+                **vars(args),
+                "vocab_size": vocab_size,
+                "parameters": sum(p.numel() for p in raw_model.parameters()),
+                "world_size": engine.data_parallel_world_size,
+            },
+        )
+        engine.loggers = [tracker]
+    else:
+        tracker = None
 
     # Prefer pre-tokenized bins when they exist beside the corpus: tokenizing in
     # the training loop leaves the GPUs waiting on the CPU, and re-tokenizes the
@@ -521,6 +548,8 @@ def run() -> None:
             os.replace(temporary, result_path)
         finally:
             temporary.unlink(missing_ok=True)
+    if tracker is not None:
+        tracker.finish()
     engine.close()
     # Give remote-stream cleanup callbacks a chance to finish before CPython
     # tears down extension-module thread states. This applies regardless of the

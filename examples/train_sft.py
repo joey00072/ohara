@@ -44,6 +44,7 @@ from ohara.runtime import (
 from ohara.scaling import CosineWeightDecayScheduler, MuonMomentumScheduler, WarmupStableDecayScheduler
 from ohara.sft import ConversationDataset, build_mixture
 from ohara.tokenizer import get_token_bytes
+from ohara.tracking import BACKENDS as TRACKING_BACKENDS, create_logger
 from ohara.trainer import Trainer
 
 
@@ -100,6 +101,15 @@ def parse_args() -> argparse.Namespace:
         help="pretraining decays this to zero; SFT continues from there",
     )
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
+    # Tracking
+    parser.add_argument(
+        "--logger",
+        choices=TRACKING_BACKENDS,
+        default="auto",
+        help="auto prefers wandb when a key is set, else falls back to local trackio",
+    )
+    parser.add_argument("--project", default="ohara-sft")
+    parser.add_argument("--run", default=None, help="run name shown in the tracker")
     # Runtime
     parser.add_argument("--precision", default="bf16")
     parser.add_argument("--num-workers", type=int, default=0)
@@ -251,6 +261,24 @@ def run() -> None:
         scheduler_learning_rate = args.learning_rate * args.init_lr_frac
     optimizer = engine.prepare_optimizers(optimizer)[0]
 
+    # Rank zero only, so ranks do not open duplicate runs for one job.
+    if engine.is_global_zero:
+        tracker = create_logger(
+            args.logger,
+            project=args.project,
+            run_name=args.run,
+            config={
+                **vars(args),
+                "vocab_size": vocab_size,
+                "parameters": sum(p.numel() for p in raw_model.parameters()),
+                "depth": config.num_hidden_layers,
+                "world_size": engine.data_parallel_world_size,
+            },
+        )
+        engine.loggers = [tracker]
+    else:
+        tracker = None
+
     if engine.is_global_zero:
         print("building SFT mixture (this downloads SmolTalk / MMLU / GSM8K on first run)")
     train_conversations = build_mixture(
@@ -398,6 +426,8 @@ def run() -> None:
             result_path.parent.mkdir(parents=True, exist_ok=True)
             result_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
+    if tracker is not None:
+        tracker.finish()
     engine.close()
     time.sleep(2.0)
 
