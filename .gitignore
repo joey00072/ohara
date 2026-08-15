@@ -43,6 +43,10 @@ logs/
 logs*/
 model.pt
 runs/
+# ...but the pipeline scripts that live there are source, not run output.
+!runs/
+runs/*
+!runs/*.sh
 scaling_results/
 wandb/
 **/logs*/
