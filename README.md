@@ -26,6 +26,10 @@ uv run python examples/train_llama_engine.py
 | [`ohara/trainer.py`](./ohara/trainer.py) | The training loop (eval, checkpoints, MFU, bpb) |
 | [`ohara/optimizer.py`](./ohara/optimizer.py) | AdamW, Muon, and the constant-norm AdamH / MuonH |
 | [`ohara/scaling.py`](./ohara/scaling.py) | iso-FLOP sweep planning and curve fitting |
+| [`ohara/chat.py`](./ohara/chat.py) | Conversation special tokens, rendering, assistant-only loss masks |
+| [`ohara/sft.py`](./ohara/sft.py) | SFT conversation sources and best-fit packing |
+| [`ohara/chat_engine.py`](./ohara/chat_engine.py) | Streaming chat inference over a finetuned checkpoint |
+| [`ohara/webui/`](./ohara/webui/) | Browser chat UI (standard library only, no web framework) |
 | [`examples/`](./examples/) | Runnable entrypoints: pretokenize, train, eval, scaling sweeps |
 | [`experiments/`](./experiments/) | Frozen per-paper snapshots. Copy a folder and hack on it |
 | [`docs/notes/`](./docs/notes/) | Notes, mostly copied from my obsidian vault |
@@ -35,6 +39,57 @@ Most-used bits are re-exported at the top level:
 ```python
 from ohara import Llama, Config, Trainer, OharaEngine
 ```
+
+## Train a chat model and talk to it
+
+The nanochat pipeline — pretrain, finetune, chat — on ohara's stack. One script,
+one dial (`DEPTH`); width, batch size, learning rates, weight decay and the token
+horizon are all derived from it by [`ohara/scaling.py`](./ohara/scaling.py).
+
+```bash
+DEPTH=12 bash runs/speedrun.sh          # data -> pretrain -> SFT -> web UI
+```
+
+It takes hours, so run it detached: `screen -L -Logfile runs/speedrun.log -S speedrun bash runs/speedrun.sh`.
+The stages are ordinary scripts, so you can also run them one at a time:
+
+```bash
+# 1. pretrain on raw text, reserving the conversation tokens in the vocabulary
+python examples/train_llama_engine.py --dataset ./data/scaling_corpus --chat-tokens ...
+
+# 2. finetune on SmolTalk + MMLU + GSM8K, supervising only assistant tokens
+python examples/train_sft.py --pretrained-checkpoint ./ckpt/base_d12.pt
+
+# 3. chat with it in the browser
+python examples/chat_web.py --checkpoint ./ckpt/sft_d12.pt
+```
+
+Then open <http://localhost:8080>. When the model lives on a remote box, forward the
+port instead of binding it publicly: `ssh -N -L 8080:localhost:8080 <user>@<host>`.
+
+The web UI streams tokens over server-sent events and exposes temperature, top-p,
+top-k and a token budget. It is built on `http.server`, so serving the model adds
+no dependencies to a training box.
+
+**Conversation format.** Messages are wrapped in the same special tokens nanochat
+uses (`<|user_start|>`, `<|assistant_start|>`, and a `<|python_start|>` /
+`<|output_start|>` pair for tool calls). Loss is taken only on tokens the assistant
+should *produce* — including the closing `<|assistant_end|>`, so the model learns to
+stop — and never on user turns or on interpreter output the model only reads back:
+
+```python
+from ohara import load_chat_tokenizer, render_conversation
+
+tokenizer = load_chat_tokenizer(hf_name="EleutherAI/gpt-neo-125m")
+ids, mask = render_conversation(tokenizer, [
+    {"role": "user", "content": "why is the sky blue?"},
+    {"role": "assistant", "content": "rayleigh scattering."},
+])  # mask[i] == 1 marks a supervised token
+```
+
+SFT rows are packed best-fit from a lookahead buffer: each row starts at a
+conversation boundary, and leftover space is padded rather than filled with half a
+conversation, so no conversation is ever split across rows.
 
 ## ClimbMix scaling laws
 
