@@ -11,8 +11,10 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
+from ohara.chat import add_chat_tokens
 from ohara.dataset import StreamingTextDataset
 from ohara.lr_scheduler import CosineScheduler
+from ohara.tokenbin import TokenBinDataset
 from ohara.models.llama import Config, Llama
 from ohara.optimizer import build_adamh, build_adamw, build_muon_adamw, build_muonh_adamh
 from ohara.scaling import (
@@ -39,6 +41,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tokenizer", default="EleutherAI/gpt-neo-125m")
     parser.add_argument("--tokenizer-local-files-only", action="store_true")
     parser.add_argument("--token-bytes-cache", default=None)
+    parser.add_argument(
+        "--chat-tokens",
+        action="store_true",
+        help=(
+            "reserve the conversation special tokens in the vocabulary now, so a later "
+            "SFT pass does not have to grow the embedding matrix (see ohara.chat)"
+        ),
+    )
     parser.add_argument("--text-column", default="text")
     parser.add_argument("--train-split", default="train")
     parser.add_argument("--validation-split", default="validation")
@@ -101,6 +111,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scaling-depth", type=int, default=None)
     parser.add_argument("--flops-budget", type=float, default=None)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="torch.compile the model; costs a warmup but is the single largest MFU win",
+    )
+    parser.add_argument(
+        "--no-token-bins",
+        action="store_true",
+        help="ignore pre-tokenized {split}.bin files and tokenize text inline",
+    )
+    parser.add_argument(
+        "--pad-vocab-to",
+        type=int,
+        default=1,
+        help=(
+            "round the model vocabulary up to a multiple of this for tensor-core "
+            "friendly matmuls (nanochat uses 64). Padded rows are never valid targets"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--tp", type=int, default=int(os.environ.get("OHARA_TP", "1")))
     parser.add_argument(
@@ -163,7 +192,17 @@ def run() -> None:
         prefer_hf=True,
         local_files_only=args.tokenizer_local_files_only,
     )
-    vocab_size = len(tokenizer)
+    if args.chat_tokens:
+        add_chat_tokens(tokenizer)
+    tokenizer_vocab_size = len(tokenizer)
+    if args.pad_vocab_to < 1:
+        raise ValueError("pad-vocab-to must be at least 1")
+    # An odd vocabulary (gpt-neo's 50257, or 50265 with chat tokens) makes the
+    # embedding and output matmuls fall off the tensor-core fast path. Padding up
+    # only adds rows that no target ever selects, so the loss is unchanged.
+    vocab_size = (
+        (tokenizer_vocab_size + args.pad_vocab_to - 1) // args.pad_vocab_to
+    ) * args.pad_vocab_to
     model_cfg = Config(
         vocab_size=vocab_size,
         hidden_size=args.hidden_size,
@@ -178,6 +217,10 @@ def run() -> None:
     )
     raw_model = Llama(model_cfg)
     model = raw_model
+    if args.compile:
+        # Batch shapes are fixed for the whole run, so dynamic=False lets inductor
+        # specialize. Compile before the engine wraps the module for DDP.
+        model = torch.compile(model, dynamic=False)
     model = engine.prepare(model)
     if args.optimizer in ("muon", "muonh") and args.tp != 1:
         raise ValueError("the hybrid Muon optimizers currently require --tp 1")
@@ -223,27 +266,50 @@ def run() -> None:
         scheduler_learning_rate = args.learning_rate
     optimizer = engine.prepare_optimizers(optimizer)[0]
 
-    common_dataset_args = {
-        "dataset_name": args.dataset,
-        "name": args.dataset_config,
-        "tokenizer": tokenizer,
-        "max_length": args.seq_len,
-        "text_column": args.text_column,
-        "data_rank": engine.data_parallel_rank,
-        "data_world_size": engine.data_parallel_world_size,
-    }
-    train_ds = StreamingTextDataset(
-        **common_dataset_args,
-        split=args.train_split,
-        shuffle=True,
-        seed=args.seed,
-    )
-    val_ds = StreamingTextDataset(
-        **common_dataset_args,
-        split=args.validation_split,
-        shuffle=False,
-        seed=args.seed,
-    )
+    # Prefer pre-tokenized bins when they exist beside the corpus: tokenizing in
+    # the training loop leaves the GPUs waiting on the CPU, and re-tokenizes the
+    # same documents every epoch. See examples/pretokenize_corpus.py.
+    corpus_dir = Path(args.dataset)
+    train_bin = corpus_dir / f"{args.train_split}.bin"
+    val_bin = corpus_dir / f"{args.validation_split}.bin"
+    use_token_bins = not args.no_token_bins and train_bin.exists() and val_bin.exists()
+
+    if use_token_bins:
+        bin_args = {
+            "max_length": args.seq_len,
+            "tokenizer": tokenizer,
+            "data_rank": engine.data_parallel_rank,
+            "data_world_size": engine.data_parallel_world_size,
+        }
+        train_ds = TokenBinDataset(train_bin, shuffle=True, seed=args.seed, **bin_args)
+        val_ds = TokenBinDataset(val_bin, shuffle=False, seed=args.seed, **bin_args)
+        if engine.is_global_zero:
+            print(
+                f"token bins: train {train_ds.metadata['tokens']:,} tokens, "
+                f"val {val_ds.metadata['tokens']:,} tokens"
+            )
+    else:
+        common_dataset_args = {
+            "dataset_name": args.dataset,
+            "name": args.dataset_config,
+            "tokenizer": tokenizer,
+            "max_length": args.seq_len,
+            "text_column": args.text_column,
+            "data_rank": engine.data_parallel_rank,
+            "data_world_size": engine.data_parallel_world_size,
+        }
+        train_ds = StreamingTextDataset(
+            **common_dataset_args,
+            split=args.train_split,
+            shuffle=True,
+            seed=args.seed,
+        )
+        val_ds = StreamingTextDataset(
+            **common_dataset_args,
+            split=args.validation_split,
+            shuffle=False,
+            seed=args.seed,
+        )
     loader_args = {
         "batch_size": args.batch_size,
         "num_workers": args.num_workers,
@@ -363,9 +429,17 @@ def run() -> None:
     tokens_per_step = args.batch_size * args.seq_len * args.grad_accum_steps
     initial = trainer.evaluate(trainer.val_dataloader, args.eval_batches)
     if engine.is_global_zero:
+        vocab_note = (
+            f" vocab={tokenizer_vocab_size:,}->{vocab_size:,}"
+            if vocab_size != tokenizer_vocab_size
+            else ""
+        )
         print(
             f"device={engine.device} precision={args.precision} params={parameter_count:,} "
-            f"tokens/step/rank={tokens_per_step:,} random_loss={math.log(vocab_size):.4f}"
+            f"tokens/step/rank={tokens_per_step:,}{vocab_note} "
+            # Padded rows are never targets, so chance level is set by the real vocabulary.
+            f"random_loss={math.log(tokenizer_vocab_size):.4f}"
+            f"{' compiled' if args.compile else ''}"
         )
         print(
             f"starting val_loss={initial['loss']:.4f} val_ppl={initial['ppl']:.2f} "
