@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ohara</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='12' fill='%236366f1'/></svg>">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    darkMode: "media",
+    theme: {
+      extend: {
+        fontFamily: {
+          sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
+          mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        },
+      },
+    },
+  };
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body class="h-full bg-white text-zinc-900 dark:bg-[#0a0a0b] dark:text-zinc-100 font-sans antialiased">
+<div class="flex h-full flex-col">
+
+  <!-- header -->
+  <header class="flex-none border-b border-zinc-200/80 dark:border-white/[0.07]">
+    <div class="mx-auto flex h-14 max-w-3xl items-center gap-3 px-5">
+      <div class="h-2 w-2 flex-none rounded-full bg-indigo-500"></div>
+      <span class="text-[15px] font-semibold tracking-tight">ohara</span>
+      <span id="model-chip"
+            class="truncate rounded-full border border-zinc-200 px-2.5 py-1 text-[11px] font-medium text-zinc-500 dark:border-white/10 dark:text-zinc-400">
+        connecting…
+      </span>
+      <div class="ml-auto flex items-center gap-1">
+        <button id="settings-toggle" aria-expanded="false" title="Settings"
+                class="rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/5 dark:hover:text-zinc-200">
+          <svg class="h-[18px] w-[18px]" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 6h9m-9 6h9m-9 6h9M4 6h.01M4 12h.01M4 18h.01"/>
+          </svg>
+        </button>
+        <button id="new-chat" title="New chat"
+                class="rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-white/5 dark:hover:text-zinc-200">
+          <svg class="h-[18px] w-[18px]" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- settings -->
+    <div id="settings" hidden class="border-t border-zinc-200/80 dark:border-white/[0.07]">
+      <div class="mx-auto grid max-w-3xl gap-x-8 gap-y-4 px-5 py-4 sm:grid-cols-2">
+        <label class="block">
+          <div class="mb-1.5 flex justify-between text-xs text-zinc-500 dark:text-zinc-400">
+            <span>Temperature</span><output id="temperature-out" class="font-mono text-zinc-700 dark:text-zinc-200"></output>
+          </div>
+          <input id="temperature" type="range" min="0" max="1.5" step="0.05" class="slider">
+        </label>
+        <label class="block">
+          <div class="mb-1.5 flex justify-between text-xs text-zinc-500 dark:text-zinc-400">
+            <span>Top-p</span><output id="top-p-out" class="font-mono text-zinc-700 dark:text-zinc-200"></output>
+          </div>
+          <input id="top-p" type="range" min="0" max="1" step="0.01" class="slider">
+        </label>
+        <label class="block">
+          <div class="mb-1.5 flex justify-between text-xs text-zinc-500 dark:text-zinc-400">
+            <span>Top-k <span class="text-zinc-400 dark:text-zinc-500">(0 = off)</span></span>
+            <output id="top-k-out" class="font-mono text-zinc-700 dark:text-zinc-200"></output>
+          </div>
+          <input id="top-k" type="range" min="0" max="200" step="1" class="slider">
+        </label>
+        <label class="block">
+          <div class="mb-1.5 flex justify-between text-xs text-zinc-500 dark:text-zinc-400">
+            <span>Max new tokens</span><output id="max-tokens-out" class="font-mono text-zinc-700 dark:text-zinc-200"></output>
+          </div>
+          <input id="max-tokens" type="range" min="16" max="2048" step="16" class="slider">
+        </label>
+      </div>
+    </div>
+  </header>
+
+  <!-- messages -->
+  <main id="messages" class="flex-1 overflow-y-auto scroll-smooth">
+    <div id="empty-state" class="mx-auto flex h-full max-w-3xl flex-col items-center justify-center px-5 text-center">
+      <div class="mb-5 h-10 w-10 rounded-2xl bg-gradient-to-br from-indigo-500 to-violet-500"></div>
+      <h1 class="text-2xl font-semibold tracking-tight">Talk to your model</h1>
+      <p class="mt-2 max-w-sm text-[15px] leading-relaxed text-zinc-500 dark:text-zinc-400">
+        Trained from scratch on this box. Expect a kindergartener, not an oracle.
+      </p>
+      <div class="mt-7 flex flex-wrap justify-center gap-2">
+        <button class="suggestion">Why is the sky blue?</button>
+        <button class="suggestion">Write a short poem about the sea</button>
+        <button class="suggestion">What is 24 + 19?</button>
+      </div>
+    </div>
+  </main>
+
+  <!-- composer -->
+  <footer class="flex-none px-5 pb-5 pt-2">
+    <div class="mx-auto max-w-3xl">
+      <form id="composer-form"
+            class="flex items-end gap-2 rounded-2xl border border-zinc-200 bg-zinc-50 p-2 pl-4 transition focus-within:border-zinc-300 dark:border-white/10 dark:bg-white/[0.04] dark:focus-within:border-white/20">
+        <textarea id="input" rows="1" placeholder="Send a message…" autocomplete="off"
+                  class="max-h-48 flex-1 resize-none self-center bg-transparent py-2 text-[15px] leading-relaxed placeholder:text-zinc-400 focus:outline-none dark:placeholder:text-zinc-500"></textarea>
+        <button id="send" type="submit" title="Send"
+                class="flex h-9 w-9 flex-none items-center justify-center rounded-xl bg-zinc-900 text-white transition hover:bg-zinc-700 disabled:opacity-30 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200">
+          <svg class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 19V5M5 12l7-7 7 7"/>
+          </svg>
+        </button>
+        <button id="stop" type="button" hidden title="Stop"
+                class="flex h-9 w-9 flex-none items-center justify-center rounded-xl border border-zinc-300 text-zinc-600 transition hover:bg-zinc-100 dark:border-white/15 dark:text-zinc-300 dark:hover:bg-white/5">
+          <svg class="h-3 w-3" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+        </button>
+      </form>
+      <p class="mt-2 text-center text-[11px] text-zinc-400 dark:text-zinc-600">
+        Enter to send · Shift+Enter for newline
+      </p>
+    </div>
+  </footer>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
