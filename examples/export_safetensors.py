@@ -43,6 +43,12 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="top-k the model was trained with; not recoverable from tensor shapes",
     )
+    parser.add_argument("--moe-gate-fn", choices=("softmax", "sigmoid"), default="softmax")
+    parser.add_argument(
+        "--moe-no-normalize-weights",
+        action="store_true",
+        help="the grouped checkpoint was trained without normalizing sigmoid weights",
+    )
     parser.add_argument(
         "--keep-derived-buffers",
         action="store_true",
@@ -56,6 +62,8 @@ def export(
     out_dir: Path,
     *,
     moe_experts_per_tok: int = 2,
+    moe_gate_fn: str = "softmax",
+    moe_normalize_weights: bool = True,
     keep_derived_buffers: bool = False,
 ) -> dict[str, object]:
     if not checkpoint_path.exists():
@@ -64,7 +72,12 @@ def export(
     raw = checkpoint.get("model", checkpoint)
     state = {strip_wrapper_prefixes(key): value for key, value in raw.items()}
 
-    config = config_from_state_dict(state, moe_experts_per_tok=moe_experts_per_tok)
+    config = config_from_state_dict(
+        state,
+        moe_experts_per_tok=moe_experts_per_tok,
+        moe_gate_fn=moe_gate_fn,
+        moe_normalize_weights=moe_normalize_weights,
+    )
 
     tensors: dict[str, torch.Tensor] = {}
     for key, value in state.items():
@@ -110,6 +123,8 @@ def main() -> None:
         Path(args.checkpoint),
         Path(args.out),
         moe_experts_per_tok=args.moe_experts_per_tok,
+        moe_gate_fn=args.moe_gate_fn,
+        moe_normalize_weights=not args.moe_no_normalize_weights,
         keep_derived_buffers=args.keep_derived_buffers,
     )
     config = result["config"]

@@ -104,8 +104,34 @@ def _clean_state_dict(state: Mapping[str, torch.Tensor]) -> dict[str, torch.Tens
     return {strip_wrapper_prefixes(key): value for key, value in state.items()}
 
 
+def _rotary_window(state: Mapping[str, torch.Tensor]) -> int:
+    """Context length, recovered from the rotary buffer that was built at 2x it."""
+    freq_cos = state.get("freq_cos")
+    if freq_cos is None:
+        raise ValueError("checkpoint has no rotary buffer; cannot infer head dimension")
+    return int(freq_cos.shape[0]) // 2
+
+
+def _head_count(state: Mapping[str, torch.Tensor], projection: str) -> int:
+    """Number of query or key/value heads, from a projection's output width."""
+    freq_cos = state.get("freq_cos")
+    if freq_cos is None:
+        raise ValueError("checkpoint has no rotary buffer; cannot infer head dimension")
+    head_dim = int(freq_cos.shape[-1]) * 2
+    return int(state[f"layers.0.attn.{projection}.weight"].shape[0]) // head_dim
+
+
+def _moe_layer_interval(moe_layers: list[int], num_layers: int) -> int:
+    """Recover the fixed MoE stride, including a model with only one MoE layer."""
+    return moe_layers[1] - moe_layers[0] if len(moe_layers) > 1 else num_layers
+
+
 def config_from_state_dict(
-    state: Mapping[str, torch.Tensor], *, moe_experts_per_tok: int = 2
+    state: Mapping[str, torch.Tensor],
+    *,
+    moe_experts_per_tok: int = 2,
+    moe_gate_fn: str = "softmax",
+    moe_normalize_weights: bool = True,
 ) -> Config:
     """Recover a model config from checkpoint tensor shapes.
 
@@ -114,10 +140,10 @@ def config_from_state_dict(
     by a shape except two things:
 
     - the head dimension, which comes from the rotary buffer;
-    - ``moe_experts_per_tok``, which is a routing choice and leaves no trace in
-      any tensor shape. It defaults to 2 and must be passed if a checkpoint was
-      trained with another top-k, otherwise the model loads with the right
-      weights but routes differently than it was trained to.
+    - the MoE top-k, gate function, and sigmoid-weight normalization, which are
+      routing choices and leave no trace in tensor shapes. Callers must pass the
+      values used for training or the model will load the right weights but route
+      differently.
     """
     vocab_size, hidden_size = state["token_emb.weight"].shape
     layer_indices = {
@@ -125,8 +151,49 @@ def config_from_state_dict(
     }
     num_layers = 1 + max(layer_indices)
 
-    # An MoE layer stores its feed-forward under ff.experts.<n>.*; a dense one
-    # stores ff.up/gate/down directly.
+    # Three feed-forward layouts to tell apart:
+    #   dense          -> ff.up / ff.gate / ff.down
+    #   MoE (loop)     -> ff.experts.<n>.up ...
+    #   MoE (grouped)  -> ff.w_gate / ff.w_up / ff.w_down, one stacked tensor each
+    grouped_layers = sorted(
+        {
+            int(key.split(".")[1])
+            for key in state
+            if key.startswith("layers.") and key.endswith(".ff.w_gate")
+        }
+    )
+    if grouped_layers:
+        first = grouped_layers[0]
+        # w_gate is (num_experts, dim, hidden_dim).
+        num_experts, _, intermediate_size = state[f"layers.{first}.ff.w_gate"].shape
+        shared = state.get(f"layers.{first}.ff.shared_gate.weight")
+        num_shared = int(shared.shape[0] // intermediate_size) if shared is not None else 0
+        interval = _moe_layer_interval(grouped_layers, num_layers)
+        return Config(
+            vocab_size=int(state["token_emb.weight"].shape[0]),
+            hidden_size=int(hidden_size),
+            intermediate_size=int(intermediate_size),
+            max_sequence_length=_rotary_window(state),
+            num_hidden_layers=num_layers,
+            num_attention_heads=_head_count(state, "query"),
+            num_key_value_heads=(
+                0
+                if _head_count(state, "key") == _head_count(state, "query")
+                else _head_count(state, "key")
+            ),
+            dropout=0.0,
+            weight_tying=(
+                state["vocab_proj.weight"].data_ptr() == state["token_emb.weight"].data_ptr()
+            ),
+            moe_num_experts=int(num_experts),
+            moe_experts_per_tok=moe_experts_per_tok,
+            moe_layer_interval=interval,
+            moe_grouped=True,
+            moe_num_shared_experts=num_shared,
+            moe_gate_fn=moe_gate_fn,
+            moe_normalize_weights=moe_normalize_weights,
+        )
+
     moe_layers = sorted(
         {
             int(key.split(".")[1])
@@ -141,9 +208,9 @@ def config_from_state_dict(
             if key.startswith(f"layers.{moe_layers[0]}.ff.experts.")
         )
         intermediate_size = state[f"layers.{moe_layers[0]}.ff.experts.0.up.weight"].shape[0]
-        # Layers are laid out at a fixed stride, so the gap between the first two
-        # recovers the interval (a single MoE layer implies every layer).
-        interval = moe_layers[1] - moe_layers[0] if len(moe_layers) > 1 else 1
+        # Layers are laid out at a fixed stride. With only layer zero present,
+        # num_layers is the smallest stride that reproduces the saved layout.
+        interval = _moe_layer_interval(moe_layers, num_layers)
     else:
         num_experts = 0
         intermediate_size = state["layers.0.ff.up.weight"].shape[0]
@@ -174,6 +241,7 @@ def config_from_state_dict(
         moe_num_experts=num_experts,
         moe_experts_per_tok=moe_experts_per_tok if num_experts else 2,
         moe_layer_interval=interval,
+        moe_gate_fn=moe_gate_fn if num_experts else "softmax",
     )
 
 
@@ -213,6 +281,9 @@ class ChatEngine:
         tokenizer_name: str = "EleutherAI/gpt-neo-125m",
         device: str | torch.device | None = None,
         dtype: torch.dtype | None = None,
+        moe_experts_per_tok: int = 2,
+        moe_gate_fn: str = "softmax",
+        moe_normalize_weights: bool = True,
     ) -> "ChatEngine":
         """Load a checkpoint written by ``examples/train_sft.py``.
 
@@ -237,7 +308,12 @@ class ChatEngine:
 
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         state = _clean_state_dict(checkpoint.get("model", checkpoint))
-        config = config_from_state_dict(state)
+        config = config_from_state_dict(
+            state,
+            moe_experts_per_tok=moe_experts_per_tok,
+            moe_gate_fn=moe_gate_fn,
+            moe_normalize_weights=moe_normalize_weights,
+        )
         # A model trained with --pad-vocab-to is wider than its tokenizer; those
         # extra rows are unreachable padding and are masked out before sampling.
         # A model *narrower* than the tokenizer is genuinely broken: it cannot

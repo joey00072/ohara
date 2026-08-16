@@ -46,6 +46,12 @@ def main():
         default=2,
         help="top-k for MoE checkpoints; no tensor shape records it",
     )
+    parser.add_argument("--moe-gate-fn", choices=("softmax", "sigmoid"), default="softmax")
+    parser.add_argument(
+        "--moe-no-normalize-weights",
+        action="store_true",
+        help="the grouped checkpoint was trained without normalizing sigmoid weights",
+    )
     parser.add_argument("--label", type=str, default=None, help="name for the result row")
     parser.add_argument("--output-json", type=str, default=None)
     parser.add_argument(
@@ -91,7 +97,12 @@ def main():
         checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
         state = checkpoint.get("model", checkpoint)
         state = {strip_wrapper_prefixes(k): v for k, v in state.items()}
-        config = config_from_state_dict(state, moe_experts_per_tok=args.moe_experts_per_tok)
+        config = config_from_state_dict(
+            state,
+            moe_experts_per_tok=args.moe_experts_per_tok,
+            moe_gate_fn=args.moe_gate_fn,
+            moe_normalize_weights=not args.moe_no_normalize_weights,
+        )
         model = Llama(config)
         model.load_state_dict(state, strict=False)
         model = model.to(device=device, dtype=model_dtype)

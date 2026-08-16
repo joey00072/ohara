@@ -32,6 +32,18 @@ def parse_args() -> argparse.Namespace:
         default="EleutherAI/gpt-neo-125m",
         help="fallback tokenizer when no directory was saved next to the checkpoint",
     )
+    parser.add_argument(
+        "--moe-experts-per-tok",
+        type=int,
+        default=2,
+        help="top-k for MoE checkpoints; no tensor shape records it",
+    )
+    parser.add_argument("--moe-gate-fn", choices=("softmax", "sigmoid"), default="softmax")
+    parser.add_argument(
+        "--moe-no-normalize-weights",
+        action="store_true",
+        help="the grouped checkpoint was trained without normalizing sigmoid weights",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--device", default=None)
@@ -58,6 +70,9 @@ def main() -> None:
         tokenizer_name=args.tokenizer,
         device=args.device,
         dtype=dtype,
+        moe_experts_per_tok=args.moe_experts_per_tok,
+        moe_gate_fn=args.moe_gate_fn,
+        moe_normalize_weights=not args.moe_no_normalize_weights,
     )
     info = engine.metadata(args.checkpoint)
     print(

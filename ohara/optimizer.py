@@ -141,7 +141,8 @@ def _polar_express(matrix: Tensor, steps: int) -> Tensor:
 class MuonAdamW(optim.Optimizer):
     """Hybrid optimizer: Muon for matrices, AdamW elsewhere, either optionally on a sphere.
 
-    Muon groups must contain same-shaped 2-D parameters. AdamW groups may contain
+    Muon groups must contain same-shaped 2-D parameters, or one 3-D parameter
+    representing a pre-stacked batch of matrices. AdamW groups may contain
     arbitrary dense parameters. Keeping every algorithm in one Optimizer makes
     checkpointing and AMP stepping behave exactly like a normal PyTorch optimizer.
 
@@ -181,10 +182,23 @@ class MuonAdamW(optim.Optimizer):
                     )
             if kind == "muon":
                 params = list(group.get("params", ()))
-                if not params or any(parameter.ndim != 2 for parameter in params):
-                    raise ValueError("Muon groups must contain two-dimensional parameters")
-                if any(parameter.shape != params[0].shape for parameter in params):
-                    raise ValueError("parameters in a Muon group must have identical shapes")
+                if not params:
+                    raise ValueError("Muon groups must contain matrix parameters")
+                # A single 3D parameter is a batch of matrices that is *already*
+                # stacked -- mixture-of-experts weights are stored that way, one
+                # tensor holding every expert. Muon's update is batched anyway, so
+                # it applies directly with no stacking step.
+                pre_stacked = len(params) == 1 and params[0].ndim == 3
+                if not pre_stacked:
+                    if any(parameter.ndim != 2 for parameter in params):
+                        raise ValueError(
+                            "Muon groups must contain two-dimensional parameters, or a "
+                            "single pre-stacked three-dimensional parameter"
+                        )
+                    if any(parameter.shape != params[0].shape for parameter in params):
+                        raise ValueError(
+                            "parameters in a Muon group must have identical shapes"
+                        )
                 momentum = float(group.get("momentum", 0.95))
                 beta2 = float(group.get("beta2", 0.9))
                 if not 0 <= momentum < 1 or not 0 <= beta2 < 1:
@@ -261,7 +275,10 @@ class MuonAdamW(optim.Optimizer):
             torch._foreach_div(exp_avgs, bias_correction1), denominators
         )
 
-        _hypersphere_update_(params, directions, float(group["lr"]))
+        if len(params) == 1 and params[0].ndim == 3:
+            _hypersphere_update_stacked_(params[0], directions[0], float(group["lr"]))
+        else:
+            _hypersphere_update_(params, directions, float(group["lr"]))
 
     def _muon_step(self, group: dict[str, Any]) -> None:
         params: list[Tensor] = group["params"]
@@ -277,28 +294,34 @@ class MuonAdamW(optim.Optimizer):
             raise RuntimeError("MuonAdamW does not support sparse gradients")
 
         first = params[0]
-        rows, columns = first.shape
+        # A pre-stacked parameter already carries its batch dimension, so the
+        # buffers match its shape directly instead of gaining one.
+        pre_stacked = len(params) == 1 and first.ndim == 3
+        rows, columns = first.shape[-2:]
+        batch = first.size(0) if pre_stacked else len(params)
         state = self.state[first]
         if "momentum_buffer" not in state:
             state["momentum_buffer"] = torch.zeros(
-                len(params), rows, columns, dtype=first.dtype, device=first.device
+                batch, rows, columns, dtype=first.dtype, device=first.device
             )
         hyperspherical = bool(group.get("hypersphere", False))
         reduction_dim = -1 if rows >= columns else -2
         # MuonH never consumes the second moment, so do not pay for the buffer.
         if not hyperspherical and "second_momentum_buffer" not in state:
             second_shape = (
-                (len(params), rows, 1)
-                if reduction_dim == -1
-                else (len(params), 1, columns)
+                (batch, rows, 1) if reduction_dim == -1 else (batch, 1, columns)
             )
             state["second_momentum_buffer"] = torch.zeros(
                 second_shape, dtype=first.dtype, device=first.device
             )
 
         momentum_buffer = state["momentum_buffer"]
-        stacked_gradients = torch.stack([parameter.grad for parameter in params])
-        stacked_parameters = torch.stack(params)
+        if pre_stacked:
+            stacked_gradients = params[0].grad
+            stacked_parameters = params[0].detach()
+        else:
+            stacked_gradients = torch.stack([parameter.grad for parameter in params])
+            stacked_parameters = torch.stack(params)
 
         momentum = float(group["momentum"])
         momentum_buffer.lerp_(stacked_gradients, 1.0 - momentum)
@@ -315,7 +338,8 @@ class MuonAdamW(optim.Optimizer):
             _hypersphere_update_stacked_(
                 stacked_parameters, update.to(stacked_parameters.dtype), float(group["lr"])
             )
-            torch._foreach_copy_(params, list(stacked_parameters.unbind(0)))
+            if not pre_stacked:
+                torch._foreach_copy_(params, list(stacked_parameters.unbind(0)))
             return
 
         second_momentum_buffer = state["second_momentum_buffer"]
@@ -340,7 +364,11 @@ class MuonAdamW(optim.Optimizer):
             learning_rate * update
             + learning_rate * weight_decay * stacked_parameters * decay_mask
         )
-        torch._foreach_copy_(params, list(stacked_parameters.unbind(0)))
+        # A pre-stacked parameter shares storage with stacked_parameters, so the
+        # in-place update above already landed on it; copying back would only
+        # reshape-mismatch.
+        if not pre_stacked:
+            torch._foreach_copy_(params, list(stacked_parameters.unbind(0)))
 
     @torch.no_grad()
     def step(self, closure: Callable[[], float] | None = None) -> float | None:
@@ -375,6 +403,9 @@ class _LlamaParameterGroups:
     embedding: list[torch.nn.Parameter]
     unembedding: list[torch.nn.Parameter]  # the lm_head; empty when weights are tied
     matrix: list[torch.nn.Parameter]  # hidden linear weights
+    # Mixture-of-experts weights, one (experts, in, out) tensor per projection.
+    # Already a batch of matrices, so Muon takes each without stacking.
+    stacked_matrix: list[torch.nn.Parameter]
     scalar: list[torch.nn.Parameter]  # norm gains, biases, anything 1-D
     hidden_size: int
 
@@ -407,14 +438,26 @@ def _partition_llama_parameters(model: torch.nn.Module, caller: str) -> _LlamaPa
         for parameter in root.layers.parameters()
         if parameter.requires_grad and parameter.ndim == 2 and id(parameter) not in reserved_ids
     ]
-    matrix_ids = {id(parameter) for parameter in matrix}
+    # Mixture-of-experts layers store every expert in one (experts, in, out)
+    # tensor. Those are matrices too -- a whole batch of them -- and belong on
+    # Muon at the matrix learning rate. Without this they fall through to the
+    # scalar catch-all and train at the norm-gain rate, which silently
+    # undertrains most of the model.
+    stacked_matrix = [
+        parameter
+        for parameter in root.layers.parameters()
+        if parameter.requires_grad and parameter.ndim == 3 and id(parameter) not in reserved_ids
+    ]
+    matrix_ids = {id(parameter) for parameter in matrix} | {
+        id(parameter) for parameter in stacked_matrix
+    }
     scalar = [
         parameter
         for parameter in trainable
         if id(parameter) not in reserved_ids and id(parameter) not in matrix_ids
     ]
 
-    assigned = embedding + unembedding + matrix + scalar
+    assigned = embedding + unembedding + matrix + stacked_matrix + scalar
     if len({id(parameter) for parameter in assigned}) != len(assigned):
         raise RuntimeError("optimizer parameter groups overlap")
     if {id(parameter) for parameter in assigned} != {id(parameter) for parameter in trainable}:
@@ -426,6 +469,7 @@ def _partition_llama_parameters(model: torch.nn.Module, caller: str) -> _LlamaPa
         embedding=embedding,
         unembedding=unembedding,
         matrix=matrix,
+        stacked_matrix=stacked_matrix,
         scalar=scalar,
         hidden_size=int(root.config.hidden_size),
     )
@@ -527,6 +571,23 @@ def build_muon_adamw(
         0.0,
     )
 
+    # Each stacked tensor is its own Muon group: it is already the batch.
+    for parameter in partition.stacked_matrix:
+        groups.append(
+            {
+                "name": f"expert_{'x'.join(str(size) for size in parameter.shape)}",
+                "kind": "muon",
+                "params": [parameter],
+                "lr": matrix_learning_rate,
+                "initial_lr": matrix_learning_rate,
+                "lr_scale": 1.0,
+                "weight_decay": weight_decay,
+                "momentum": momentum,
+                "beta2": beta2,
+                "ns_steps": ns_steps,
+            }
+        )
+
     for shape, params in _group_matrices_by_shape(matrix_params):
         groups.append(
             {
@@ -584,6 +645,24 @@ def build_adamh(
                 "kind": "adamw",
                 "hypersphere": True,
                 "params": params,
+                "lr": learning_rate,
+                "initial_lr": learning_rate,
+                "lr_scale": 1.0,
+                "betas": betas,
+                "eps": eps,
+                "weight_decay": 0.0,
+            }
+        )
+
+    # Each expert stack is one Parameter but contains many independent matrices;
+    # keep each expert matrix on its own constant-norm sphere.
+    for parameter in partition.stacked_matrix:
+        groups.append(
+            {
+                "name": f"adamh_expert_{'x'.join(str(size) for size in parameter.shape)}",
+                "kind": "adamw",
+                "hypersphere": True,
+                "params": [parameter],
                 "lr": learning_rate,
                 "initial_lr": learning_rate,
                 "lr_scale": 1.0,
@@ -653,6 +732,23 @@ def build_muonh_adamh(
                 "kind": "muon",
                 "hypersphere": True,
                 "params": params,
+                "lr": learning_rate,
+                "initial_lr": learning_rate,
+                "lr_scale": 1.0,
+                "momentum": momentum,
+                "ns_steps": ns_steps,
+                "beta2": 0.9,  # unused on the hyperspherical path
+                "weight_decay": 0.0,
+            }
+        )
+
+    for parameter in partition.stacked_matrix:
+        groups.append(
+            {
+                "name": f"muonh_expert_{'x'.join(str(size) for size in parameter.shape)}",
+                "kind": "muon",
+                "hypersphere": True,
+                "params": [parameter],
                 "lr": learning_rate,
                 "initial_lr": learning_rate,
                 "lr_scale": 1.0,

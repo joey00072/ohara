@@ -9,6 +9,7 @@ from ohara.embeddings_pos.rotary import apply_rope, precompute_freqs_cis
 from ohara.modules.kv_cache import KVCache
 from ohara.modules.mlp import SwiGLU
 from ohara.modules.moe import MoE
+from ohara.modules.moe_grouped import GroupedMoE
 from ohara.modules.norm import RMSNorm
 
 
@@ -35,6 +36,13 @@ class Config:
     moe_layer_interval: int = 1
     moe_gate_fn: str = "softmax"
     moe_quantile_balancing: bool = True
+    # Fine-grained MoE: many narrow routed experts plus always-on shared experts,
+    # dispatched with grouped matmuls instead of a per-expert Python loop. Required
+    # in practice above ~32 experts, where the loop's per-expert GEMMs and host
+    # sync dominate. See ohara/modules/moe_grouped.py.
+    moe_grouped: bool = False
+    moe_num_shared_experts: int = 0
+    moe_normalize_weights: bool = True
 
 
 class Attention(nn.Module):
@@ -149,7 +157,18 @@ class Block(nn.Module):
 
         self.attn = Attention(cfg)
         self.is_moe = uses_moe(cfg, layer_idx)
-        if self.is_moe:
+        if self.is_moe and cfg.moe_grouped:
+            self.ff = GroupedMoE(
+                dim=cfg.hidden_size,
+                hidden_dim=cfg.intermediate_size,
+                num_experts=cfg.moe_num_experts,
+                num_experts_per_tok=cfg.moe_experts_per_tok,
+                num_shared_experts=cfg.moe_num_shared_experts,
+                gate_fn=cfg.moe_gate_fn,
+                normalize_weights=cfg.moe_normalize_weights,
+                quantile_balancing=cfg.moe_quantile_balancing,
+            )
+        elif self.is_moe:
             self.ff = MoE(
                 dim=cfg.hidden_size,
                 hidden_dim=cfg.intermediate_size,
@@ -208,6 +227,18 @@ class Llama(nn.Module):
             raise ValueError("init_style must be 'standard' or 'nanochat'")
         if cfg.init_style == "nanochat" and cfg.weight_tying:
             raise ValueError("nanochat initialization requires untied embeddings")
+        if cfg.moe_num_experts < 0 or cfg.moe_num_shared_experts < 0:
+            raise ValueError("MoE expert counts cannot be negative")
+        if cfg.moe_layer_interval < 1:
+            raise ValueError("moe_layer_interval must be positive")
+        if cfg.moe_gate_fn not in {"softmax", "sigmoid"}:
+            raise ValueError("moe_gate_fn must be 'softmax' or 'sigmoid'")
+        if cfg.moe_grouped and cfg.moe_num_experts == 0:
+            raise ValueError("moe_grouped requires moe_num_experts > 0")
+        if cfg.moe_num_shared_experts > 0 and not cfg.moe_grouped:
+            raise ValueError("shared experts require moe_grouped")
+        if not cfg.moe_normalize_weights and not cfg.moe_grouped:
+            raise ValueError("moe_normalize_weights only applies to grouped MoE")
 
         self.config = cfg
 
@@ -356,7 +387,14 @@ class Llama(nn.Module):
         total = 0
         for block in self.layers:
             total += sum(p.numel() for p in block.attn.parameters() if p.ndim >= 2)
-            if block.is_moe:
+            if isinstance(block.ff, GroupedMoE):
+                ff = block.ff
+                per_expert = ff.dim * ff.hidden_dim * 3
+                total += per_expert * ff.num_experts_per_tok
+                # Shared experts run for every token, so they count in full.
+                total += per_expert * ff.num_shared_experts
+                total += ff.router.weight.numel()
+            elif block.is_moe:
                 per_expert = sum(
                     p.numel() for p in block.ff.experts[0].parameters() if p.ndim >= 2
                 )
@@ -392,6 +430,13 @@ class Llama(nn.Module):
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        elif isinstance(module, GroupedMoE):
+            # These stacked weights are Parameters rather than Linear children,
+            # so initialize them explicitly under the standard Llama scheme.
+            torch.nn.init.normal_(module.w_gate, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.w_up, mean=0.0, std=0.02)
+            torch.nn.init.normal_(module.w_down, mean=0.0, std=0.02)
+            module.router_bias.zero_()
 
     @torch.no_grad()
     def _init_nanochat_weights(self) -> None:
@@ -404,6 +449,11 @@ class Llama(nn.Module):
             torch.nn.init.uniform_(block.attn.key.weight, -bound, bound)
             torch.nn.init.uniform_(block.attn.value.weight, -bound, bound)
             torch.nn.init.zeros_(block.attn.proj.weight)
+            if isinstance(block.ff, GroupedMoE):
+                block.ff.reset_parameters()
+                block.norm1.reset_parameters()
+                block.norm2.reset_parameters()
+                continue
             experts = block.ff.experts if block.is_moe else [block.ff]
             for expert in experts:
                 torch.nn.init.uniform_(expert.up.weight, -0.4 * bound, 0.4 * bound)
