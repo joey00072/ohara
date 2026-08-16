@@ -16,7 +16,7 @@ from ohara.embeddings_pos.xpos import XPos
 from ohara.modules.attention import Attention, CasualAttention, CausalAttention
 from ohara.modules.kv_cache import KVCache, dequantize_int8, quantize_int8
 from ohara.modules.mlp import MLP_MAP
-from ohara.modules.moe import MoE
+from ohara.modules.moe import MoE, apply_qb_update, expert_load, maximal_violation
 from ohara.modules.norm import RMSNorm
 from ohara.swa import make_swa_mask, sliding_window_attention_with_mask
 from ohara.utils import BetterCycle, random_name
@@ -187,6 +187,87 @@ def test_moe_routes_without_changing_shape() -> None:
         out = moe(x)
     assert out.shape == x.shape
     assert torch.isfinite(out).all()
+
+
+def test_moe_matches_a_naive_per_token_loop() -> None:
+    """The sorted dispatch must agree with routing each token by hand."""
+    moe = MoE(dim=16, hidden_dim=32, num_experts=4, num_experts_per_tok=2).eval()
+    x = torch.randn(3, 7, 16)
+
+    with torch.no_grad():
+        out = moe(x)
+
+        flat = x.reshape(-1, 16)
+        logits = moe.gate(flat).float()
+        idx = torch.topk(logits + moe.router_bias, 3, dim=-1).indices[:, :2]
+        weights = logits.gather(-1, idx).softmax(dim=-1)
+        expected = torch.zeros_like(flat)
+        for token in range(flat.size(0)):
+            for slot in range(2):
+                expert = moe.experts[idx[token, slot]]
+                expected[token] += weights[token, slot] * expert(flat[token])
+
+    torch.testing.assert_close(out.reshape(-1, 16), expected, rtol=1e-4, atol=1e-5)
+
+
+def test_moe_gradient_reaches_the_gate_and_every_chosen_expert() -> None:
+    moe = MoE(dim=16, hidden_dim=32, num_experts=4, num_experts_per_tok=2)
+    moe(torch.randn(4, 16, 16)).sum().backward()
+
+    assert moe.gate.weight.grad is not None
+    assert moe.gate.weight.grad.abs().sum() > 0
+    for expert in moe.experts:
+        assert expert.up.weight.grad.abs().sum() > 0
+
+
+def test_quantile_balancing_needs_room_for_the_threshold() -> None:
+    # QB reads the (k+1)-th logit, so top-k over every expert is not representable.
+    with pytest.raises(AssertionError):
+        MoE(dim=16, num_experts=4, num_experts_per_tok=4)
+    MoE(dim=16, num_experts=4, num_experts_per_tok=4, quantile_balancing=False)
+
+
+def test_quantile_balancing_is_a_noop_until_the_update_is_applied() -> None:
+    moe = MoE(dim=16, hidden_dim=32, num_experts=4, num_experts_per_tok=2)
+    x = torch.randn(2, 32, 16)
+    moe(x)  # accumulates statistics, but must not move the bias on its own
+    assert torch.equal(moe.router_bias, torch.zeros(4))
+
+    apply_qb_update(moe)
+    assert not torch.equal(moe.router_bias, torch.zeros(4))
+    # The bias is only ever meaningful up to a constant, so it is kept mean-centered.
+    assert moe.router_bias.mean().abs() < 1e-5
+    assert moe.qb_beta_count.item() == 0  # statistics consumed
+
+
+def test_quantile_balancing_reduces_load_imbalance() -> None:
+    torch.manual_seed(0)
+    moe = MoE(dim=16, hidden_dim=32, num_experts=8, num_experts_per_tok=2)
+    # A gate skewed towards a couple of experts, which balancing has to undo.
+    with torch.no_grad():
+        moe.gate.weight.mul_(4.0)
+    x = torch.randn(4, 256, 16)
+
+    moe(x)
+    before = maximal_violation(expert_load(moe))
+
+    for _ in range(5):
+        moe(x)
+        apply_qb_update(moe)
+    moe(x)
+    after = maximal_violation(expert_load(moe))
+
+    assert after.item() < before.item()
+
+
+def test_expert_load_counts_every_routed_token_then_resets() -> None:
+    moe = MoE(dim=16, hidden_dim=32, num_experts=4, num_experts_per_tok=2)
+    moe(torch.randn(2, 10, 16))
+
+    counts = expert_load(moe, reset=True)
+    assert counts.shape == (1, 4)  # one MoE layer, four experts
+    assert counts.sum().item() == 2 * 10 * 2  # tokens x experts per token
+    assert expert_load(moe).sum().item() == 0
 
 
 # --- positional biases and masks --------------------------------------------
