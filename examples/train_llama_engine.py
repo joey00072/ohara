@@ -103,6 +103,22 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--moe-gate-fn", choices=("softmax", "sigmoid"), default="softmax")
     parser.add_argument(
+        "--moe-grouped",
+        action="store_true",
+        help="dispatch experts with grouped matmuls; required above ~32 experts",
+    )
+    parser.add_argument(
+        "--moe-num-shared-experts",
+        type=int,
+        default=0,
+        help="always-active experts per layer (DeepSeek-style shared expert isolation)",
+    )
+    parser.add_argument(
+        "--moe-no-normalize-weights",
+        action="store_true",
+        help="do not rescale routed weights to sum to 1 (grouped sigmoid gating only)",
+    )
+    parser.add_argument(
         "--moe-no-quantile-balancing",
         action="store_true",
         help="disable closed-form router balancing (it needs no aux loss, so keep it on)",
@@ -250,6 +266,9 @@ def run() -> None:
         moe_layer_interval=args.moe_layer_interval,
         moe_gate_fn=args.moe_gate_fn,
         moe_quantile_balancing=not args.moe_no_quantile_balancing,
+        moe_grouped=args.moe_grouped,
+        moe_num_shared_experts=args.moe_num_shared_experts,
+        moe_normalize_weights=not args.moe_no_normalize_weights,
     )
     raw_model = Llama(model_cfg)
     model = raw_model

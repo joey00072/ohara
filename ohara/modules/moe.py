@@ -180,16 +180,26 @@ class MoE(nn.Module):
 def apply_qb_update(module: nn.Module) -> None:
     """Apply the quantile balancing update to every MoE in a model.
 
-    Drop this into the training loop right next to `optimizer.step()`.
+    Drop this into the training loop right next to `optimizer.step()`. Covers both
+    the loop dispatch here and the grouped one in ohara.modules.moe_grouped, since
+    a model may use either.
     """
+    from ohara.modules.moe_grouped import GroupedMoE
+
     for submodule in module.modules():
-        if isinstance(submodule, MoE) and submodule.quantile_balancing:
+        if isinstance(submodule, (MoE, GroupedMoE)) and submodule.quantile_balancing:
             submodule.apply_qb_update()
 
 
 def expert_load(module: nn.Module, reset: bool = True) -> torch.Tensor | None:
     """Stack the per-expert token counts of every MoE in a model: (num_moe_layers, num_experts)."""
-    counts = [m.expert_load(reset=reset) for m in module.modules() if isinstance(m, MoE)]
+    from ohara.modules.moe_grouped import GroupedMoE
+
+    counts = [
+        m.expert_load(reset=reset)
+        for m in module.modules()
+        if isinstance(m, (MoE, GroupedMoE))
+    ]
     return torch.stack(counts) if counts else None
 
 
