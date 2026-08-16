@@ -82,24 +82,73 @@ def sample_next_token(
     return torch.multinomial(probs, num_samples=1, generator=generator)
 
 
+# Checkpoints can carry either or both wrapper prefixes, and in either order:
+# DDP adds "module." and torch.compile adds "_orig_mod.", so a compiled model
+# wrapped in DDP saves keys like "module._orig_mod.layers.0...". Strip whatever
+# is on the front until nothing is left to strip.
+_WRAPPER_PREFIXES = ("module.", "_orig_mod.")
+
+
+def strip_wrapper_prefixes(key: str) -> str:
+    changed = True
+    while changed:
+        changed = False
+        for prefix in _WRAPPER_PREFIXES:
+            if key.startswith(prefix):
+                key = key[len(prefix):]
+                changed = True
+    return key
+
+
 def _clean_state_dict(state: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    return {
-        key.removeprefix("_orig_mod.").removeprefix("module."): value
-        for key, value in state.items()
-    }
+    return {strip_wrapper_prefixes(key): value for key, value in state.items()}
 
 
-def config_from_state_dict(state: Mapping[str, torch.Tensor]) -> Config:
+def config_from_state_dict(
+    state: Mapping[str, torch.Tensor], *, moe_experts_per_tok: int = 2
+) -> Config:
     """Recover a model config from checkpoint tensor shapes.
 
     Checkpoints written by the training entrypoints hold a bare state dict, so
-    the architecture is inferred rather than read back. Every field below is
-    determined by a shape except the head dimension, which comes from the
-    rotary buffer.
+    the architecture is inferred rather than read back. Everything is determined
+    by a shape except two things:
+
+    - the head dimension, which comes from the rotary buffer;
+    - ``moe_experts_per_tok``, which is a routing choice and leaves no trace in
+      any tensor shape. It defaults to 2 and must be passed if a checkpoint was
+      trained with another top-k, otherwise the model loads with the right
+      weights but routes differently than it was trained to.
     """
     vocab_size, hidden_size = state["token_emb.weight"].shape
-    num_layers = 1 + max(int(key.split(".")[1]) for key in state if key.startswith("layers."))
-    intermediate_size = state["layers.0.ff.up.weight"].shape[0]
+    layer_indices = {
+        int(key.split(".")[1]) for key in state if key.startswith("layers.")
+    }
+    num_layers = 1 + max(layer_indices)
+
+    # An MoE layer stores its feed-forward under ff.experts.<n>.*; a dense one
+    # stores ff.up/gate/down directly.
+    moe_layers = sorted(
+        {
+            int(key.split(".")[1])
+            for key in state
+            if key.startswith("layers.") and ".ff.experts." in key
+        }
+    )
+    if moe_layers:
+        num_experts = 1 + max(
+            int(key.split(".")[4])
+            for key in state
+            if key.startswith(f"layers.{moe_layers[0]}.ff.experts.")
+        )
+        intermediate_size = state[f"layers.{moe_layers[0]}.ff.experts.0.up.weight"].shape[0]
+        # Layers are laid out at a fixed stride, so the gap between the first two
+        # recovers the interval (a single MoE layer implies every layer).
+        interval = moe_layers[1] - moe_layers[0] if len(moe_layers) > 1 else 1
+    else:
+        num_experts = 0
+        intermediate_size = state["layers.0.ff.up.weight"].shape[0]
+        interval = 1
+
     query_out = state["layers.0.attn.query.weight"].shape[0]
     key_out = state["layers.0.attn.key.weight"].shape[0]
 
@@ -122,6 +171,9 @@ def config_from_state_dict(state: Mapping[str, torch.Tensor]) -> Config:
         num_key_value_heads=0 if num_kv_heads == num_heads else num_kv_heads,
         dropout=0.0,
         weight_tying=tied,
+        moe_num_experts=num_experts,
+        moe_experts_per_tok=moe_experts_per_tok if num_experts else 2,
+        moe_layer_interval=interval,
     )
 
 
@@ -147,6 +199,9 @@ class ChatEngine:
         self.specials = special_token_ids(tokenizer)
         self.assistant_end_id = self.specials[ASSISTANT_END]
         self.eos_token_id = tokenizer.eos_token_id
+        # Ids at or above this exist only to pad the matmul to a tensor-core
+        # friendly width. They decode to nothing, so they must never be sampled.
+        self.tokenizer_vocab_size = len(tokenizer)
         self.max_sequence_length = model.config.max_sequence_length
 
     @classmethod
@@ -183,9 +238,13 @@ class ChatEngine:
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         state = _clean_state_dict(checkpoint.get("model", checkpoint))
         config = config_from_state_dict(state)
-        if config.vocab_size != len(tokenizer):
+        # A model trained with --pad-vocab-to is wider than its tokenizer; those
+        # extra rows are unreachable padding and are masked out before sampling.
+        # A model *narrower* than the tokenizer is genuinely broken: it cannot
+        # represent tokens the tokenizer can produce.
+        if config.vocab_size < len(tokenizer):
             raise ValueError(
-                f"checkpoint vocabulary ({config.vocab_size:,}) does not match the "
+                f"checkpoint vocabulary ({config.vocab_size:,}) is smaller than the "
                 f"tokenizer ({len(tokenizer):,}). Point --tokenizer-dir at the "
                 "directory saved next to the checkpoint."
             )
@@ -260,6 +319,8 @@ class ChatEngine:
         for _ in range(max_new_tokens):
             logits = self.model(model_input, kv_cache, position)
             position += model_input.size(1)
+            if logits.size(-1) > self.tokenizer_vocab_size:
+                logits[..., self.tokenizer_vocab_size:] = float("-inf")
             next_token = sample_next_token(logits, config, generator)
             token_id = int(next_token.item())
             if token_id == self.assistant_end_id or token_id == self.eos_token_id:

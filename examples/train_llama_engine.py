@@ -17,6 +17,7 @@ from ohara.lr_scheduler import CosineScheduler
 from ohara.tokenbin import TokenBinDataset
 from ohara.tracking import BACKENDS as TRACKING_BACKENDS, create_logger
 from ohara.models.llama import Config, Llama
+from ohara.modules.moe import apply_qb_update
 from ohara.optimizer import build_adamh, build_adamw, build_muon_adamw, build_muonh_adamh
 from ohara.scaling import (
     CosineWeightDecayScheduler,
@@ -91,6 +92,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-layers", type=int, default=6)
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--dropout", type=float, default=0.0)
+    # Mixture of experts. 0 keeps every feed-forward dense.
+    parser.add_argument("--moe-num-experts", type=int, default=0)
+    parser.add_argument("--moe-experts-per-tok", type=int, default=2)
+    parser.add_argument(
+        "--moe-layer-interval",
+        type=int,
+        default=1,
+        help="make every Nth layer an MoE and leave the rest dense (1 = all layers)",
+    )
+    parser.add_argument("--moe-gate-fn", choices=("softmax", "sigmoid"), default="softmax")
+    parser.add_argument(
+        "--moe-no-quantile-balancing",
+        action="store_true",
+        help="disable closed-form router balancing (it needs no aux loss, so keep it on)",
+    )
     parser.add_argument(
         "--init-style", choices=("standard", "nanochat"), default="standard"
     )
@@ -118,7 +134,13 @@ def parse_args() -> argparse.Namespace:
         help="auto prefers wandb when a key is set, else falls back to local trackio",
     )
     parser.add_argument("--project", default="ohara")
-    parser.add_argument("--run", default=None, help="run name shown in the tracker")
+    parser.add_argument(
+        "--run-name",
+        default=None,
+        # Not "--run": torchrun has --run-path, and argparse rejects the prefix
+        # as ambiguous when the script is launched under it.
+        help="run name shown in the tracker",
+    )
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument(
         "--compile",
@@ -223,6 +245,11 @@ def run() -> None:
         multiple_of=4,
         weight_tying=args.weight_tying,
         init_style=args.init_style,
+        moe_num_experts=args.moe_num_experts,
+        moe_experts_per_tok=args.moe_experts_per_tok,
+        moe_layer_interval=args.moe_layer_interval,
+        moe_gate_fn=args.moe_gate_fn,
+        moe_quantile_balancing=not args.moe_no_quantile_balancing,
     )
     raw_model = Llama(model_cfg)
     model = raw_model
@@ -281,7 +308,7 @@ def run() -> None:
         tracker = create_logger(
             args.logger,
             project=args.project,
-            run_name=args.run,
+            run_name=args.run_name,
             config={
                 **vars(args),
                 "vocab_size": vocab_size,
@@ -387,15 +414,20 @@ def run() -> None:
                 "weight_decay": weight_decay_scheduler(iteration),
             }
 
-    token_bytes = (
-        get_token_bytes(
+    token_bytes = None
+    if args.evaluate_bpb:
+        token_bytes = get_token_bytes(
             tokenizer,
             device=engine.device,
             cache_path=args.token_bytes_cache,
         )
-        if args.evaluate_bpb
-        else None
-    )
+        if token_bytes.numel() < vocab_size:
+            # --pad-vocab-to widened the model past the tokenizer. The padded ids
+            # decode to nothing and are never targets, so they carry zero bytes and
+            # cannot affect bits-per-byte; they just have to exist for the lookup.
+            token_bytes = torch.nn.functional.pad(
+                token_bytes, (0, vocab_size - token_bytes.numel())
+            )
     trainer = Trainer(
         engine=engine,
         model=model,
@@ -416,6 +448,11 @@ def run() -> None:
         timing_warmup_steps=10,
         checkpoint_path=args.checkpoint_path,
         token_bytes=token_bytes,
+        apply_router_balancing=(
+            apply_qb_update
+            if args.moe_num_experts > 0 and not args.moe_no_quantile_balancing
+            else None
+        ),
     )
 
     start_iter = 0
@@ -463,7 +500,7 @@ def run() -> None:
         )
         print(
             f"device={engine.device} precision={args.precision} params={parameter_count:,} "
-            f"tokens/step/rank={tokens_per_step:,}{vocab_note} "
+            f"tokens/step/rank={tokens_per_step:,} max_iters={args.max_iters:,}{vocab_note} "
             # Padded rows are never targets, so chance level is set by the real vocabulary.
             f"random_loss={math.log(tokenizer_vocab_size):.4f}"
             f"{' compiled' if args.compile else ''}"

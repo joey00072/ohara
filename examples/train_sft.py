@@ -32,7 +32,8 @@ from ohara.chat import (
     resize_token_embeddings,
     special_token_ids,
 )
-from ohara.models.llama import Config, Llama
+from ohara.chat_engine import config_from_state_dict, strip_wrapper_prefixes
+from ohara.models.llama import Llama
 from ohara.optimizer import build_adamw, build_muon_adamw
 from ohara.runtime import (
     EngineConfig,
@@ -42,6 +43,7 @@ from ohara.runtime import (
     PrecisionMode,
 )
 from ohara.scaling import CosineWeightDecayScheduler, MuonMomentumScheduler, WarmupStableDecayScheduler
+from ohara.modules.moe import apply_qb_update
 from ohara.sft import ConversationDataset, build_mixture
 from ohara.tokenizer import get_token_bytes
 from ohara.tracking import BACKENDS as TRACKING_BACKENDS, create_logger
@@ -56,6 +58,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tokenizer", default="EleutherAI/gpt-neo-125m")
     parser.add_argument("--tokenizer-local-files-only", action="store_true")
     parser.add_argument("--token-bytes-cache", default=None)
+    parser.add_argument(
+        "--moe-experts-per-tok",
+        type=int,
+        default=2,
+        help="top-k the base was trained with; no tensor shape records it",
+    )
     # Data mixture
     parser.add_argument("--smoltalk-limit", type=int, default=None)
     parser.add_argument("--mmlu-epochs", type=int, default=1)
@@ -109,9 +117,19 @@ def parse_args() -> argparse.Namespace:
         help="auto prefers wandb when a key is set, else falls back to local trackio",
     )
     parser.add_argument("--project", default="ohara-sft")
-    parser.add_argument("--run", default=None, help="run name shown in the tracker")
+    parser.add_argument(
+        "--run-name",
+        default=None,
+        # Not "--run": torchrun has --run-path, and argparse rejects the prefix
+        # as ambiguous when the script is launched under it.
+        help="run name shown in the tracker",
+    )
     # Runtime
-    parser.add_argument("--precision", default="bf16")
+    parser.add_argument(
+        "--precision",
+        choices=[mode.value for mode in PrecisionMode],
+        default=PrecisionMode.BF16_MIXED.value,
+    )
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--buffer-size", type=int, default=100)
     parser.add_argument("--seed", type=int, default=42)
@@ -121,55 +139,36 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_pretrained(checkpoint_path: Path, vocab_size: int, seq_len: int | None):
+def load_pretrained(
+    checkpoint_path: Path,
+    vocab_size: int,
+    seq_len: int | None,
+    moe_experts_per_tok: int = 2,
+):
     """Rebuild the pretrained model from its checkpoint and adapt it for chat.
 
-    The checkpoint stores a plain state dict, so the architecture is recovered
-    from tensor shapes rather than from a saved config. That keeps this script
-    working against any checkpoint the pretraining entrypoint wrote, including
-    ones from the scaling sweep.
+    The architecture is recovered from tensor shapes by
+    :func:`ohara.chat_engine.config_from_state_dict`, so this works against any
+    checkpoint the pretraining entrypoint wrote -- dense or mixture-of-experts,
+    compiled or not.
     """
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"pretrained checkpoint not found: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state = checkpoint.get("model", checkpoint)
-    state = {key.removeprefix("_orig_mod.").removeprefix("module."): value for key, value in state.items()}
+    state = {strip_wrapper_prefixes(key): value for key, value in state.items()}
 
-    pretrained_vocab, hidden_size = state["token_emb.weight"].shape
-    num_layers = 1 + max(
-        int(key.split(".")[1]) for key in state if key.startswith("layers.")
-    )
-    intermediate_size = state["layers.0.ff.up.weight"].shape[0]
-    query_out = state["layers.0.attn.query.weight"].shape[0]
-    key_out = state["layers.0.attn.key.weight"].shape[0]
-    weight_tying = state["vocab_proj.weight"].data_ptr() == state["token_emb.weight"].data_ptr()
+    config = config_from_state_dict(state, moe_experts_per_tok=moe_experts_per_tok)
+    pretrained_vocab = config.vocab_size
 
-    # head_dim is not stored; recover it from the rotary buffer when present,
-    # otherwise fall back to the common 64-dim head.
-    freq_cos = state.get("freq_cos")
-    head_dim = int(freq_cos.shape[-1]) * 2 if freq_cos is not None else 64
-    num_heads = query_out // head_dim
-    num_kv_heads = key_out // head_dim
-    max_sequence_length = int(freq_cos.shape[0] // 2) if freq_cos is not None else 2048
     if seq_len is not None:
-        if seq_len > max_sequence_length:
+        if seq_len > config.max_sequence_length:
             raise ValueError(
                 f"--seq-len {seq_len} exceeds the pretrained context window "
-                f"of {max_sequence_length}"
+                f"of {config.max_sequence_length}"
             )
-        max_sequence_length = seq_len
+        config.max_sequence_length = seq_len
 
-    config = Config(
-        vocab_size=pretrained_vocab,
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        max_sequence_length=max_sequence_length,
-        num_hidden_layers=num_layers,
-        num_attention_heads=num_heads,
-        num_key_value_heads=0 if num_kv_heads == num_heads else num_kv_heads,
-        dropout=0.0,
-        weight_tying=weight_tying,
-    )
     model = Llama(config)
     # Rotary buffers are sized from max_sequence_length, which may have shrunk.
     state = {
@@ -178,16 +177,18 @@ def load_pretrained(checkpoint_path: Path, vocab_size: int, seq_len: int | None)
         if not key.startswith(("freq_cos", "freq_sin"))
     }
     missing, unexpected = model.load_state_dict(state, strict=False)
-    unexpected = [key for key in unexpected if not key.startswith(("freq_cos", "freq_sin"))]
-    missing = [key for key in missing if not key.startswith(("freq_cos", "freq_sin"))]
+    ignorable = ("freq_cos", "freq_sin", "qb_beta_sum", "qb_beta_count", "expert_counts")
+    unexpected = [key for key in unexpected if not key.endswith(ignorable)]
+    missing = [key for key in missing if not key.endswith(ignorable)]
     if missing or unexpected:
         raise RuntimeError(
             f"checkpoint does not match the reconstructed model: "
             f"missing={missing} unexpected={unexpected}"
         )
 
-    if pretrained_vocab != vocab_size:
-        # The base model was pretrained before the chat tokens existed.
+    # A base trained with --pad-vocab-to is *wider* than the tokenizer. Those rows
+    # are unreachable padding, so keep them rather than trying to shrink the model.
+    if pretrained_vocab < vocab_size:
         resize_token_embeddings(model, vocab_size)
     return model, config, pretrained_vocab
 
@@ -223,7 +224,10 @@ def run() -> None:
     vocab_size = len(tokenizer)
 
     raw_model, config, pretrained_vocab = load_pretrained(
-        Path(args.pretrained_checkpoint), vocab_size, args.seq_len
+        Path(args.pretrained_checkpoint),
+        vocab_size,
+        args.seq_len,
+        moe_experts_per_tok=args.moe_experts_per_tok,
     )
     seq_len = config.max_sequence_length
     model = engine.prepare(raw_model)
@@ -266,7 +270,7 @@ def run() -> None:
         tracker = create_logger(
             args.logger,
             project=args.project,
-            run_name=args.run,
+            run_name=args.run_name,
             config={
                 **vars(args),
                 "vocab_size": vocab_size,
@@ -373,6 +377,7 @@ def run() -> None:
         grad_clip_norm=args.grad_clip_norm or None,
         checkpoint_path=args.checkpoint_path,
         token_bytes=token_bytes,
+        apply_router_balancing=apply_qb_update if config.moe_num_experts > 0 else None,
     )
 
     initial = trainer.evaluate(trainer.val_dataloader, args.eval_batches)
