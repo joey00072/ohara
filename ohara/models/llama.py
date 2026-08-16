@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from ohara.embeddings_pos.rotary import apply_rope, precompute_freqs_cis
 from ohara.modules.kv_cache import KVCache
 from ohara.modules.mlp import SwiGLU
+from ohara.modules.moe import MoE
 from ohara.modules.norm import RMSNorm
 
 
@@ -26,6 +27,14 @@ class Config:
     weight_tying: bool = False
     rope_theta: float = 100000
     init_style: str = "standard"
+    # Mixture of experts. 0 experts keeps every layer's feed-forward dense.
+    # With moe_layer_interval=N, every Nth layer is an MoE and the rest stay dense,
+    # which is the usual way to buy capacity without paying routing cost everywhere.
+    moe_num_experts: int = 0
+    moe_experts_per_tok: int = 2
+    moe_layer_interval: int = 1
+    moe_gate_fn: str = "softmax"
+    moe_quantile_balancing: bool = True
 
 
 class Attention(nn.Module):
@@ -127,17 +136,35 @@ class Attention(nn.Module):
         return output
 
 
+def uses_moe(cfg: Config, layer_idx: int) -> bool:
+    """Whether this layer's feed-forward is a mixture of experts."""
+    if cfg.moe_num_experts < 1:
+        return False
+    return layer_idx % cfg.moe_layer_interval == 0
+
+
 class Block(nn.Module):
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, layer_idx: int = 0):
         super().__init__()
 
         self.attn = Attention(cfg)
-        self.ff = SwiGLU(
-            dim=cfg.hidden_size,
-            hidden_dim=cfg.intermediate_size,
-            dropout=cfg.dropout,
-            bias=cfg.bias,
-        )
+        self.is_moe = uses_moe(cfg, layer_idx)
+        if self.is_moe:
+            self.ff = MoE(
+                dim=cfg.hidden_size,
+                hidden_dim=cfg.intermediate_size,
+                num_experts=cfg.moe_num_experts,
+                num_experts_per_tok=cfg.moe_experts_per_tok,
+                gate_fn=cfg.moe_gate_fn,
+                quantile_balancing=cfg.moe_quantile_balancing,
+            )
+        else:
+            self.ff = SwiGLU(
+                dim=cfg.hidden_size,
+                hidden_dim=cfg.intermediate_size,
+                dropout=cfg.dropout,
+                bias=cfg.bias,
+            )
 
         self.norm1 = RMSNorm(cfg.hidden_size)
         self.norm2 = RMSNorm(cfg.hidden_size)
@@ -186,7 +213,9 @@ class Llama(nn.Module):
 
         self.token_emb = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
 
-        self.layers = nn.ModuleList([Block(cfg) for _ in range(cfg.num_hidden_layers)])
+        self.layers = nn.ModuleList(
+            [Block(cfg, idx) for idx in range(cfg.num_hidden_layers)]
+        )
 
         self.norm = RMSNorm(cfg.hidden_size)
         self.vocab_proj = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
@@ -315,6 +344,28 @@ class Llama(nn.Module):
             "effective": transformer_matrices + lm_head,
         }
 
+    def active_matmul_parameters(self) -> int:
+        """Matrix parameters a single token actually passes through, across all layers.
+
+        For a dense model this is just every matrix in every block. For an MoE it is
+        *not*: a token is routed to ``num_experts_per_tok`` of ``num_experts``, so
+        only that fraction of the expert weights participates. Counting all of them
+        would inflate the FLOPs-per-token estimate by ``num_experts / k`` and report
+        an MFU several times higher than the hardware is really achieving.
+        """
+        total = 0
+        for block in self.layers:
+            total += sum(p.numel() for p in block.attn.parameters() if p.ndim >= 2)
+            if block.is_moe:
+                per_expert = sum(
+                    p.numel() for p in block.ff.experts[0].parameters() if p.ndim >= 2
+                )
+                total += per_expert * block.ff.num_experts_per_tok
+                total += block.ff.gate.weight.numel()
+            else:
+                total += sum(p.numel() for p in block.ff.parameters() if p.ndim >= 2)
+        return total
+
     def estimate_flops(self, sequence_length: int | None = None) -> float:
         """Estimate forward+backward FLOPs per token using nanochat's convention."""
         sequence_length = sequence_length or self.config.max_sequence_length
@@ -323,12 +374,7 @@ class Llama(nn.Module):
 
         # Embedding lookup is not a matmul. The output projection is a matmul even
         # when its physical weight is tied to the token embedding.
-        layer_matrix_parameters = sum(
-            parameter.numel()
-            for layer in self.layers
-            for parameter in layer.parameters()
-            if parameter.ndim >= 2
-        )
+        layer_matrix_parameters = self.active_matmul_parameters()
         matmul_parameters = layer_matrix_parameters + self.vocab_proj.weight.numel()
         attention_flops = (
             12
@@ -358,9 +404,18 @@ class Llama(nn.Module):
             torch.nn.init.uniform_(block.attn.key.weight, -bound, bound)
             torch.nn.init.uniform_(block.attn.value.weight, -bound, bound)
             torch.nn.init.zeros_(block.attn.proj.weight)
-            torch.nn.init.uniform_(block.ff.up.weight, -0.4 * bound, 0.4 * bound)
-            torch.nn.init.uniform_(block.ff.gate.weight, -0.4 * bound, 0.4 * bound)
-            torch.nn.init.zeros_(block.ff.down.weight)
+            experts = block.ff.experts if block.is_moe else [block.ff]
+            for expert in experts:
+                torch.nn.init.uniform_(expert.up.weight, -0.4 * bound, 0.4 * bound)
+                torch.nn.init.uniform_(expert.gate.weight, -0.4 * bound, 0.4 * bound)
+                torch.nn.init.zeros_(expert.down.weight)
+            if block.is_moe:
+                # The router starts small and unbiased so early routing is near-uniform;
+                # quantile balancing takes over from there.
+                torch.nn.init.normal_(
+                    block.ff.gate.weight, mean=0.0, std=self.config.hidden_size**-0.5
+                )
+                block.ff.router_bias.zero_()
             block.norm1.reset_parameters()
             block.norm2.reset_parameters()
         self.norm.reset_parameters()

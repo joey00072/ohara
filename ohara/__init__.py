@@ -23,6 +23,12 @@ _EXPORTS = {
     "PreTokenizedDataset": "ohara.dataset",
     "StreamingTextDataset": "ohara.dataset",
     "TinyShakespeareDataset": "ohara.dataset",
+    # chat: conversation rendering, finetuning data, and serving
+    "ChatEngine": "ohara.chat_engine",
+    "ConversationDataset": "ohara.sft",
+    "SamplingConfig": "ohara.chat_engine",
+    "load_chat_tokenizer": "ohara.chat",
+    "render_conversation": "ohara.chat",
     # training
     "CosineScheduler": "ohara.lr_scheduler",
     "Scheduler": "ohara.lr_scheduler",
@@ -47,7 +53,9 @@ _EXPORTS = {
 
 __all__ = [
     "Backend",
+    "ChatEngine",
     "Config",
+    "ConversationDataset",
     "CosineScheduler",
     "DistributedConfig",
     "EngineConfig",
@@ -61,6 +69,7 @@ __all__ = [
     "PrecisionConfig",
     "PrecisionMode",
     "ReduceType",
+    "SamplingConfig",
     "Scheduler",
     "StrategyType",
     "StreamingTextDataset",
@@ -69,6 +78,8 @@ __all__ = [
     "TensorParallelStyle",
     "TinyShakespeareDataset",
     "Trainer",
+    "load_chat_tokenizer",
+    "render_conversation",
 ]
 
 assert sorted(__all__) == sorted(_EXPORTS), "__all__ and _EXPORTS must stay in sync"
@@ -89,8 +100,11 @@ def __dir__() -> list[str]:
 
 
 if TYPE_CHECKING:  # let type checkers and IDEs see the real symbols
+    from .chat import load_chat_tokenizer, render_conversation
+    from .chat_engine import ChatEngine, SamplingConfig
     from .dataset import PreTokenizedDataset, StreamingTextDataset, TinyShakespeareDataset
     from .lr_scheduler import CosineScheduler, Scheduler
+    from .sft import ConversationDataset
     from .models.llama import Config, Llama
     from .runtime import (
         Backend,
