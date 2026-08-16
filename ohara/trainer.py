@@ -69,6 +69,7 @@ class Trainer:
         cudagraph_mark_step_begin: bool = False,
         checkpoint_path: str | Path = "./ckpt/model.pt",
         token_bytes: torch.Tensor | None = None,
+        apply_router_balancing: Callable[[nn.Module], None] | None = None,
     ):
         if micro_batch < 1:
             raise ValueError("micro_batch must be at least 1")
@@ -105,6 +106,7 @@ class Trainer:
         self.timing_warmup_steps = max(0, int(timing_warmup_steps))
         self.cudagraph_mark_step_begin = cudagraph_mark_step_begin
         self.checkpoint_path = Path(checkpoint_path)
+        self.apply_router_balancing = apply_router_balancing
         if token_bytes is not None and token_bytes.ndim != 1:
             raise ValueError("token_bytes must be a one-dimensional vocabulary lookup")
         self.token_bytes = (
@@ -488,6 +490,11 @@ class Trainer:
 
             self.engine.optimizer_step(self.optimizer)
             self.optimizer.zero_grad(set_to_none=True)
+            if self.apply_router_balancing is not None:
+                # Quantile balancing solves for the router bias in closed form from
+                # statistics accumulated over this step's micro-batches, so it belongs
+                # here, once per optimizer step, not inside the accumulation loop.
+                self.apply_router_balancing(self.model)
 
             step_loss_tensor = accumulated_loss_sum / total_valid_tokens
             if not torch.isfinite(step_loss_tensor):

@@ -127,44 +127,62 @@ def batch_sequences_schema(tokenizer, prompts):
 
 
 def batch_sequences_lm(tokenizer, prompts):
+    """Locate the continuation inside the full sequence for a language-modeling task.
+
+    The two prompts are the context and the context plus its continuation, so the
+    scored span is whatever the second adds. Ideally the first tokenizes to an
+    exact prefix of the second, but with BPE that is not guaranteed: a
+    continuation starting mid-word merges with the last context token and both
+    sequences diverge one token early. Rather than reject those examples, score
+    from the last genuinely shared token onward.
+
+    The boundary token is then included in the scored span. That is the
+    conservative choice -- it can only add uncertainty to the continuation, never
+    hide any -- and it keeps tokenizer choice from silently dropping whole tasks.
+    """
     tokens = [_encode_with_bos(tokenizer, prompt) for prompt in prompts]
     tokens_without, tokens_with = tokens
-    start_idx, end_idx = len(tokens_without), len(tokens_with)
-    if not (start_idx < end_idx and tokens_without == tokens_with[:start_idx]):
-        raise AssertionError("LM prompts must satisfy prefix relationship in token space")
+    start_idx = find_common_length(tokens, direction="left")
+    end_idx = len(tokens_with)
+    if start_idx >= end_idx:
+        raise ValueError(
+            "language-modeling continuation is empty in token space: "
+            f"context={len(tokens_without)} tokens, full={end_idx} tokens"
+        )
     return [tokens_with], [start_idx], [end_idx]
 
 
+# Attribute names different libraries use for the context window. The HF ones
+# matter as much as ohara's: without n_positions / max_position_embeddings a
+# Hugging Face model gets no truncation, and a prompt longer than its window
+# indexes past the position embedding table, which fails as an out-of-bounds
+# gather inside CUDA rather than as a readable error.
+_MAX_SEQ_LEN_ATTRS = (
+    "max_seq_len",
+    "max_sequence_length",
+    "seq_len",
+    "sequence_len",
+    "n_positions",
+    "max_position_embeddings",
+)
+
+
 def infer_model_max_seq_len(model) -> int | None:
-    candidates = [
-        getattr(model, "max_seq_len", None),
-        getattr(model, "max_sequence_length", None),
-    ]
-    cfg = getattr(model, "config", None)
-    if cfg is not None:
-        candidates.extend(
-            [
-                getattr(cfg, "max_seq_len", None),
-                getattr(cfg, "max_sequence_length", None),
-                getattr(cfg, "seq_len", None),
-                getattr(cfg, "sequence_len", None),
-            ]
-        )
+    def candidates(obj):
+        if obj is None:
+            return
+        for name in _MAX_SEQ_LEN_ATTRS:
+            yield getattr(obj, name, None)
+
+    sources = [model, getattr(model, "config", None)]
     wrapped = getattr(model, "model", None)
     if wrapped is not None:
-        wrapped_cfg = getattr(wrapped, "config", None)
-        if wrapped_cfg is not None:
-            candidates.extend(
-                [
-                    getattr(wrapped_cfg, "max_seq_len", None),
-                    getattr(wrapped_cfg, "max_sequence_length", None),
-                    getattr(wrapped_cfg, "seq_len", None),
-                    getattr(wrapped_cfg, "sequence_len", None),
-                ]
-            )
-    for value in candidates:
-        if isinstance(value, int) and value > 0:
-            return value
+        sources.extend([wrapped, getattr(wrapped, "config", None)])
+
+    for source in sources:
+        for value in candidates(source):
+            if isinstance(value, int) and value > 0:
+                return value
     return None
 
 
