@@ -7,11 +7,10 @@ nobody will answer. That failure is worse than not logging at all.
 
 So the default backend is ``auto``, which resolves in this order:
 
-1. **wandb**, if a key is actually configured (``WANDB_API_KEY``, a netrc entry,
-   or an explicit offline/disabled ``WANDB_MODE``).
+1. **wandb**, if a key is actually configured (``WANDB_API_KEY`` or a netrc
+   entry), or if an explicit offline ``WANDB_MODE`` is selected.
 2. **trackio**, which is local-first and needs no account — it writes SQLite
-   under ``~/.cache/huggingface/trackio`` and mirrors ``wandb``'s
-   ``init``/``log``/``finish`` API exactly. https://github.com/gradio-app/trackio
+   under ``~/.cache/huggingface/trackio``. https://github.com/gradio-app/trackio
 3. **nothing**, with a one-line note saying why, so the run still proceeds.
 
 Loggers here match the interface ``OharaEngine.log_dict`` expects: a
@@ -93,6 +92,84 @@ class WandbLogger(_ModuleLogger):
 class TrackioLogger(_ModuleLogger):
     name = "trackio"
 
+    # Trackio owns these column names. Rename them before logging instead of
+    # letting Trackio hide them behind its opaque ``__<name>`` fallback. The
+    # trainer's ``time`` value is the duration of one optimization step, not a
+    # wall-clock timestamp, hence the more precise public name below.
+    _reserved_metric_names = {
+        "metrics": "logged_metrics",
+        "project": "logged_project",
+        "run": "logged_run",
+        "step": "logged_step",
+        "time": "step_time_s",
+        "timestamp": "logged_timestamp",
+    }
+
+    def __init__(
+        self,
+        module: Any,
+        *,
+        project: str,
+        run_name: str | None,
+        config: Mapping[str, Any] | None,
+    ) -> None:
+        super().__init__(
+            module,
+            project=project,
+            run_name=run_name,
+            config=config,
+        )
+        self._last_explicit_step: int | None = None
+        self._metric_names_at_step: set[str] = set()
+        self._finished = False
+
+    def log_metrics(self, payload: Mapping[str, Any], step: int | None = None) -> None:
+        metrics = {
+            self._reserved_metric_names.get(name, name): value
+            for name, value in payload.items()
+        }
+
+        # Trainer logs the optimization metrics and evaluation metrics in two
+        # calls at evaluation steps. Trackio stores both calls as independent
+        # rows, unlike W&B's same-step merge, so repeated fields otherwise show
+        # duplicate points. Keep every new metric while dropping only fields
+        # already written at this exact explicit step.
+        if step is not None:
+            if step != self._last_explicit_step:
+                self._last_explicit_step = step
+                self._metric_names_at_step.clear()
+            metrics = {
+                name: value
+                for name, value in metrics.items()
+                if name not in self._metric_names_at_step
+            }
+            self._metric_names_at_step.update(metrics)
+
+        if metrics:
+            # Use the run returned by init, rather than Trackio's module-global
+            # current run. This keeps logs attached to the intended run and is
+            # safe if another library initializes Trackio in the same process.
+            self.run.log(metrics, step=step)
+
+    def finish(self) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        try:
+            # module.finish() also clears Trackio's context variable, which
+            # prevents its atexit hook from flushing the same run a second time.
+            # Only use it when the module-global run is still ours; otherwise
+            # close our exact run without touching another caller's session.
+            context_vars = getattr(self.module, "context_vars", None)
+            current_run = getattr(context_vars, "current_run", None)
+            if current_run is not None and current_run.get() is self.run:
+                self.module.finish()
+            else:
+                self.run.finish()
+        except Exception:
+            # A tracker failing to flush must not take the training run with it.
+            pass
+
 
 def _module_available(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
@@ -101,12 +178,15 @@ def _module_available(name: str) -> bool:
 def wandb_is_configured() -> bool:
     """Whether wandb can log without prompting for credentials.
 
-    An explicit offline or disabled mode counts: the user has said what they
-    want, and neither blocks on input.
+    An explicit offline mode counts because it logs locally without a key.
+    Disabled mode deliberately does not: in ``auto`` it means W&B is unusable,
+    so Trackio should receive the metrics instead of a no-op W&B run.
     """
     mode = os.environ.get("WANDB_MODE", "").lower()
-    if mode in {"offline", "dryrun", "disabled"}:
+    if mode in {"offline", "dryrun"}:
         return True
+    if mode == "disabled":
+        return False
     if os.environ.get("WANDB_API_KEY"):
         return True
     try:
@@ -160,7 +240,7 @@ def create_logger(
 
     if backend == "trackio":
         if not _module_available("trackio"):
-            raise RuntimeError("trackio is not installed. Install it with `uv pip install trackio`")
+            raise RuntimeError("trackio is not installed. Run `uv sync` to install it")
         announce(f"tracking with trackio (project={project}, local)")
         return TrackioLogger(
             importlib.import_module("trackio"),
@@ -199,6 +279,6 @@ def create_logger(
 
     announce(
         "no experiment tracking: wandb has no API key and trackio is not installed "
-        "(`uv pip install trackio` for local tracking). Training will still print metrics."
+        "(`uv sync` installs the local tracker). Training will still print metrics."
     )
     return NullLogger("no usable backend")

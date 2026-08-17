@@ -7,7 +7,7 @@ unavailable.
 """
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 import pytest
 
@@ -21,7 +21,15 @@ from ohara.tracking import (
 
 
 class FakeRun:
-    pass
+    def __init__(self):
+        self.logged = []
+        self.finished = False
+
+    def log(self, payload, step=None):
+        self.logged.append((payload, step))
+
+    def finish(self):
+        self.finished = True
 
 
 class FakeTracker:
@@ -32,12 +40,13 @@ class FakeTracker:
         self.init_kwargs = None
         self.logged = []
         self.finished = False
+        self.run = FakeRun()
 
     def init(self, **kwargs):
         if self.fail_on_init:
             raise RuntimeError("no network")
         self.init_kwargs = kwargs
-        return FakeRun()
+        return self.run
 
     def log(self, payload, step=None):
         self.logged.append((payload, step))
@@ -157,6 +166,45 @@ class LoggerBehaviourTests(unittest.TestCase):
         WandbLogger(module, project="p", run_name="r", config={"depth": 12})
         self.assertEqual(module.init_kwargs["config"], {"depth": 12})
 
+    def test_trackio_logs_through_the_run_returned_by_init(self):
+        module = FakeTracker()
+        logger = TrackioLogger(module, project="p", run_name="r", config=None)
+        logger.log_metrics({"loss": 1.5}, step=7)
+        self.assertEqual(module.run.logged, [({"loss": 1.5}, 7)])
+        self.assertEqual(module.logged, [])
+
+    def test_trackio_renames_reserved_metrics(self):
+        module = FakeTracker()
+        logger = TrackioLogger(module, project="p", run_name="r", config=None)
+        logger.log_metrics({"loss": 1.5, "time": 0.25}, step=7)
+        self.assertEqual(
+            module.run.logged,
+            [({"loss": 1.5, "step_time_s": 0.25}, 7)],
+        )
+
+    def test_trackio_deduplicates_repeated_metrics_at_one_step(self):
+        module = FakeTracker()
+        logger = TrackioLogger(module, project="p", run_name="r", config=None)
+        logger.log_metrics({"loss": 1.5, "lr": 0.1}, step=7)
+        logger.log_metrics({"lr": 0.1, "validation_loss": 1.0}, step=7)
+        logger.log_metrics({"loss": 1.25, "lr": 0.09}, step=8)
+        self.assertEqual(
+            module.run.logged,
+            [
+                ({"loss": 1.5, "lr": 0.1}, 7),
+                ({"validation_loss": 1.0}, 7),
+                ({"loss": 1.25, "lr": 0.09}, 8),
+            ],
+        )
+
+    def test_trackio_finishes_the_returned_run(self):
+        module = FakeTracker()
+        logger = TrackioLogger(module, project="p", run_name="r", config=None)
+        logger.finish()
+        logger.finish()
+        self.assertTrue(module.run.finished)
+        self.assertFalse(module.finished)
+
     def test_finish_survives_a_failing_backend(self):
         class Broken(FakeTracker):
             def finish(self):
@@ -182,14 +230,31 @@ class WandbKeyDetectionTests(unittest.TestCase):
             self.assertTrue(wandb_is_configured())
 
     def test_offline_modes_count_as_configured(self):
-        for mode in ("offline", "dryrun", "disabled"):
+        for mode in ("offline", "dryrun"):
             with patch.dict("os.environ", {"WANDB_MODE": mode}, clear=True):
                 self.assertTrue(wandb_is_configured(), mode)
+
+    def test_disabled_wandb_falls_back_to_trackio(self):
+        trackio = FakeTracker()
+        with patch.dict("os.environ", {"WANDB_MODE": "disabled"}, clear=True):
+            with (
+                patch(
+                    "ohara.tracking._module_available",
+                    side_effect=lambda name: name in {"wandb", "trackio"},
+                ),
+                patch(
+                    "ohara.tracking.importlib.import_module",
+                    side_effect=lambda name: {"trackio": trackio}[name],
+                ),
+            ):
+                logger = create_logger("auto", project="p", verbose=False)
+        self.assertIsInstance(logger, TrackioLogger)
 
     def test_no_key_and_no_netrc_is_unconfigured(self):
         wandb = pytest.importorskip("wandb")
         with patch.dict("os.environ", {}, clear=True):
-            with patch.object(wandb.api, "api_key", None):
+            with patch.object(type(wandb.api), "api_key", new_callable=PropertyMock) as api_key:
+                api_key.return_value = None
                 self.assertFalse(wandb_is_configured())
 
     def test_uninstalled_wandb_is_unconfigured(self):
