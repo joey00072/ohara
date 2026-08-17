@@ -1349,13 +1349,9 @@ dependencies = [
     { name = "tensorboard" },
     { name = "torch" },
     { name = "tqdm" },
+    { name = "trackio" },
     { name = "transformers" },
     { name = "wandb" },
-]
-
-[package.optional-dependencies]
-tracking = [
-    { name = "trackio" },
 ]
 
 [package.dev-dependencies]
@@ -1376,11 +1372,10 @@ requires-dist = [
     { name = "tensorboard", specifier = ">=2.18.0" },
     { name = "torch", specifier = ">=2.5.0" },
     { name = "tqdm", specifier = ">=4.66.0" },
-    { name = "trackio", marker = "extra == 'tracking'", specifier = ">=0.1.0" },
+    { name = "trackio", specifier = ">=0.35.0" },
     { name = "transformers", specifier = ">=4.46.0" },
     { name = "wandb", specifier = ">=0.18.0" },
 ]
-provides-extras = ["tracking"]
 
 [package.metadata.requires-dev]
 dev = [
