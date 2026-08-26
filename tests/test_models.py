@@ -16,6 +16,7 @@ from ohara.models.llama import Config as LlamaConfig
 from ohara.models.llama import Llama
 from ohara.models.mamba import Mamba, MambaConfig
 from ohara.models.phi import Phi, PhiConfig
+from ohara.models.qwen3 import Qwen3, Qwen3Config
 from ohara.models.retnet import Config as RetNetConfig
 from ohara.models.retnet import RetNet
 from ohara.models.roformer import Config as RoFormerConfig
@@ -57,6 +58,20 @@ def transformer_config(**overrides) -> TransformerConfig:
     return TransformerConfig(**{**defaults, **overrides})
 
 
+def qwen3_config(**overrides) -> Qwen3Config:
+    defaults = dict(
+        vocab_size=VOCAB,
+        max_sequence_length=16,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+    )
+    return Qwen3Config(**{**defaults, **overrides})
+
+
 def build_language_models() -> dict[str, torch.nn.Module]:
     """One small instance of every token-in/logits-out model."""
     return {
@@ -78,6 +93,7 @@ def build_language_models() -> dict[str, torch.nn.Module]:
                 multiple_of=2,
             )
         ),
+        "qwen3": Qwen3(qwen3_config()),
         "gemma": Gemma(
             GemmaConfig(
                 vocab_size=VOCAB,
@@ -157,7 +173,7 @@ def test_llama_safetensors_save_and_load_round_trip(tmp_path) -> None:
 
 @pytest.mark.parametrize(
     ("model_name", "position"),
-    [("llama", 4), ("phi", 4)],
+    [("llama", 4), ("phi", 4), ("qwen3", 4)],
 )
 def test_cached_decode_matches_full_forward(model_name: str, position: int) -> None:
     """Prefill + one cached step must reproduce the uncached forward pass."""

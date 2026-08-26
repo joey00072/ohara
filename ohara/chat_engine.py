@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 import torch
+import torch.nn as nn
+from huggingface_hub import hf_hub_download
 from transformers import PreTrainedTokenizerBase
 
 from ohara.chat import (
@@ -28,6 +30,7 @@ from ohara.chat import (
     special_token_ids,
 )
 from ohara.models.llama import Config, Llama
+from ohara.tokenizer import get_tokenizer
 
 
 @dataclass
@@ -250,11 +253,12 @@ class ChatEngine:
 
     def __init__(
         self,
-        model: Llama,
+        model: nn.Module,
         tokenizer: PreTrainedTokenizerBase,
         *,
         device: str | torch.device | None = None,
         dtype: torch.dtype | None = None,
+        enable_thinking: bool = False,
     ) -> None:
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -264,9 +268,29 @@ class ChatEngine:
         self.dtype = dtype
         self.model = model.to(device=self.device, dtype=self.dtype).eval()
         self.tokenizer = tokenizer
-        self.specials = special_token_ids(tokenizer)
-        self.assistant_end_id = self.specials[ASSISTANT_END]
-        self.eos_token_id = tokenizer.eos_token_id
+        self.enable_thinking = enable_thinking
+        self.uses_hf_chat_template = bool(getattr(tokenizer, "chat_template", None))
+        self.supports_thinking = self.uses_hf_chat_template and bool(
+            getattr(model, "supports_thinking", False)
+        )
+        if self.uses_hf_chat_template:
+            self.specials = {}
+            self.stop_token_ids = {
+                int(token_id)
+                for token_id in (
+                    tokenizer.eos_token_id,
+                    getattr(model.config, "eos_token_id", None),
+                    # Qwen's generation config also treats <|endoftext|> as EOS.
+                    getattr(model.config, "bos_token_id", None),
+                )
+                if token_id is not None
+            }
+        else:
+            self.specials = special_token_ids(tokenizer)
+            self.stop_token_ids = {
+                self.specials[ASSISTANT_END],
+                tokenizer.eos_token_id,
+            }
         # Ids at or above this exist only to pad the matmul to a tensor-core
         # friendly width. They decode to nothing, so they must never be sampled.
         self.tokenizer_vocab_size = len(tokenizer)
@@ -291,6 +315,7 @@ class ChatEngine:
         force_download: bool = False,
         local_files_only: bool = False,
         token: str | bool | None = None,
+        enable_thinking: bool = False,
     ) -> "ChatEngine":
         """Load a standard Ohara safetensors model and its chat tokenizer.
 
@@ -303,25 +328,57 @@ class ChatEngine:
         if dtype is None:
             dtype = torch.bfloat16 if torch.device(device).type == "cuda" else torch.float32
 
+        source = Path(model_name_or_path)
+        config_directory = source.parent if source.is_file() else source
+        if config_directory.is_dir():
+            config_path = config_directory / "config.json"
+        else:
+            config_path = Path(
+                hf_hub_download(
+                    str(model_name_or_path),
+                    "config.json",
+                    revision=revision,
+                    cache_dir=cache_dir,
+                    force_download=force_download,
+                    local_files_only=local_files_only,
+                    token=token,
+                )
+            )
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        model_type = payload.get("model_type")
+        if model_type == "qwen3":
+            from ohara.models.qwen3 import Qwen3
+
+            model_class = Qwen3
+            tokenizer_loader = get_tokenizer
+        elif model_type in {None, "ohara_llama"}:
+            model_class = Llama
+            tokenizer_loader = load_chat_tokenizer
+        else:
+            raise ValueError(f"unsupported model type: {model_type!r}")
+
+        tokenizer_options = {
+            "local_files_only": local_files_only,
+            "cache_dir": cache_dir,
+            "revision": revision,
+            "force_download": force_download,
+            "token": token,
+        }
         if tokenizer_dir is None:
-            tokenizer = load_chat_tokenizer(
+            tokenizer = tokenizer_loader(
                 hf_name=str(model_name_or_path),
                 tokenizer_dir=model_name_or_path,
                 prefer_hf=True,
-                local_files_only=local_files_only,
-                cache_dir=cache_dir,
-                revision=revision,
-                force_download=force_download,
-                token=token,
+                **tokenizer_options,
             )
         else:
-            tokenizer = load_chat_tokenizer(
+            tokenizer = tokenizer_loader(
                 tokenizer_dir=tokenizer_dir,
                 prefer_hf=False,
                 local_files_only=True,
             )
 
-        model = Llama.from_pretrained(
+        model = model_class.from_pretrained(
             model_name_or_path,
             device=device,
             dtype=dtype,
@@ -336,7 +393,13 @@ class ChatEngine:
                 f"checkpoint vocabulary ({model.config.vocab_size:,}) is smaller than the "
                 f"tokenizer ({len(tokenizer):,})"
             )
-        return cls(model, tokenizer, device=device, dtype=dtype)
+        return cls(
+            model,
+            tokenizer,
+            device=device,
+            dtype=dtype,
+            enable_thinking=enable_thinking,
+        )
 
     @classmethod
     def from_checkpoint(
@@ -415,7 +478,12 @@ class ChatEngine:
                     pass
         return info
 
-    def render_prompt(self, messages: Sequence[Mapping[str, Any]]) -> list[int]:
+    def render_prompt(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        enable_thinking: bool | None = None,
+    ) -> list[int]:
         """Render a conversation, dropping old turns that do not fit the context.
 
         The window has to leave room for the reply, so entire leading turns are
@@ -423,10 +491,21 @@ class ChatEngine:
         """
         budget = self.max_sequence_length
         turns = list(messages)
+        if enable_thinking is None:
+            enable_thinking = self.enable_thinking
         while turns:
-            ids = render_for_completion(self.tokenizer, turns, max_tokens=budget)
+            if self.uses_hf_chat_template:
+                rendered = self.tokenizer.apply_chat_template(
+                    turns,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    enable_thinking=enable_thinking,
+                )
+                ids = rendered["input_ids"] if isinstance(rendered, Mapping) else rendered
+            else:
+                ids = render_for_completion(self.tokenizer, turns, max_tokens=budget)
             if len(ids) < budget:
-                return ids
+                return list(ids)
             # Drop the oldest user/assistant pair and retry.
             turns = turns[2:] if len(turns) > 2 else turns[1:]
         raise ValueError("the latest message alone does not fit in the context window")
@@ -438,10 +517,11 @@ class ChatEngine:
         config: SamplingConfig | None = None,
         *,
         seed: int | None = None,
+        enable_thinking: bool | None = None,
     ) -> Iterator[str]:
         """Yield decoded text deltas for the assistant's reply."""
         config = config or SamplingConfig()
-        prompt_ids = self.render_prompt(messages)
+        prompt_ids = self.render_prompt(messages, enable_thinking=enable_thinking)
         room = self.max_sequence_length - len(prompt_ids)
         if room < 1:
             raise ValueError("no room left in the context window for a reply")
@@ -465,7 +545,7 @@ class ChatEngine:
                 logits[..., self.tokenizer_vocab_size:] = float("-inf")
             next_token = sample_next_token(logits, config, generator)
             token_id = int(next_token.item())
-            if token_id == self.assistant_end_id or token_id == self.eos_token_id:
+            if token_id in self.stop_token_ids:
                 break
             produced.append(token_id)
             model_input = next_token
@@ -483,6 +563,14 @@ class ChatEngine:
         config: SamplingConfig | None = None,
         *,
         seed: int | None = None,
+        enable_thinking: bool | None = None,
     ) -> str:
         """Generate a complete reply."""
-        return "".join(self.generate_stream(messages, config, seed=seed))
+        return "".join(
+            self.generate_stream(
+                messages,
+                config,
+                seed=seed,
+                enable_thinking=enable_thinking,
+            )
+        )

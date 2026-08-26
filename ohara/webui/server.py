@@ -94,10 +94,15 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/static/"):
             self._serve_static(path[len("/static/"):])
         elif path == "/api/info":
+            defaults = {
+                **asdict(self.default_sampling),
+                "enable_thinking": self.engine.enable_thinking,
+            }
             self._send_json(
                 {
                     "model": self.engine.metadata(self.checkpoint_path),
-                    "defaults": asdict(self.default_sampling),
+                    "defaults": defaults,
+                    "capabilities": {"thinking": self.engine.supports_thinking},
                 }
             )
         else:
@@ -128,6 +133,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             seed = payload.get("seed")
             seed = int(seed) if seed is not None else None
+            enable_thinking = payload.get("enable_thinking", self.engine.enable_thinking)
+            if not isinstance(enable_thinking, bool):
+                raise ValueError("'enable_thinking' must be a boolean")
         except (ValueError, json.JSONDecodeError) as error:
             self._send_json({"error": str(error)}, status=400)
             return
@@ -142,7 +150,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         try:
             with self.generation_lock:
-                for delta in self.engine.generate_stream(messages, sampling, seed=seed):
+                for delta in self.engine.generate_stream(
+                    messages,
+                    sampling,
+                    seed=seed,
+                    enable_thinking=enable_thinking,
+                ):
                     self._send_event({"delta": delta})
             self._send_event({"done": True})
         except (BrokenPipeError, ConnectionResetError):

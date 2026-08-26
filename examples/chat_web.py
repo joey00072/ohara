@@ -63,6 +63,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--top-k", type=int, default=0)
     parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument(
+        "--enable-thinking",
+        action="store_true",
+        help="enable Qwen3's thinking mode (disabled by default for concise chat)",
+    )
     return parser.parse_args()
 
 
@@ -87,6 +92,7 @@ def main() -> None:
             tokenizer_dir=args.tokenizer_dir,
             device=args.device,
             dtype=dtype,
+            enable_thinking=args.enable_thinking,
         )
     info = engine.metadata(args.checkpoint)
     print(

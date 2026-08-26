@@ -19,6 +19,8 @@ _EXPORTS = {
     # models
     "Config": "ohara.models.llama",
     "Llama": "ohara.models.llama",
+    "Qwen3": "ohara.models.qwen3",
+    "Qwen3Config": "ohara.models.qwen3",
     # data
     "PreTokenizedDataset": "ohara.dataset",
     "StreamingTextDataset": "ohara.dataset",
@@ -60,6 +62,8 @@ __all__ = [
     "DistributedConfig",
     "EngineConfig",
     "Llama",
+    "Qwen3",
+    "Qwen3Config",
     "OharaEngine",
     "ParallelConfig",
     "PipelinePlan",
@@ -106,6 +110,7 @@ if TYPE_CHECKING:  # let type checkers and IDEs see the real symbols
     from .lr_scheduler import CosineScheduler, Scheduler
     from .sft import ConversationDataset
     from .models.llama import Config, Llama
+    from .models.qwen3 import Qwen3, Qwen3Config
     from .runtime import (
         Backend,
         DistributedConfig,

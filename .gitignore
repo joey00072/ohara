@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+*.py[cod]
 *.egg
 *.egg-info/
 .eggs/
@@ -22,8 +23,15 @@ wheels/
 
 # Environments and tooling caches
 .env
+.env.*
+!.env.example
+.mypy_cache/
+.pytest_cache/
 .ruff_cache/
-.venv
+.venv/
+.coverage
+htmlcov/
+.idea/
 .vscode/
 
 # OS junk
@@ -41,7 +49,12 @@ hf_cache/
 ckpt/
 logs/
 logs*/
-model.pt
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.safetensors.index.json
+pytorch_model*.bin
 runs/
 # ...but the pipeline scripts that live there are source, not run output.
 !runs/

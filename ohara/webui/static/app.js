@@ -12,6 +12,8 @@ const stopButton = el("stop");
 const modelChip = el("model-chip");
 const settingsPanel = el("settings");
 const settingsToggle = el("settings-toggle");
+const thinkingControl = el("thinking-control");
+const thinkingInput = el("enable-thinking");
 
 const controls = {
   temperature: { input: el("temperature"), out: el("temperature-out"), digits: 2 },
@@ -102,6 +104,7 @@ function settings() {
     top_p: Number(controls.top_p.input.value),
     top_k: Number(controls.top_k.input.value),
     max_new_tokens: Number(controls.max_new_tokens.input.value),
+    enable_thinking: thinkingInput.checked,
   };
 }
 
@@ -270,6 +273,10 @@ async function boot() {
     bindControl("top_p", defaults.top_p);
     bindControl("top_k", defaults.top_k);
     bindControl("max_new_tokens", Math.min(defaults.max_new_tokens, model.context_length));
+    if (info.capabilities?.thinking) {
+      thinkingControl.hidden = false;
+      thinkingInput.checked = Boolean(defaults.enable_thinking);
+    }
   } catch (error) {
     modelChip.textContent = "model info unavailable";
   }
