@@ -80,8 +80,9 @@ def render_prompts_lm(item, continuation_delimiter, fewshot_examples=None):
             f"{example['context'].strip()}{continuation_delimiter}"
             f"{example['continuation']}\n\n"
         )
-    prompt_without = f"{prefix}{item['context'].strip()}{continuation_delimiter}".strip()
-    prompt_with = f"{prompt_without}{item['continuation']}"
+    prompt_stem = f"{prefix}{item['context'].strip()}{continuation_delimiter}"
+    prompt_without = prompt_stem.strip()
+    prompt_with = f"{prompt_stem}{item['continuation']}"
     return [prompt_without, prompt_with]
 
 

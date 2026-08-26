@@ -6,7 +6,11 @@ from pathlib import Path
 import torch
 import yaml
 
-from ohara.core_eval import evaluate_core_from_bundle, evaluate_task
+from ohara.core_eval import (
+    evaluate_core_from_bundle,
+    evaluate_task,
+    render_prompts_lm,
+)
 
 
 class DummyTokenizer:
@@ -91,6 +95,14 @@ class CoreEvalTests(unittest.TestCase):
         }
         score = evaluate_task(self.model, self.tokenizer, data, self.device, task_meta)
         self.assertGreaterEqual(score, 0.99)
+
+    def test_language_modeling_prompt_keeps_continuation_delimiter(self):
+        without, with_continuation = render_prompts_lm(
+            {"context": "I don't care about", "continuation": "signs"},
+            " ",
+        )
+        self.assertEqual(without, "I don't care about")
+        self.assertEqual(with_continuation, "I don't care about signs")
 
     def test_evaluate_core_from_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:
