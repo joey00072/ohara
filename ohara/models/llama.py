@@ -1,9 +1,13 @@
+import json
+import math
+from dataclasses import asdict, dataclass, fields
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-import math
-from dataclasses import dataclass
+from huggingface_hub import snapshot_download
+from safetensors.torch import load_file, save_file
 
 from ohara.embeddings_pos.rotary import apply_rope, precompute_freqs_cis
 from ohara.modules.kv_cache import KVCache
@@ -470,9 +474,127 @@ class Llama(nn.Module):
             block.norm2.reset_parameters()
         self.norm.reset_parameters()
 
-    @classmethod
-    def from_pretrained(cls, hf_name: str):
-        raise NotImplementedError(
-            "Llama.from_pretrained is not implemented yet. "
-            "Use a model-specific loader or initialize `Llama(Config(...))` directly."
+    def save_pretrained(self, save_directory: str | Path) -> None:
+        """Save weights and architecture in the standard Hugging Face layout.
+
+        The resulting directory contains ``model.safetensors`` and ``config.json``
+        and can be loaded with :meth:`from_pretrained`. Rotary tables are derived
+        from the config and deliberately omitted from the weights file.
+        """
+        save_directory = Path(save_directory)
+        save_directory.mkdir(parents=True, exist_ok=True)
+
+        tensors = {
+            key: value.detach().cpu().contiguous().clone()
+            for key, value in self.state_dict().items()
+            if key not in {"freq_cos", "freq_sin"}
+        }
+        save_file(tensors, save_directory / "model.safetensors", metadata={"format": "pt"})
+
+        config = {
+            "architectures": ["Llama"],
+            "architecture": "ohara.models.llama.Llama",
+            "model_type": "ohara_llama",
+            **asdict(self.config),
+        }
+        (save_directory / "config.json").write_text(
+            json.dumps(config, indent=2) + "\n", encoding="utf-8"
         )
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: str | Path,
+        *,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype | None = None,
+        revision: str | None = None,
+        cache_dir: str | Path | None = None,
+        force_download: bool = False,
+        local_files_only: bool = False,
+        token: str | bool | None = None,
+    ) -> "Llama":
+        """Load an Ohara safetensors model from a directory or the Hub.
+
+        Both a single ``model.safetensors`` and the standard
+        ``model.safetensors.index.json`` sharded layout are supported. Config
+        metadata fields used by Hugging Face are ignored; all :class:`Config`
+        fields, including routing settings that cannot be inferred from tensor
+        shapes, are restored from ``config.json``.
+        """
+        source = Path(model_name_or_path)
+        if source.is_file():
+            model_directory = source.parent
+            explicit_weights = source
+        elif source.is_dir():
+            model_directory = source
+            explicit_weights = None
+        else:
+            model_directory = Path(
+                snapshot_download(
+                    str(model_name_or_path),
+                    revision=revision,
+                    cache_dir=cache_dir,
+                    force_download=force_download,
+                    local_files_only=local_files_only,
+                    token=token,
+                    allow_patterns=("config.json", "*.safetensors", "*.safetensors.index.json"),
+                )
+            )
+            explicit_weights = None
+
+        config_path = model_directory / "config.json"
+        if not config_path.is_file():
+            raise FileNotFoundError(f"model config not found: {config_path}")
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        config_fields = {field.name for field in fields(Config)}
+        config = Config(**{key: value for key, value in payload.items() if key in config_fields})
+
+        model = cls(config).to(device=device, dtype=dtype)
+        if explicit_weights is not None:
+            weight_files = [explicit_weights]
+        else:
+            index_path = model_directory / "model.safetensors.index.json"
+            if index_path.is_file():
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+                weight_map = index.get("weight_map")
+                if not isinstance(weight_map, dict) or not weight_map:
+                    raise ValueError(f"invalid safetensors index: {index_path}")
+                weight_files = [
+                    model_directory / filename for filename in dict.fromkeys(weight_map.values())
+                ]
+            else:
+                weights_path = model_directory / "model.safetensors"
+                if not weights_path.is_file():
+                    raise FileNotFoundError(f"model weights not found: {weights_path}")
+                weight_files = [weights_path]
+
+        expected = set(model.state_dict())
+        loaded: set[str] = set()
+        for weights_path in weight_files:
+            if not weights_path.is_file():
+                raise FileNotFoundError(f"safetensors shard not found: {weights_path}")
+            shard = load_file(weights_path, device=str(device))
+            duplicates = loaded.intersection(shard)
+            if duplicates:
+                raise ValueError(
+                    f"duplicate tensors across safetensors shards: {sorted(duplicates)[:5]}"
+                )
+            loaded.update(shard)
+            model.load_state_dict(shard, strict=False)
+
+        unexpected = sorted(loaded - expected)
+        allowed_missing = {"freq_cos", "freq_sin"}
+        if config.weight_tying:
+            # Standard safetensors writers may store only one side of a tied pair.
+            allowed_missing.update({"token_emb.weight", "vocab_proj.weight"})
+        missing = sorted(expected - loaded - allowed_missing)
+        if unexpected or missing:
+            details = []
+            if missing:
+                details.append(f"missing keys: {missing[:5]}")
+            if unexpected:
+                details.append(f"unexpected keys: {unexpected[:5]}")
+            raise RuntimeError("checkpoint does not match Llama config (" + "; ".join(details) + ")")
+
+        return model.eval()

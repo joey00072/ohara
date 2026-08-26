@@ -62,6 +62,19 @@ python examples/train_sft.py --pretrained-checkpoint ./ckpt/base_d12.pt
 
 # 3. chat with it in the browser
 python examples/chat_web.py --checkpoint ./ckpt/sft_d12.pt
+
+# Or load a standard config.json + model.safetensors repo directly from the Hub
+uv run python examples/chat_web.py \
+  --checkpoint joey00072/ohara-moe-0.9B-a91M-chat-d12
+```
+
+Models also support the usual directory workflow directly:
+
+```python
+from ohara import Llama
+
+model = Llama.from_pretrained("joey00072/ohara-moe-0.9B-a91M-chat-d12")
+model.save_pretrained("./my-model")
 ```
 
 Then open <http://localhost:8080>. When the model lives on a remote box, forward the

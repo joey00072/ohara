@@ -130,6 +130,31 @@ def test_modeling_lm_save_and_load_round_trip(tmp_path) -> None:
     torch.testing.assert_close(before, after)
 
 
+def test_llama_safetensors_save_and_load_round_trip(tmp_path) -> None:
+    model = Llama(
+        small_llama_config(
+            moe_num_experts=4,
+            moe_experts_per_tok=2,
+            moe_grouped=True,
+            moe_num_shared_experts=1,
+            moe_gate_fn="sigmoid",
+        )
+    ).eval()
+    ids = token_ids()
+    with torch.no_grad():
+        before = model(ids)
+
+    model.save_pretrained(tmp_path)
+    reloaded = Llama.from_pretrained(tmp_path).eval()
+    with torch.no_grad():
+        after = reloaded(ids)
+
+    assert (tmp_path / "config.json").is_file()
+    assert (tmp_path / "model.safetensors").is_file()
+    assert reloaded.config == model.config
+    torch.testing.assert_close(before, after)
+
+
 @pytest.mark.parametrize(
     ("model_name", "position"),
     [("llama", 4), ("phi", 4)],

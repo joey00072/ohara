@@ -1,6 +1,7 @@
-"""Serve a browser chat UI for a finetuned ohara checkpoint.
+"""Serve a browser chat UI for a finetuned Ohara model.
 
     python examples/chat_web.py --checkpoint ./ckpt/sft.pt
+    python examples/chat_web.py --checkpoint joey00072/ohara-moe-0.9B-a91M-chat-d12
 
 Then open http://localhost:8080. To reach it from a laptop while the model runs
 on a remote box, either bind publicly with ``--host 0.0.0.0`` or, better, leave
@@ -12,6 +13,7 @@ it on localhost and forward the port over ssh:
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import torch
 
@@ -21,7 +23,11 @@ from ohara.webui import serve
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Chat with a finetuned ohara model in a browser")
-    parser.add_argument("--checkpoint", default="./ckpt/sft.pt")
+    parser.add_argument(
+        "--checkpoint",
+        default="./ckpt/sft.pt",
+        help="legacy .pt checkpoint, local save_pretrained directory, or Hugging Face model ID",
+    )
     parser.add_argument(
         "--tokenizer-dir",
         default=None,
@@ -64,16 +70,24 @@ def main() -> None:
     args = parse_args()
     dtype = getattr(torch, args.dtype) if args.dtype else None
 
-    engine = ChatEngine.from_checkpoint(
-        args.checkpoint,
-        tokenizer_dir=args.tokenizer_dir,
-        tokenizer_name=args.tokenizer,
-        device=args.device,
-        dtype=dtype,
-        moe_experts_per_tok=args.moe_experts_per_tok,
-        moe_gate_fn=args.moe_gate_fn,
-        moe_normalize_weights=not args.moe_no_normalize_weights,
-    )
+    if Path(args.checkpoint).suffix == ".pt":
+        engine = ChatEngine.from_checkpoint(
+            args.checkpoint,
+            tokenizer_dir=args.tokenizer_dir,
+            tokenizer_name=args.tokenizer,
+            device=args.device,
+            dtype=dtype,
+            moe_experts_per_tok=args.moe_experts_per_tok,
+            moe_gate_fn=args.moe_gate_fn,
+            moe_normalize_weights=not args.moe_no_normalize_weights,
+        )
+    else:
+        engine = ChatEngine.from_pretrained(
+            args.checkpoint,
+            tokenizer_dir=args.tokenizer_dir,
+            device=args.device,
+            dtype=dtype,
+        )
     info = engine.metadata(args.checkpoint)
     print(
         f"loaded {args.checkpoint}: {info['parameters'] / 1e6:.1f}M params, "

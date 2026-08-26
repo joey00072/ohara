@@ -272,6 +272,72 @@ class ChatEngine:
         self.tokenizer_vocab_size = len(tokenizer)
         self.max_sequence_length = model.config.max_sequence_length
 
+    def save_pretrained(self, save_directory: str | Path) -> None:
+        """Save the model and tokenizer as a self-contained safetensors directory."""
+        save_directory = Path(save_directory)
+        self.model.save_pretrained(save_directory)
+        self.tokenizer.save_pretrained(save_directory)
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_name_or_path: str | Path,
+        *,
+        tokenizer_dir: str | Path | None = None,
+        device: str | torch.device | None = None,
+        dtype: torch.dtype | None = None,
+        revision: str | None = None,
+        cache_dir: str | Path | None = None,
+        force_download: bool = False,
+        local_files_only: bool = False,
+        token: str | bool | None = None,
+    ) -> "ChatEngine":
+        """Load a standard Ohara safetensors model and its chat tokenizer.
+
+        ``model_name_or_path`` may be a local ``save_pretrained`` directory or a
+        Hugging Face model ID. By default the tokenizer is loaded from the same
+        source as the model.
+        """
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        if dtype is None:
+            dtype = torch.bfloat16 if torch.device(device).type == "cuda" else torch.float32
+
+        if tokenizer_dir is None:
+            tokenizer = load_chat_tokenizer(
+                hf_name=str(model_name_or_path),
+                tokenizer_dir=model_name_or_path,
+                prefer_hf=True,
+                local_files_only=local_files_only,
+                cache_dir=cache_dir,
+                revision=revision,
+                force_download=force_download,
+                token=token,
+            )
+        else:
+            tokenizer = load_chat_tokenizer(
+                tokenizer_dir=tokenizer_dir,
+                prefer_hf=False,
+                local_files_only=True,
+            )
+
+        model = Llama.from_pretrained(
+            model_name_or_path,
+            device=device,
+            dtype=dtype,
+            revision=revision,
+            cache_dir=cache_dir,
+            force_download=force_download,
+            local_files_only=local_files_only,
+            token=token,
+        )
+        if model.config.vocab_size < len(tokenizer):
+            raise ValueError(
+                f"checkpoint vocabulary ({model.config.vocab_size:,}) is smaller than the "
+                f"tokenizer ({len(tokenizer):,})"
+            )
+        return cls(model, tokenizer, device=device, dtype=dtype)
+
     @classmethod
     def from_checkpoint(
         cls,

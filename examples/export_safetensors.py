@@ -101,7 +101,9 @@ def export(
     )
 
     config_payload = {
+        "architectures": ["Llama"],
         "architecture": "ohara.models.llama.Llama",
+        "model_type": "ohara_llama",
         "iteration": checkpoint.get("idx"),
         **asdict(config),
     }
