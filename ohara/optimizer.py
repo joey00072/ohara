@@ -180,6 +180,15 @@ class MuonAdamW(optim.Optimizer):
                         "hyperspherical groups hold matrix parameters only; keep vectors "
                         "such as norm gains and biases in a plain AdamW group"
                     )
+                for parameter in group.get("params", ()):
+                    norms = torch.linalg.vector_norm(parameter.detach().float(), dim=(-2, -1))
+                    if bool((norms == 0).any()):
+                        raise ValueError(
+                            f"hyperspherical group {group.get('name', kind)!r} contains a "
+                            f"zero-norm matrix (shape {tuple(parameter.shape)}); constant-norm "
+                            "updates cannot train it. Use nonzero initialization (e.g. "
+                            "init_style='standard' for dense Llama) or an additive optimizer."
+                        )
             if kind == "muon":
                 params = list(group.get("params", ()))
                 if not params:
@@ -258,7 +267,6 @@ class MuonAdamW(optim.Optimizer):
 
         beta1, beta2 = group["betas"]
         eps = float(group["eps"])
-        step = states[0]["step"]
         exp_avgs = [state["exp_avg"] for state in states]
         exp_avg_sqs = [state["exp_avg_sq"] for state in states]
 
@@ -267,8 +275,8 @@ class MuonAdamW(optim.Optimizer):
         torch._foreach_lerp_(exp_avg_sqs, squared, 1.0 - beta2)
 
         # Bias-corrected Adam direction: m_hat / (sqrt(v_hat) + eps).
-        bias_correction1 = 1.0 - beta1**step
-        bias_correction2 = 1.0 - beta2**step
+        bias_correction1 = [1.0 - beta1 ** state["step"] for state in states]
+        bias_correction2 = [1.0 - beta2 ** state["step"] for state in states]
         denominators = torch._foreach_sqrt(torch._foreach_div(exp_avg_sqs, bias_correction2))
         torch._foreach_add_(denominators, eps)
         directions = torch._foreach_div(
@@ -285,11 +293,6 @@ class MuonAdamW(optim.Optimizer):
         active = [parameter for parameter in params if parameter.grad is not None]
         if not active:
             return
-        if len(active) != len(params):
-            raise RuntimeError(
-                "a Muon group has missing gradients; all same-shaped matrix parameters "
-                "must participate in each optimization step"
-            )
         if any(parameter.grad is not None and parameter.grad.is_sparse for parameter in active):
             raise RuntimeError("MuonAdamW does not support sparse gradients")
 
@@ -316,6 +319,16 @@ class MuonAdamW(optim.Optimizer):
             )
 
         momentum_buffer = state["momentum_buffer"]
+        indices = None
+        if len(active) != len(params):
+            indices = torch.tensor(
+                [i for i, parameter in enumerate(params) if parameter.grad is not None],
+                device=first.device,
+            )
+            # Inactive matrices retain both parameters and optimizer state, just
+            # as an AdamW parameter with grad=None does.
+            momentum_buffer = momentum_buffer.index_select(0, indices)
+            params = active
         if pre_stacked:
             stacked_gradients = params[0].grad
             stacked_parameters = params[0].detach()
@@ -325,6 +338,8 @@ class MuonAdamW(optim.Optimizer):
 
         momentum = float(group["momentum"])
         momentum_buffer.lerp_(stacked_gradients, 1.0 - momentum)
+        if indices is not None:
+            state["momentum_buffer"].index_copy_(0, indices, momentum_buffer)
         update = stacked_gradients.lerp(momentum_buffer, momentum)
         update = _polar_express(update, int(group["ns_steps"]))
 
@@ -343,11 +358,15 @@ class MuonAdamW(optim.Optimizer):
             return
 
         second_momentum_buffer = state["second_momentum_buffer"]
+        if indices is not None:
+            second_momentum_buffer = second_momentum_buffer.index_select(0, indices)
         beta2 = float(group["beta2"])
         variance = update.float().square().mean(dim=reduction_dim, keepdim=True)
         reduction_size = update.size(reduction_dim)
         original_norm = (variance.sum(dim=(-2, -1), keepdim=True) * reduction_size).sqrt()
         second_momentum_buffer.lerp_(variance.to(second_momentum_buffer.dtype), 1.0 - beta2)
+        if indices is not None:
+            state["second_momentum_buffer"].index_copy_(0, indices, second_momentum_buffer)
         inverse_rms = second_momentum_buffer.clamp_min(1e-10).rsqrt()
         scaled_norm = (
             (variance * reduction_size) * inverse_rms.float().square()
@@ -391,8 +410,13 @@ class MuonAdamW(optim.Optimizer):
 
 
 def _unwrap_model(model: torch.nn.Module) -> torch.nn.Module:
-    while hasattr(model, "module") and isinstance(model.module, torch.nn.Module):
-        model = model.module
+    while True:
+        child = getattr(model, "module", None)
+        if not isinstance(child, torch.nn.Module):
+            child = getattr(model, "_orig_mod", None)
+        if not isinstance(child, torch.nn.Module):
+            break
+        model = child
     return model
 
 

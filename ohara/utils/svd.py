@@ -18,14 +18,14 @@ def svd_approx(
         A tuple containing the matrices A and B (where A @ B is the approximation of W),
         the rank used for the approximation, and the Frobenius norm of the difference between W and its approximation.
     """
-    U, S, V = torch.linalg.svd(W, full_matrices=False)
+    U, S, Vh = torch.linalg.svd(W, full_matrices=False)
     if r is None:
         r = S.size(0)
     else:
         r = min(r, S.size(0))
 
     A = U[:, :r]
-    B = torch.diag(S[:r]) @ V[:r, :]
+    B = torch.diag(S[:r]) @ Vh[:r, :]
     approx_W = A @ B
     frobenius_norm = torch.linalg.norm(W - approx_W)
     return A, B, r, frobenius_norm

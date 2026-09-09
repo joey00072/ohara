@@ -103,7 +103,6 @@ def parse_log(
             horizon = MAX_ITERS_RE.search(line)
             if horizon:
                 declared_total = _int(horizon.group(1))
-                continue
 
             params = PARAMS_RE.search(line)
             if params and state["params"] is None:

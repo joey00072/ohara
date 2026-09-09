@@ -10,11 +10,10 @@ The fix is to tokenize once, ahead of time, into a flat array of token ids on
 disk. Training then memory-maps that array and slices contiguous blocks out of
 it, which costs a memcpy and no Python.
 
-Layout is deliberately dumb: one ``.bin`` of little-endian uint16 token ids, and
+Layout is deliberately simple: one ``.bin`` of little-endian uint16 or uint32 ids, and
 a ``.json`` sidecar recording the tokenizer, token count and dtype so a corpus
 cannot be silently paired with the wrong vocabulary. uint16 holds any vocabulary
-up to 65,536, which covers the tokenizers this repo uses and halves read
-bandwidth against uint32.
+up to 65,536, and larger vocabularies use uint32.
 """
 
 from __future__ import annotations
@@ -30,8 +29,21 @@ from torch.utils.data import IterableDataset, get_worker_info
 from transformers import PreTrainedTokenizerBase
 
 
+# uint16 holds any vocabulary up to 65,536 and halves read bandwidth against
+# uint32. Larger vocabularies (Qwen's 151,936, for instance) need the wider type,
+# so the writer picks per corpus and the sidecar records which was used.
 TOKEN_DTYPE = np.uint16
+DTYPES = {"uint16": np.dtype("<u2"), "uint32": np.dtype("<u4")}
 MAX_VOCAB = np.iinfo(TOKEN_DTYPE).max + 1
+
+
+def dtype_for_vocab(vocab_size: int) -> type[np.unsignedinteger]:
+    """Narrowest unsigned type that can hold every id in this vocabulary."""
+    if vocab_size <= np.iinfo(np.uint16).max + 1:
+        return np.uint16
+    if vocab_size <= np.iinfo(np.uint32).max + 1:
+        return np.uint32
+    raise ValueError(f"vocabulary of {vocab_size:,} is too large for uint32 token bins")
 
 
 def _sidecar_path(bin_path: str | Path) -> Path:
@@ -48,18 +60,18 @@ def write_token_bin(
     flush_every: int = 64 * 1024 * 1024,
     progress_every: int = 1_000_000,
     log: bool = True,
+    build_options: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    """Tokenize ``documents`` into a flat uint16 ``.bin`` plus a JSON sidecar.
+    """Tokenize ``documents`` into a flat unsigned ``.bin`` plus a JSON sidecar.
 
     Each document is prefixed with a boundary token (BOS, else EOS) so packed
+    No separate EOS is appended: tokenizers with distinct BOS/EOS need a
+    different document recipe to learn explicit stopping. Packed
     blocks keep document starts visible to the model, matching how
     :class:`ohara.dataset.StreamingTextDataset` builds its stream.
     """
-    if len(tokenizer) > MAX_VOCAB:
-        raise ValueError(
-            f"vocabulary of {len(tokenizer):,} exceeds what {TOKEN_DTYPE.__name__} can hold "
-            f"({MAX_VOCAB:,}); widen TOKEN_DTYPE before using this tokenizer"
-        )
+    token_type = dtype_for_vocab(len(tokenizer))
+    token_dtype = DTYPES[token_type.__name__]
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
 
@@ -85,9 +97,9 @@ def write_token_bin(
         nonlocal total_documents, pending_tokens
         encoded = tokenizer(batch, add_special_tokens=False)["input_ids"]
         for ids in encoded:
-            block = np.empty(len(ids) + 1, dtype=TOKEN_DTYPE)
+            block = np.empty(len(ids) + 1, dtype=token_dtype)
             block[0] = boundary_token_id
-            block[1:] = np.asarray(ids, dtype=TOKEN_DTYPE)
+            block[1:] = np.asarray(ids, dtype=token_dtype)
             pending.append(block)
             pending_tokens += block.size
         total_documents += len(batch)
@@ -123,25 +135,39 @@ def write_token_bin(
 
         if total_tokens == 0:
             raise RuntimeError("no tokens were written; the document stream was empty")
-        temporary.replace(bin_path)
+        metadata: dict[str, object] = {
+            "tokens": int(total_tokens),
+            "documents": int(total_documents),
+            "dtype": token_type.__name__,
+            "vocab_size": len(tokenizer),
+            "tokenizer": str(getattr(tokenizer, "name_or_path", "unknown")),
+            "boundary_token_id": int(boundary_token_id),
+            "build_options": build_options,
+        }
+        sidecar = _sidecar_path(bin_path)
+        temporary_sidecar = sidecar.with_name(f".{sidecar.name}.tmp")
+        try:
+            temporary_sidecar.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+            # A pair of files cannot be renamed atomically. Leave a marker if
+            # publication is interrupted, including same-size replacements.
+            pending_publication = bin_path.with_suffix(bin_path.suffix + ".pending")
+            pending_publication.touch()
+            temporary_sidecar.replace(sidecar)
+            temporary.replace(bin_path)
+            pending_publication.unlink()
+        finally:
+            temporary_sidecar.unlink(missing_ok=True)
     finally:
         temporary.unlink(missing_ok=True)
 
-    metadata: dict[str, object] = {
-        "tokens": int(total_tokens),
-        "documents": int(total_documents),
-        "dtype": TOKEN_DTYPE.__name__,
-        "vocab_size": len(tokenizer),
-        "tokenizer": str(getattr(tokenizer, "name_or_path", "unknown")),
-        "boundary_token_id": int(boundary_token_id),
-    }
-    _sidecar_path(bin_path).write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     if log:
         print(f"wrote {bin_path}: {total_tokens:,} tokens from {total_documents:,} documents")
     return metadata
 
 
 def read_token_bin_metadata(bin_path: str | Path) -> dict[str, object]:
+    if Path(bin_path).with_suffix(Path(bin_path).suffix + ".pending").exists():
+        raise ValueError(f"incomplete token-bin publication: {bin_path}; rebuild the bin")
     sidecar = _sidecar_path(bin_path)
     if not sidecar.exists():
         raise FileNotFoundError(f"missing token-bin sidecar: {sidecar}")
@@ -178,16 +204,28 @@ class TokenBinDataset(IterableDataset):
         if (data_rank is None) != (data_world_size is None):
             raise ValueError("data_rank and data_world_size must be provided together")
 
+        if data_world_size is not None and data_world_size < 1:
+            raise ValueError("data_world_size must be at least 1")
+        if data_rank is not None and not 0 <= data_rank < data_world_size:
+            raise ValueError("data_rank must be between 0 and data_world_size - 1")
+
         self.bin_path = Path(bin_path)
         if not self.bin_path.exists():
             raise FileNotFoundError(f"token bin not found: {self.bin_path}")
         self.metadata = read_token_bin_metadata(self.bin_path)
+        recorded = str(self.metadata.get("dtype", "uint16"))
+        if recorded not in DTYPES:
+            raise ValueError(f"{self.bin_path} records an unsupported dtype: {recorded}")
+        self.token_dtype = DTYPES[recorded]
         if tokenizer is not None and self.metadata["vocab_size"] != len(tokenizer):
             raise ValueError(
                 f"{self.bin_path} was tokenized with a {self.metadata['vocab_size']:,} token "
                 f"vocabulary but the tokenizer has {len(tokenizer):,}; re-run pretokenization"
             )
 
+        expected_size = int(self.metadata["tokens"]) * self.token_dtype.itemsize
+        if self.bin_path.stat().st_size != expected_size:
+            raise ValueError(f"{self.bin_path} size does not match its token-bin metadata")
         self.max_length = max_length
         self.shuffle = shuffle
         self.seed = seed
@@ -209,7 +247,7 @@ class TokenBinDataset(IterableDataset):
         # Opened lazily so the memmap is created inside each worker process
         # rather than inherited across a fork.
         if self._tokens is None:
-            self._tokens = np.memmap(self.bin_path, dtype=TOKEN_DTYPE, mode="r")
+            self._tokens = np.memmap(self.bin_path, dtype=self.token_dtype, mode="r", shape=(int(self.metadata["tokens"]),))
         return self._tokens
 
     def _shard(self) -> tuple[int, int]:

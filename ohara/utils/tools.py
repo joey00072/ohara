@@ -18,8 +18,8 @@ def auto_accelerator(device: str | None = None) -> torch.device:
     Returns:
         torch.device: The selected torch device.
 
-    Raises:
-        AssertionError: If the device passed is not None, 'cpu', 'cuda', or 'mps'.
+    Explicit device strings are parsed by ``torch.device``; their availability
+    is checked by PyTorch when an operation is placed on that device.
     """
     if isinstance(device, torch.device):
         return device
@@ -29,7 +29,7 @@ def auto_accelerator(device: str | None = None) -> torch.device:
     accelerator = "cpu"
     if torch.cuda.is_available():
         accelerator = "cuda"
-    if torch.backends.mps.is_built():
+    if accelerator == "cpu" and torch.backends.mps.is_available():
         accelerator = "mps"
     return torch.device(accelerator)
 
@@ -82,4 +82,8 @@ class BetterCycle:
 
     def close(self) -> None:
         """Drop the active iterator so generators and workers can clean up."""
+        iterator = self._iterator
         self._iterator = None
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            close()

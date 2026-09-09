@@ -35,6 +35,12 @@ def llama_config_for_depth(
     ffn_multiple_of: int = 256,
     dropout: float = 0.0,
     weight_tying: bool = False,
+    moe_num_experts: int = 0,
+    moe_experts_per_tok: int = 2,
+    moe_layer_interval: int = 1,
+    moe_grouped: bool = False,
+    moe_num_shared_experts: int = 0,
+    moe_gate_fn: str = "softmax",
 ) -> Config:
     """Derive every Llama shape from the single scaling dial, model depth."""
     if depth < 1:
@@ -63,6 +69,12 @@ def llama_config_for_depth(
         multiple_of=ffn_multiple_of,
         weight_tying=weight_tying,
         init_style="nanochat",
+        moe_num_experts=moe_num_experts,
+        moe_experts_per_tok=moe_experts_per_tok,
+        moe_layer_interval=moe_layer_interval,
+        moe_grouped=moe_grouped,
+        moe_num_shared_experts=moe_num_shared_experts,
+        moe_gate_fn=moe_gate_fn,
     )
 
 
@@ -70,7 +82,11 @@ def model_scaling_stats(config: Config) -> tuple[dict[str, int], float]:
     """Count a potentially large model without allocating its parameters."""
     with torch.device("meta"):
         model = Llama(config)
-    return model.num_scaling_params(), model.estimate_flops(config.max_sequence_length)
+    counts = model.num_scaling_params()
+    active_transformer = model.active_matmul_parameters()
+    counts["active_transformer_matrices"] = active_transformer
+    counts["active_effective"] = active_transformer + counts["lm_head"]
+    return counts, model.estimate_flops(config.max_sequence_length)
 
 
 @dataclass(frozen=True)
@@ -83,8 +99,10 @@ class ScalingPlan:
     params_token_embeddings: int
     params_lm_head: int
     params_transformer: int
+    params_active_transformer: int
     params_norms_and_scalars: int
     params_total: int
+    params_capacity_effective: int
     params_effective: int
     flops_per_token: float
     flops_budget: float
@@ -130,6 +148,12 @@ def plan_scaling_run(
     base_unembedding_learning_rate: float = 0.008,
     base_scalar_learning_rate: float = 0.5,
     base_weight_decay: float = 0.28,
+    moe_num_experts: int = 0,
+    moe_experts_per_tok: int = 2,
+    moe_layer_interval: int = 1,
+    moe_grouped: bool = False,
+    moe_num_shared_experts: int = 0,
+    moe_gate_fn: str = "softmax",
 ) -> ScalingPlan:
     """Plan one fixed-compute or compute-optimal run using nanochat-style rules."""
     if flops_budget is None and target_param_data_ratio is None:
@@ -164,6 +188,12 @@ def plan_scaling_run(
         head_dim=head_dim,
         ffn_multiplier=ffn_multiplier,
         ffn_multiple_of=ffn_multiple_of,
+        moe_num_experts=moe_num_experts,
+        moe_experts_per_tok=moe_experts_per_tok,
+        moe_layer_interval=moe_layer_interval,
+        moe_grouped=moe_grouped,
+        moe_num_shared_experts=moe_num_shared_experts,
+        moe_gate_fn=moe_gate_fn,
     )
     counts, flops_per_token = model_scaling_stats(config)
     reference_config = llama_config_for_depth(
@@ -174,10 +204,16 @@ def plan_scaling_run(
         head_dim=head_dim,
         ffn_multiplier=ffn_multiplier,
         ffn_multiple_of=ffn_multiple_of,
+        moe_num_experts=moe_num_experts,
+        moe_experts_per_tok=moe_experts_per_tok,
+        moe_layer_interval=moe_layer_interval,
+        moe_grouped=moe_grouped,
+        moe_num_shared_experts=moe_num_shared_experts,
+        moe_gate_fn=moe_gate_fn,
     )
     reference_counts, _ = model_scaling_stats(reference_config)
-    reference_tokens = reference_tokens_per_param * reference_counts["effective"]
-    nominal_tokens = reference_tokens_per_param * counts["effective"]
+    reference_tokens = reference_tokens_per_param * reference_counts["active_effective"]
+    nominal_tokens = reference_tokens_per_param * counts["active_effective"]
 
     tokens_per_micro_batch = device_batch_size * sequence_length * world_size
     if total_batch_size is None:
@@ -202,7 +238,7 @@ def plan_scaling_run(
         selected_budget = flops_budget
     else:
         assert target_param_data_ratio is not None
-        target_tokens = target_param_data_ratio * counts["effective"]
+        target_tokens = target_param_data_ratio * counts["active_effective"]
         # Match nanochat: never exceed the requested token horizon merely to
         # round to a whole optimizer step.
         num_iterations = max(1, int(target_tokens // total_batch_size))
@@ -230,9 +266,11 @@ def plan_scaling_run(
         params_token_embeddings=counts["token_embeddings"],
         params_lm_head=counts["lm_head"],
         params_transformer=counts["transformer_matrices"],
+        params_active_transformer=counts["active_transformer_matrices"],
         params_norms_and_scalars=counts["norms_and_scalars"],
         params_total=counts["total"],
-        params_effective=counts["effective"],
+        params_capacity_effective=counts["effective"],
+        params_effective=counts["active_effective"],
         flops_per_token=flops_per_token,
         flops_budget=selected_budget,
         total_batch_size=total_batch_size,
@@ -242,7 +280,7 @@ def plan_scaling_run(
         num_iterations=num_iterations,
         tokens_trained=tokens_trained,
         actual_training_flops=actual_training_flops,
-        tokens_per_effective_param=tokens_trained / counts["effective"],
+        tokens_per_effective_param=tokens_trained / counts["active_effective"],
         learning_rate=matrix_learning_rate,
         matrix_learning_rate=matrix_learning_rate,
         embedding_learning_rate=embedding_learning_rate,
@@ -436,7 +474,7 @@ def fit_isoflop_curves(
     *,
     metric: str = "val_bpb",
 ) -> list[dict[str, float]]:
-    """Fit loss quadratics in log-parameter space for every FLOP budget."""
+    """Fit locally bracketed loss quadratics in log-parameter space."""
     grouped: dict[float, list[Mapping[str, float]]] = {}
     for row in rows:
         value = float(row[metric])
@@ -452,28 +490,57 @@ def fit_isoflop_curves(
         log_params = [math.log10(float(row["params_effective"])) for row in subset]
         losses = [float(row[metric]) for row in subset]
 
+        # Fit only the three points immediately surrounding the measured
+        # minimum. A global quadratic is unsafe on real depth sweeps: width
+        # changes make parameter spacing highly uneven, so a distant point can
+        # pull the vertex far below every measured loss.
+        best = min(range(len(losses)), key=losses.__getitem__)
+        fit_start = min(max(best - 1, 0), len(subset) - 3)
+        fit_end = fit_start + 3
+        fit_log_params = log_params[fit_start:fit_end]
+        fit_losses = losses[fit_start:fit_end]
+
         # Center the parameter axis before fitting: log-parameters span many
         # orders of magnitude, and an uncentered quadratic fit ill-conditions
         # the Vandermonde system solved by _quadratic_fit. Fit in centered
         # coordinates, then shift the coefficients back onto the original
         # log-parameter axis so every downstream consumer (including
         # write_scaling_svg) can keep using absolute log10(params).
-        mean_log_params = sum(log_params) / len(log_params)
-        centered = [value - mean_log_params for value in log_params]
-        centered_a, centered_b, centered_c = _quadratic_fit(centered, losses)
+        mean_log_params = sum(fit_log_params) / len(fit_log_params)
+        centered = [value - mean_log_params for value in fit_log_params]
+        if len(set(fit_log_params)) < 3:
+            centered_a, centered_b, centered_c = 0.0, 0.0, min(fit_losses)
+        else:
+            centered_a, centered_b, centered_c = _quadratic_fit(centered, fit_losses)
         a = centered_a
         b = centered_b - 2 * centered_a * mean_log_params
         c = centered_a * mean_log_params**2 - centered_b * mean_log_params + centered_c
 
         candidate = -b / (2 * a) if a > 0 else float("nan")
-        interior_optimum = a > 0 and log_params[0] <= candidate <= log_params[-1]
-        if interior_optimum:
+        interior_optimum = 0 < best < len(losses) - 1
+        if interior_optimum and min(
+            log_params[best] - log_params[best - 1],
+            log_params[best + 1] - log_params[best],
+        ) > 0:
+            left_gap = log_params[best] - log_params[best - 1]
+            right_gap = log_params[best + 1] - log_params[best]
+            gap_ratio = max(left_gap, right_gap) / min(left_gap, right_gap)
+        else:
+            gap_ratio = float("inf")
+        quadratic_interpolation = (
+            interior_optimum
+            and gap_ratio <= 3
+            and a > 0
+            and fit_log_params[0] <= candidate <= fit_log_params[-1]
+        )
+        if quadratic_interpolation:
             log_optimum = candidate
             loss_optimum = a * log_optimum**2 + b * log_optimum + c
+            params = 10**log_optimum
         else:
-            best = min(range(len(losses)), key=losses.__getitem__)
             log_optimum = log_params[best]
             loss_optimum = losses[best]
+            params = float(subset[best]["params_effective"])
 
         # Derive tokens_trained from the exact budget = flops_per_token * tokens
         # identity rather than interpolating tokens_trained directly. Near the
@@ -485,7 +552,6 @@ def fit_isoflop_curves(
             log_params,
             [float(row["flops_per_token"]) for row in subset],
         )
-        params = 10**log_optimum
         tokens = budget / flops_per_token
         optimums.append(
             {
@@ -497,6 +563,9 @@ def fit_isoflop_curves(
                 "quadratic_a": a,
                 "quadratic_b": b,
                 "quadratic_c": c,
+                "quadratic_log_params_min": fit_log_params[0],
+                "quadratic_log_params_max": fit_log_params[-1],
+                "quadratic_interpolation": float(quadratic_interpolation),
                 "interior_optimum": float(interior_optimum),
             }
         )
@@ -542,20 +611,22 @@ def analyze_scaling_results(
     analysis: dict[str, object] = {"metric": metric, "optimums": optimums}
     interior_optimums = [row for row in optimums if row["interior_optimum"] == 1.0]
     analysis["num_interior_optimums"] = len(interior_optimums)
-    if len(interior_optimums) >= 2:
+    quadratic_optimums = [row for row in optimums if row["quadratic_interpolation"] == 1.0]
+    analysis["num_quadratic_optimums"] = len(quadratic_optimums)
+    if len(quadratic_optimums) >= 2:
         analysis["optimal_params_power_law"] = fit_power_law(
-            interior_optimums,
+            quadratic_optimums,
             x_key="flops_budget",
             y_key="params_effective",
         )
         analysis["optimal_tokens_power_law"] = fit_power_law(
-            interior_optimums,
+            quadratic_optimums,
             x_key="flops_budget",
             y_key="tokens_trained",
         )
     else:
         analysis["power_law_warning"] = (
-            "Need interior iso-FLOP minima for at least two compute budgets; "
+            "Need reliable quadratic interior iso-FLOP minima for at least two compute budgets; "
             "expand the depth grid before interpreting scaling exponents."
         )
     return analysis
@@ -668,20 +739,31 @@ def write_scaling_svg(
         optimum = optimum_by_budget.get(budget)
         if optimum is None:
             continue
-        a = float(optimum["quadratic_a"])
-        b = float(optimum["quadratic_b"])
-        c = float(optimum["quadratic_c"])
-        start = math.log10(float(subset[0]["params_effective"]))
-        end = math.log10(float(subset[-1]["params_effective"]))
-        curve = []
-        for step in range(81):
-            log_parameter = start + (end - start) * step / 80
-            loss = a * log_parameter**2 + b * log_parameter + c
-            curve.append(point(0, log_parameter, loss, x_bounds, y_bounds))
-        points = " ".join(f"{x:.1f},{y:.1f}" for x, y in curve)
-        elements.append(
-            f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="2"/>'
-        )
+        if optimum.get("quadratic_interpolation", 1.0) == 1.0:
+            a = float(optimum["quadratic_a"])
+            b = float(optimum["quadratic_b"])
+            c = float(optimum["quadratic_c"])
+            start = float(
+                optimum.get(
+                    "quadratic_log_params_min",
+                    math.log10(float(subset[0]["params_effective"])),
+                )
+            )
+            end = float(
+                optimum.get(
+                    "quadratic_log_params_max",
+                    math.log10(float(subset[-1]["params_effective"])),
+                )
+            )
+            curve = []
+            for step in range(81):
+                log_parameter = start + (end - start) * step / 80
+                loss = a * log_parameter**2 + b * log_parameter + c
+                curve.append(point(0, log_parameter, loss, x_bounds, y_bounds))
+            points = " ".join(f"{x:.1f},{y:.1f}" for x, y in curve)
+            elements.append(
+                f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="2"/>'
+            )
         x, y = point(
             0,
             math.log10(float(optimum["params_effective"])),

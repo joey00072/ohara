@@ -13,6 +13,10 @@ class MoE(nn.Module):
     Routing is the usual: a linear gate scores every expert, the top-k win the token,
     and their outputs are combined with the gate weights. Two things are worth knowing:
 
+    Top-1 uses an unnormalised probability so the router receives a gradient.
+    For k > 1, softmax weights sum to one; sigmoid weights are unnormalised
+    (unlike GroupedMoE, which exposes normalize_weights).
+
     - Dispatch sorts the (token, expert) pairs by expert and runs one contiguous slice
       per expert, instead of replicating the input k times and masking it E times.
     - Load balancing is quantile balancing (Jianlin Su, used in Kimi K2/K3), which needs
@@ -30,13 +34,16 @@ class MoE(nn.Module):
         quantile_balancing: bool = True,
     ):
         super().__init__()
-        assert 1 <= num_experts_per_tok <= num_experts
+        if not 1 <= num_experts_per_tok <= num_experts:
+            raise ValueError("num_experts_per_tok must be in [1, num_experts]")
         if quantile_balancing:
-            assert num_experts_per_tok < num_experts, (
-                "quantile balancing reads the (k+1)-th logit as a threshold, "
-                f"so it needs num_experts_per_tok < num_experts (got {num_experts_per_tok} == {num_experts})"
-            )
-        assert gate_fn in ("softmax", "sigmoid")
+            if num_experts_per_tok >= num_experts:
+                raise ValueError(
+                    "quantile balancing reads the (k+1)-th logit as a threshold, "
+                    f"so it needs num_experts_per_tok < num_experts (got {num_experts_per_tok} == {num_experts})"
+                )
+        if gate_fn not in ("softmax", "sigmoid"):
+            raise ValueError("gate_fn must be softmax or sigmoid")
 
         self.dim = dim
         self.hidden_dim = hidden_dim
@@ -62,6 +69,8 @@ class MoE(nn.Module):
             "expert_counts", torch.zeros(num_experts, dtype=torch.long), persistent=False
         )
 
+        self.reset_parameters()
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, dim = x.shape
         flat_x = x.reshape(batch_size * seq_len, dim)  # (N, dim)
@@ -86,7 +95,11 @@ class MoE(nn.Module):
         # gradient, since top-k selection is not differentiable.
         selected = logits.gather(-1, expert_indices)  # (N, k)
         if self.gate_fn == "softmax":
-            expert_weights = selected.softmax(dim=-1)
+            expert_weights = (
+                logits.softmax(dim=-1).gather(-1, expert_indices)
+                if self.num_experts_per_tok == 1
+                else selected.softmax(dim=-1)
+            )
         else:
             expert_weights = torch.sigmoid(selected)
 
@@ -117,8 +130,6 @@ class MoE(nn.Module):
         output = torch.zeros_like(flat_x)
         start = 0
         for expert, count in zip(self.experts, counts.tolist()):
-            if count == 0:  # nothing routed here this batch
-                continue
             token_rows = rows[start : start + count]
             y = expert(flat_x[token_rows]) * weights[start : start + count]
             # Scatter-add, since a token can be routed to several experts.
@@ -141,11 +152,14 @@ class MoE(nn.Module):
     @torch.no_grad()
     def apply_qb_update(self) -> None:
         """Fold the accumulated statistics into the router bias. Call once per optimizer step."""
-        if self.qb_beta_count.item() == 0:
-            return
-        beta = self.qb_beta_sum / self.qb_beta_count
+        beta_sum = self.qb_beta_sum.clone()
+        count = self.qb_beta_count.clone()
         if dist.is_available() and dist.is_initialized():
-            dist.all_reduce(beta, op=dist.ReduceOp.AVG)
+            dist.all_reduce(beta_sum)
+            dist.all_reduce(count)
+        if count.item() == 0:
+            return
+        beta = beta_sum / count
         bias = -beta
         # Adding a constant to every expert changes nothing about which ones win the top-k,
         # so subtract the mean to keep the whole vector from drifting over a long run.
@@ -196,9 +210,7 @@ def expert_load(module: nn.Module, reset: bool = True) -> torch.Tensor | None:
     from ohara.modules.moe_grouped import GroupedMoE
 
     counts = [
-        m.expert_load(reset=reset)
-        for m in module.modules()
-        if isinstance(m, (MoE, GroupedMoE))
+        m.expert_load(reset=reset) for m in module.modules() if isinstance(m, (MoE, GroupedMoE))
     ]
     return torch.stack(counts) if counts else None
 

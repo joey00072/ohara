@@ -3,7 +3,7 @@ import torch.nn.functional as F
 
 from torch import Tensor
 
-IGNORE_INDEX = -100
+from ohara.chat import IGNORE_INDEX
 
 
 def sequence_logps(
@@ -86,29 +86,8 @@ def ipo_loss_from_logps(
     ).detach()
     return losses, rewards
 
-#######################################################################################################
-# https://arxiv.org/pdf/2305.18290
-# ... eqn 7
-# dpo_loss = - log( sigmoid( beta * (  log(pi_win/ref_win) - log(pi_lose /ref_lose)  ) ) )
-#
-# remember log property: log(x/y) = log(x) - log(y)
-# lets start witn sub eq,
-# =  log(pi_win/ref_win) - log(pi_lose /ref_lose)
-# = log( (pi_win/ref_win) /  ( pi_lose /ref_lose) )
-# = log( (pi_win/ref_win) *  ( ref_lose / pi_lose) )
-# = log( (pi_win/ ref_win) *  ( ref_lose / ref_win) )
-# = log( (pi_win/ ref_win) /  (   ref_win/ ref_lose) )
-# = log(pi_win/ ref_win) - log(ref_win/ ref_lose)
-# = (log(pi_win) - log(ref_win) ) -  (log(ref_win) - log(ref_lose))
-#
-# so now we have
-# logits = win_logprop - lose_logprop
-# where:
-# win_logprop = log(pi_win) - log(ref_win)
-# lose_logprop = log(ref_win) - log(ref_lose)
-#
-# and eqn is
-# dpo_loss = - log(sigmoid(beta * logits))
+# DPO compares policy preference with reference preference:
+# logits = (log pi_win - log pi_lose) - (log ref_win - log ref_lose).
 
 
 def dpo_loss(

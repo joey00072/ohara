@@ -194,7 +194,7 @@ def forward_model(model, input_ids):
     batch_size, seq_len = input_ids.size()
     target_ids = torch.roll(input_ids, shifts=-1, dims=1)
     losses = torch.nn.functional.cross_entropy(
-        logits.view(batch_size * seq_len, -1),
+        logits.float().reshape(batch_size * seq_len, -1),
         target_ids.view(batch_size * seq_len),
         reduction="none",
     ).view(batch_size, seq_len)
@@ -214,7 +214,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
     if num_fewshot > 0:
         rng = random.Random(1234 + idx)
         available_indices = [i for i in range(len(data)) if i != idx]
-        fewshot_indices = rng.sample(available_indices, num_fewshot)
+        fewshot_indices = rng.sample(available_indices, min(num_fewshot, len(available_indices)))
         fewshot_examples = [data[i] for i in fewshot_indices]
 
     if task_type == "multiple_choice":
@@ -235,7 +235,7 @@ def evaluate_example(idx, model, tokenizer, data, device, task_meta):
         for tok, start_idx, end_idx in zip(tokens, start_idxs, end_idxs):
             if len(tok) > max_tokens:
                 trim = len(tok) - max_tokens
-                if start_idx - trim < 0 or end_idx - trim < 0:
+                if start_idx - trim < 1 or end_idx - trim < 0:
                     # If continuation region is truncated away, mark incorrect.
                     return False
                 cropped_tokens.append(tok[-max_tokens:])
@@ -337,8 +337,6 @@ def _download_eval_bundle(eval_bundle_dir: Path, bundle_url: str) -> None:
         payload = response.read()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        tmpzip = Path(tmpdir).joinpath("eval_bundle.zip")
-        tmpzip.write_bytes(payload)
         with zipfile.ZipFile(io.BytesIO(payload), "r") as zf:
             zf.extractall(tmpdir)
         extracted = Path(tmpdir).joinpath("eval_bundle")

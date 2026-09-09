@@ -42,9 +42,8 @@ class DatasetPreprocessor:
         )
         self.tokenizer.padding_side = "right"
         self.PAD = self.tokenizer.pad_token_id
-        self.length = self.tokenizer.vocab_size
 
-        self.num_proc = num_proc if num_proc else max(os.cpu_count() - 3, 1)
+        self.num_proc = num_proc if num_proc else max((os.cpu_count() or 1) - 3, 1)
 
     def load_and_preprocess_dataset(self, split, remove_columns=("text",)):
         """Tokenize ``split`` and drop short rows. Pass ``()`` to keep all columns."""
@@ -128,7 +127,7 @@ class OpenHermesDatasetPreprocessor(DatasetPreprocessor):
                     lst.append({"role": "assistant", "content": row["value"]})
                 if row["from"] == "human":
                     lst.append({"role": "user", "content": row["value"]})
-            return {"input_ids": self.tokenizer.apply_chat_template(lst)}
+            return {"input_ids": self.tokenizer.apply_chat_template(lst, tokenize=True, return_dict=False)}
 
         tokenized = (
             dataset.map(

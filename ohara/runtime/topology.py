@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from typing import Iterable
 
+import torch.distributed as dist
+
 from .config import ParallelConfig
 
 
@@ -76,6 +78,8 @@ class ParallelTopology:
 
     @property
     def global_rank(self) -> int:
+        if dist.is_available() and dist.is_initialized():
+            return dist.get_rank()
         return int(os.environ.get("RANK", "0"))
 
     @property

@@ -47,7 +47,7 @@ Interrupted run? `--resume` picks the checkpoint back up, including the position
 uv run python examples/train_llama_engine.py --resume --num-workers 0
 ```
 
-To watch it in wandb/tensorboard, `wandb login` first. It looks something like this:
+To watch it in W&B, run `uv run wandb login` first; `--logger trackio` logs locally without an account. It looks something like this:
 
 ![train](./src/image.png)
 

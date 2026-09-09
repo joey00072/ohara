@@ -8,6 +8,7 @@ that stop a bin being paired with the wrong vocabulary.
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import numpy as np
@@ -81,11 +82,33 @@ class WriteTokenBinTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 write_token_bin([], tokenizer, Path(directory) / "train.bin", log=False)
 
-    def test_rejects_vocabulary_too_large_for_dtype(self):
-        tokenizer = FakeTokenizer(vocab_size=70_000)
+    def test_widens_to_uint32_for_large_vocabularies(self):
+        """A vocabulary past 65,536 must widen the dtype, not fail.
+
+        Qwen-scale vocabularies (151,936) do not fit uint16, and silently
+        truncating ids there would corrupt the corpus. The sidecar records which
+        type was used so the reader memory-maps it correctly.
+        """
+        tokenizer = FakeTokenizer(vocab_size=151_936)
+        tokenizer._vocab["a"] = 100_000
         with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaises(ValueError):
-                write_token_bin(["a"], tokenizer, Path(directory) / "train.bin", log=False)
+            path = Path(directory) / "train.bin"
+            metadata = write_token_bin(["abc", "de"], tokenizer, path, log=False)
+            self.assertEqual(metadata["dtype"], "uint32")
+            self.assertIn(100_000, np.fromfile(path, dtype="<u4").tolist())
+            tokens = np.fromfile(path, dtype=np.uint32)
+            self.assertEqual(tokens.size, metadata["tokens"])
+            # And it round-trips through the dataset, which reads the recorded dtype.
+            dataset = TokenBinDataset(path, max_length=2, infinite=False, shuffle=False)
+            self.assertEqual(dataset.token_dtype, np.uint32)
+
+    def test_narrow_vocabularies_stay_uint16(self):
+        tokenizer = FakeTokenizer(vocab_size=50_304)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "train.bin"
+            self.assertEqual(
+                write_token_bin(["abc"], tokenizer, path, log=False)["dtype"], "uint16"
+            )
 
     def test_leaves_no_temporary_file(self):
         tokenizer = FakeTokenizer()
@@ -205,6 +228,54 @@ class TokenBinDatasetTests(unittest.TestCase):
             path = build_bin(Path(directory), self.tokenizer, ["tiny"])
             with self.assertRaises(ValueError):
                 TokenBinDataset(path, max_length=4096)
+
+
+class TokenBinIntegrityTests(unittest.TestCase):
+    def test_interrupted_pair_publication_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "train.bin")
+            tokenizer = FakeTokenizer()
+            write_token_bin(["abc"], tokenizer, path, log=False)
+            original_replace = Path.replace
+
+            def fail_bin_replace(source, destination):
+                if source.name == ".train.bin.tmp":
+                    raise OSError("simulated interrupted publication")
+                return original_replace(source, destination)
+            with patch.object(Path, "replace", fail_bin_replace), self.assertRaises(OSError):
+                write_token_bin(["def"], tokenizer, path, log=False)
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                TokenBinDataset(path, max_length=2)
+            write_token_bin(["def"], tokenizer, path, log=False)
+            TokenBinDataset(path, max_length=2)
+
+    def test_size_mismatch_and_invalid_ranks_fail_early(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "train.bin")
+            write_token_bin(["abcdefghij"], FakeTokenizer(), path, log=False)
+            for rank, world in [(-1, 2), (2, 2), (0, 0)]:
+                with self.assertRaises(ValueError):
+                    TokenBinDataset(path, max_length=2, data_rank=rank, data_world_size=world)
+            original = path.read_bytes()
+            for payload in (original[:-2], original + b"00"):
+                path.write_bytes(payload)
+                with self.assertRaisesRegex(ValueError, "size does not match"):
+                    TokenBinDataset(path, max_length=2)
+
+    def test_shuffle_shards_are_disjoint_complete_and_deterministic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "train.bin")
+            tokenizer = FakeTokenizer()
+            write_token_bin([chr(65 + i) * 2 for i in range(20)], tokenizer, path, log=False)
+
+            def read(rank, world):
+                return [tuple(x.tolist()) for x, _ in TokenBinDataset(
+                    path, max_length=2, data_rank=rank, data_world_size=world,
+                    seed=17, shuffle=True, infinite=False)]
+            first, second = read(0, 2), read(1, 2)
+            self.assertEqual(first, read(0, 2))
+            self.assertFalse(set(first) & set(second))
+            self.assertEqual(set(first + second), set(read(0, 1)))
 
 
 if __name__ == "__main__":

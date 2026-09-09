@@ -290,7 +290,7 @@ class OptimizerPartitionTests(unittest.TestCase):
                 num_hidden_layers=2,
                 num_attention_heads=2,
                 dropout=0.0,
-                init_style="nanochat",
+                init_style="standard",
                 moe_num_experts=32,
                 moe_experts_per_tok=4,
                 moe_grouped=True,
@@ -470,6 +470,93 @@ class ConfigRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(recovered.moe_layer_interval, 4)
         self.assertEqual(recovered, config)
+
+
+class SharedExclusiveTests(unittest.TestCase):
+    """Vector rejection of the routed sum against the shared expert output.
+
+    The XSA idea moved to MoE: routed experts may only contribute in directions
+    the shared expert does not already cover, which makes shared-expert isolation
+    a constraint rather than a hope.
+    """
+
+    def test_routed_output_is_orthogonal_to_shared(self):
+        moe = build(shared_exclusive=True).eval()
+        with torch.no_grad():  # both branches need real weights to test anything
+            moe.w_down.normal_(0, 0.3)
+            moe.shared_down.weight.normal_(0, 0.3)
+        flat = torch.randn(16, 32)
+        indices, weights, _, _ = moe._route(flat)
+        routed = moe._dispatch_reference(flat, indices, weights.to(flat.dtype))
+        shared = moe._shared(flat)
+        rejected = moe._reject(routed, shared)
+        cosine = torch.nn.functional.cosine_similarity(rejected, shared, dim=-1)
+        self.assertLess(float(cosine.detach().abs().max()), 1e-5)
+
+    def test_rejection_only_removes_the_shared_direction(self):
+        # The component orthogonal to the basis must survive untouched.
+        moe = build(shared_exclusive=True)
+        basis = torch.randn(8, 32)
+        orthogonal = torch.randn(8, 32)
+        unit = torch.nn.functional.normalize(basis, dim=-1)
+        orthogonal = orthogonal - (orthogonal * unit).sum(-1, keepdim=True) * unit
+        torch.testing.assert_close(
+            moe._reject(orthogonal, basis), orthogonal, rtol=1e-4, atol=1e-5
+        )
+
+    def test_zero_shared_output_is_a_safe_noop(self):
+        """shared_down is zero-init, so the basis is exactly zero on step one.
+
+        F.normalize returns zeros rather than NaN for a zero vector, so the
+        rejection has to degrade to identity instead of destroying the model.
+        """
+        moe = build(shared_exclusive=True)
+        target = torch.randn(8, 32)
+        result = moe._reject(target, torch.zeros(8, 32))
+        self.assertTrue(bool(torch.isfinite(result).all()))
+        torch.testing.assert_close(result, target)
+
+    def test_forward_is_finite_at_init_and_after_training_starts(self):
+        moe = build(shared_exclusive=True)
+        x = torch.randn(2, 8, 32)
+        self.assertTrue(bool(torch.isfinite(moe(x)).all()))
+        with torch.no_grad():
+            moe.w_down.normal_(0, 0.2)
+            moe.shared_down.weight.normal_(0, 0.2)
+        self.assertTrue(bool(torch.isfinite(moe(x)).all()))
+
+    def test_gradients_flow_through_both_branches(self):
+        moe = build(shared_exclusive=True)
+        with torch.no_grad():
+            moe.w_down.normal_(0, 0.2)
+            moe.shared_down.weight.normal_(0, 0.2)
+        moe(torch.randn(2, 8, 32)).sum().backward()
+        self.assertGreater(float(moe.w_gate.grad.abs().sum()), 0)
+        self.assertGreater(float(moe.shared_gate.weight.grad.abs().sum()), 0)
+
+    def test_adds_no_parameters(self):
+        plain = sum(p.numel() for p in build(shared_exclusive=False).parameters())
+        exclusive = sum(p.numel() for p in build(shared_exclusive=True).parameters())
+        self.assertEqual(plain, exclusive)
+
+    def test_requires_a_shared_expert(self):
+        with self.assertRaises(ValueError):
+            build(num_shared_experts=0, shared_exclusive=True)
+
+    def test_changes_the_output_versus_plain_addition(self):
+        # Same weights, different combination rule -> different result.
+        a, b = build(shared_exclusive=False), build(shared_exclusive=True)
+        b.load_state_dict(a.state_dict())
+        with torch.no_grad():
+            for m in (a, b):
+                m.w_down.normal_(0, 0.3)
+                m.shared_down.weight.normal_(0, 0.3)
+            b.w_down.copy_(a.w_down)
+            b.shared_down.weight.copy_(a.shared_down.weight)
+        a.eval()
+        b.eval()
+        x = torch.randn(2, 8, 32)
+        self.assertFalse(torch.allclose(a(x), b(x), atol=1e-4))
 
 
 if __name__ == "__main__":

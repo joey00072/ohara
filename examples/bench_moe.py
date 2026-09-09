@@ -55,7 +55,8 @@ def build(args: argparse.Namespace, *, moe: bool) -> Llama:
         Config(
             vocab_size=args.vocab_size,
             hidden_size=args.hidden_size,
-            intermediate_size=intermediate,
+            intermediate_size=args.intermediate_size,
+            moe_expert_hidden_dim=intermediate if moe else None,
             max_sequence_length=args.seq_len,
             num_hidden_layers=args.num_layers,
             num_attention_heads=args.num_heads,

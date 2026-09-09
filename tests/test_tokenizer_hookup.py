@@ -1,4 +1,6 @@
 import unittest
+import json
+from torch.utils.data import DataLoader
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -34,7 +36,7 @@ class DummyTokenizer:
     def __call__(self, text, max_length=None, truncation=False):
         return {"input_ids": [1, 2, 3]}
 
-    def apply_chat_template(self, rows):
+    def apply_chat_template(self, rows, **kwargs):
         return [1, 2, 3]
 
 
@@ -72,6 +74,7 @@ class TokenizerHookupTests(unittest.TestCase):
 
         self.assertEqual(x.shape[0], 4)
         self.assertEqual(y.shape[0], 4)
+        self.assertEqual(y.tolist(), [7, 8, 9, -1])
 
     def test_dataset_preprocessor_uses_new_get_tokenizer(self):
         dummy = DummyTokenizer("hf")
@@ -142,6 +145,8 @@ class TokenizerHookupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             local_file = Path(directory, "train.jsonl")
             local_file.write_text('{"text":"hello"}\n', encoding="utf-8")
+            Path(directory, "train.json").write_text('{"tokens": 4}')
+            Path(directory, "train.bin").write_bytes(b"1234")
             dataset = StreamingTextDataset(
                 dataset_name=directory,
                 tokenizer=dummy,
@@ -160,6 +165,26 @@ class TokenizerHookupTests(unittest.TestCase):
         self.assertEqual(args[0], "json")
         self.assertEqual(kwargs["split"], "train")
         self.assertEqual(kwargs["data_files"]["train"], [str(local_file)])
+
+    def test_real_hf_streaming_workers_cover_one_and_two_source_shards(self):
+        class IdTokenizer(DummyTokenizer):
+            def encode(self, text, add_special_tokens=False):
+                return [int(text)] * 3
+
+        for shard_count in (1, 2):
+            with self.subTest(shards=shard_count), tempfile.TemporaryDirectory() as directory:
+                for shard in range(shard_count):
+                    Path(directory, f"train-{shard}.jsonl").write_text("".join(
+                        json.dumps({"text": str(i + 3)}) + "\n"
+                        for i in range(shard * 10, (shard + 1) * 10)
+                    ))
+                dataset = StreamingTextDataset(directory, IdTokenizer(), split="train", max_length=3)
+                iterator = iter(DataLoader(dataset, batch_size=None, num_workers=2))
+                try:
+                    observed = [int(next(iterator)[1][0]) for _ in range(shard_count * 10)]
+                    self.assertEqual(sorted(observed), list(range(3, shard_count * 10 + 3)))
+                finally:
+                    iterator._shutdown_workers()
 
 
 if __name__ == "__main__":

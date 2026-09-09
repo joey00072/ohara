@@ -107,6 +107,18 @@ class TokenizerTests(unittest.TestCase):
             self.assertEqual(result.source, "local")
             self.assertEqual(call_order[0], str(local_dir))
 
+    def test_bytelevel_split_utf8_counts_raw_bytes(self):
+        from tokenizers import Tokenizer, models, pre_tokenizers, decoders
+        from transformers import PreTrainedTokenizerFast
+        alphabet = sorted(pre_tokenizers.ByteLevel.alphabet())
+        backend = Tokenizer(models.BPE(vocab={c: i for i, c in enumerate(alphabet)}, merges=[]))
+        backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+        backend.decoder = decoders.ByteLevel()
+        tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend)
+        ids = tokenizer.encode("é", add_special_tokens=False)
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(int(get_token_bytes(tokenizer)[ids].sum()), 2)
+
     def test_get_token_bytes_zeroes_special_tokens(self):
         tokenizer = DummyTokenizer("dummy")
         token_bytes = get_token_bytes(tokenizer)

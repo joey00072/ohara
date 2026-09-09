@@ -20,7 +20,7 @@ def make_swa_mask(
 def sliding_window_attention_with_mask(q: Tensor, k: Tensor, v: Tensor, window_size: int = 16):
     _, T, _ = q.shape
     mask = make_swa_mask(T, window_size, device=q.device, dtype=q.dtype)
-    wei = q @ k.transpose(-1, -2)
+    wei = (q @ k.transpose(-1, -2)) * q.size(-1) ** -0.5
     wei = wei + mask
     wei = F.softmax(wei, dim=-1)
 

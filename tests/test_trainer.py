@@ -214,6 +214,38 @@ class TrainerTests(unittest.TestCase):
             )
             self.assertTrue(torch.equal(trainer.model.scale, saved_scale))
 
+    def test_scaled_overflow_skips_update_without_aborting(self):
+        trainer = self._build_trainer(max_iters=1, eval_iters=0)
+        trainer.engine._scaler = torch.amp.GradScaler("cpu", init_scale=1e38)
+        trainer.grad_clip_norm = 1.0
+        before = trainer.model.scale.detach().clone()
+        old_scale = trainer.engine._scaler.get_scale()
+        trainer.model.register_buffer("qb_beta_sum", torch.tensor(float("inf")))
+        trainer.model.register_buffer("qb_beta_count", torch.tensor(1.0))
+        calls = []
+        trainer.apply_router_balancing = lambda model: calls.append(model)
+        # A backward hook causes an overflow while the forward loss is finite.
+        hook = trainer.model.scale.register_hook(lambda gradient: gradient * float("inf"))
+        try:
+            trainer.train()
+        finally:
+            hook.remove()
+        torch.testing.assert_close(trainer.model.scale, before)
+        self.assertLess(trainer.engine._scaler.get_scale(), old_scale)
+        self.assertEqual(calls, [])
+        self.assertEqual(trainer.model.qb_beta_sum.item(), 0)
+        self.assertEqual(trainer.model.qb_beta_count.item(), 0)
+
+    def test_resume_timing_warmup_is_relative_to_restart(self):
+        trainer = self._build_trainer(max_iters=20, eval_iters=0)
+        trainer._start_iter = 15
+        trainer.timing_warmup_steps = 2
+        trainer._compute_perf_metrics(16, 10)
+        trainer._compute_perf_metrics(17, 10)
+        self.assertEqual(trainer.timed_steps, 0)
+        trainer._compute_perf_metrics(18, 2)
+        self.assertEqual(trainer.total_training_time_s, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

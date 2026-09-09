@@ -41,12 +41,17 @@ function escapeHtml(text) {
  * this size and avoids pulling in a markdown library.
  */
 function renderContent(text) {
+  const thinking = text.match(/<think>([\s\S]*?)(?:<\/think>|$)/);
+  if (thinking) {
+    const rest = text.replace(thinking[0], "");
+    return `<details class="thinking"><summary>Thinking</summary>${renderContent(thinking[1])}</details>${renderContent(rest)}`;
+  }
   return text
     .split(/```/)
     .map((part, index) => {
       if (index % 2 === 1) {
-        // Odd chunks are inside a fence. Drop the opening language tag line.
-        return `<pre><code>${escapeHtml(part.replace(/^[^\n]*\n/, ""))}</code></pre>`;
+        // Strip recognized language labels; preserve ambiguous first code lines.
+        return `<pre><code>${escapeHtml(part.replace(/^(?:python|py|javascript|js|typescript|ts|tsx|jsx|bash|sh|shell|zsh|json|yaml|yml|toml|html|css|sql|rust|go|java|c|cpp|c\+\+|text|plaintext)?\n/i, ""))}</code></pre>`;
       }
       return escapeHtml(part).replace(/`([^`\n]+)`/g, "<code>$1</code>");
     })
@@ -119,7 +124,8 @@ function setBusy(busy) {
 async function send(text) {
   if (!text.trim() || inFlight) return;
 
-  addTurn("user", text);
+  const activeConversation = conversation;
+  const userTurn = addTurn("user", text);
   conversation.push({ role: "user", content: text });
 
   const { turn, bubble } = addTurn("assistant", "");
@@ -173,6 +179,7 @@ async function send(text) {
       }
     }
 
+    if (conversation !== activeConversation) return;
     conversation.push({ role: "assistant", content: reply });
 
     const seconds = (performance.now() - started) / 1000;
@@ -181,6 +188,7 @@ async function send(text) {
     meta.textContent = `${tokens} tok · ${seconds.toFixed(1)}s · ${(tokens / seconds).toFixed(1)} tok/s`;
     turn.append(meta);
   } catch (error) {
+    if (conversation !== activeConversation) return;
     if (error.name === "AbortError") {
       // Keep whatever streamed in before the stop, so the turn stays coherent.
       if (reply) {
@@ -188,16 +196,20 @@ async function send(text) {
       } else {
         turn.remove();
         conversation.pop();
+        userTurn.turn.remove();
       }
     } else {
       turn.remove();
       conversation.pop();
+      userTurn.turn.remove();
       addTurn("error", error.message);
     }
   } finally {
     turn.classList.remove("streaming");
-    inFlight = null;
-    setBusy(false);
+    if (inFlight === controller) {
+      inFlight = null;
+      setBusy(false);
+    }
   }
 }
 
@@ -230,6 +242,8 @@ stopButton.addEventListener("click", () => inFlight?.abort());
 el("new-chat").addEventListener("click", () => {
   inFlight?.abort();
   conversation = [];
+  inFlight = null;
+  setBusy(false);
   messagesEl.replaceChildren(emptyState);
   input.focus();
 });
@@ -260,6 +274,7 @@ function bindControl(key, value) {
 }
 
 async function boot() {
+  for (const [key, value] of Object.entries({temperature: 0.8, top_p: 0.95, top_k: 0, max_new_tokens: 512})) bindControl(key, value);
   try {
     const info = await fetch("/api/info").then((response) => response.json());
     const model = info.model;

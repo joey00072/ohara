@@ -8,6 +8,10 @@ wrong one to publish: it executes arbitrary code on load, it is several times
 larger than the weights, and the architecture is only recoverable by guessing
 from tensor shapes.
 
+The exported names and config are Ohara-native; load with Llama.from_pretrained,
+not Hugging Face AutoModel. The directory layout alone follows HF conventions.
+Use --dtype bfloat16 to publish smaller weights.
+
 This writes ``model.safetensors`` (weights only, no code execution) next to a
 ``config.json`` recording the architecture. The config matters more than it
 looks: ``moe_experts_per_tok`` leaves no trace in any tensor shape, so without it
@@ -19,18 +23,19 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 
 import torch
 from safetensors.torch import save_file
 
+from ohara.models.llama import Config
 from ohara.chat_engine import config_from_state_dict, strip_wrapper_prefixes
 
 
 # Rebuilt at construction time from max_sequence_length, and counted per step
 # rather than learned. Publishing them would only bloat the file.
-DERIVED_BUFFERS = ("freq_cos", "freq_sin", "qb_beta_sum", "qb_beta_count", "expert_counts")
+DERIVED_BUFFERS = ("mask", "freq_cos", "freq_sin", "qb_beta_sum", "qb_beta_count", "expert_counts")
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,6 +48,7 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="top-k the model was trained with; not recoverable from tensor shapes",
     )
+    parser.add_argument("--moe-shared-exclusive", action="store_true")
     parser.add_argument("--moe-gate-fn", choices=("softmax", "sigmoid"), default="softmax")
     parser.add_argument(
         "--moe-no-normalize-weights",
@@ -54,6 +60,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="also export rotary and router-statistics buffers",
     )
+    parser.add_argument("--dtype", choices=("float32", "bfloat16", "float16"))
     return parser.parse_args()
 
 
@@ -65,6 +72,8 @@ def export(
     moe_gate_fn: str = "softmax",
     moe_normalize_weights: bool = True,
     keep_derived_buffers: bool = False,
+    moe_shared_exclusive: bool = False,
+    dtype: torch.dtype | None = None,
 ) -> dict[str, object]:
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"checkpoint not found: {checkpoint_path}")
@@ -77,7 +86,12 @@ def export(
         moe_experts_per_tok=moe_experts_per_tok,
         moe_gate_fn=moe_gate_fn,
         moe_normalize_weights=moe_normalize_weights,
+        moe_shared_exclusive=moe_shared_exclusive,
     )
+
+    if "model_config" in checkpoint:
+        names = {field.name for field in fields(Config)}
+        config = Config(**{k: v for k, v in checkpoint["model_config"].items() if k in names})
 
     tensors: dict[str, torch.Tensor] = {}
     for key, value in state.items():
@@ -87,6 +101,8 @@ def export(
             continue
         # safetensors rejects shared storage and needs a contiguous layout, so
         # clone rather than risk an alias between tied or viewed tensors.
+        if dtype is not None and value.is_floating_point():
+            value = value.to(dtype=dtype)
         tensors[key] = value.detach().cpu().contiguous().clone()
 
     if not tensors:
@@ -128,6 +144,8 @@ def main() -> None:
         moe_gate_fn=args.moe_gate_fn,
         moe_normalize_weights=not args.moe_no_normalize_weights,
         keep_derived_buffers=args.keep_derived_buffers,
+        moe_shared_exclusive=args.moe_shared_exclusive,
+        dtype=getattr(torch, args.dtype) if args.dtype else None,
     )
     config = result["config"]
     print(f"exported {args.checkpoint} -> {args.out}/model.safetensors")

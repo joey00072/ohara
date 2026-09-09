@@ -17,7 +17,7 @@ from torch import Tensor
 
 from ohara.embeddings_pos.rotary import RoPE
 from ohara.modules.kv_cache import KVCache
-from ohara.utils.load import download_hf_model
+from huggingface_hub import snapshot_download
 
 
 @dataclass
@@ -89,16 +89,15 @@ class PhiMHA(nn.Module):
             if position_ids is None:
                 raise ValueError("position_ids is required when using a KV cache")
             start_pos = int(position_ids)
+        q = self.rope(q.transpose(1, 2).float(), offset=start_pos).to(q.dtype).transpose(1, 2)
+        k = self.rope(k.transpose(1, 2).float(), offset=start_pos).to(k.dtype).transpose(1, 2)
+        if kv_cache is not None:
             k, v = kv_cache.forward(k, v, start_pos)
 
         # (B, num_heads, seq_len, head_dim). Attention math runs in fp32.
         k = k.transpose(1, 2).to(torch.float32)
         q = q.transpose(1, 2).to(torch.float32)
         v = v.transpose(1, 2).to(torch.float32)
-
-        # Queries start at the current cache position; keys always start at 0.
-        q = self.rope(q, offset=start_pos)
-        k = self.rope(k)
 
         scale = math.sqrt(1 / q.shape[-1])
         scores = (q @ k.transpose(-1, -2)) * scale
@@ -176,6 +175,9 @@ class Phi(nn.Module):
         if kv_cache is not None and len(kv_cache) != len(self.layers):
             raise ValueError("KV cache must contain one entry per model layer")
 
+        start_pos = int(position_ids or 0) if kv_cache is not None else 0
+        if x.ndim != 2 or start_pos < 0 or start_pos + x.size(1) > self.config.max_sequence_length:
+            raise ValueError("input exceeds the configured max_sequence_length")
         x = self.wte(x).to(self.wte.weight.dtype)
         for idx, layer in enumerate(self.layers):
             cache = kv_cache[idx] if kv_cache is not None else None
@@ -236,7 +238,7 @@ class Phi(nn.Module):
         config = PhiConfig()
         model = cls(config).half()
 
-        path_name = download_hf_model(name)
+        path_name = snapshot_download(name)
         weights: dict[str, Tensor] = {}
         for shard in sorted(Path(path_name).glob("*.safetensors")):
             with safe_open(shard, framework="pt", device="cpu") as reader:

@@ -49,7 +49,7 @@ class Retention(nn.Module):
 
         self.norm = RMSNorm(self.head_dim, config.eps)
 
-    def forward(self, x: torch.Tensor, decay_mask: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, decay_mask: torch.Tensor, freqs) -> torch.Tensor:
         batch, seq_len, d_model = x.shape
 
         k = self.key(x) * self.scaling
@@ -63,10 +63,16 @@ class Retention(nn.Module):
         q = q.view(shape).transpose(1, 2)
         v = v.view(shape).transpose(1, 2)
 
-        ret_mtx = torch.matmul(q, k.transpose(2, 3))
-        # Normalize before applying decay, as in the reference implementation.
+        cos, sin = (freq[:seq_len].to(q.dtype) for freq in freqs)
+
+        def rotate(tensor):
+            paired = torch.stack((-tensor[..., 1::2], tensor[..., ::2]), dim=-1).flatten(-2)
+            return tensor * cos + paired * sin
+
+        q, k = rotate(q), rotate(k)
+        ret_mtx = torch.matmul(q, k.transpose(2, 3)) * decay_mask[:, :seq_len, :seq_len]
+        # Mask before normalization so future keys cannot affect earlier tokens.
         ret_mtx = ret_mtx / ret_mtx.detach().abs().sum(dim=-1, keepdim=True).clamp(min=1, max=5e4)
-        ret_mtx = ret_mtx * decay_mask[:, :seq_len, :seq_len]
 
         output = torch.matmul(ret_mtx, v)  # (B, num_heads, T, head_dim)
         output = self.norm(output)
@@ -91,8 +97,8 @@ class Block(nn.Module):
         self.norm1 = nn.LayerNorm(config.d_model)
         self.norm2 = nn.LayerNorm(config.d_model)
 
-    def forward(self, x, decay_mask):
-        x = x + self.attn(self.norm1(x), decay_mask)
+    def forward(self, x, decay_mask, freqs):
+        x = x + self.attn(self.norm1(x), decay_mask, freqs)
         x = x + self.ff(self.norm2(x))
         return x
 
@@ -111,9 +117,11 @@ class RetNet(nn.Module):
         self.norm = nn.LayerNorm(config.d_model)
         self.vocab_proj = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
-        # XPos gives the per-head decay mask; the cos/sin pair is only needed by
-        # the recurrent form, which is not implemented yet.
-        _, decay_mask = XPos(config.d_model, config.num_heads).forward(slen=config.seq_len)
+        if (config.d_model // config.num_heads) % 2:
+            raise ValueError("retention head dimension must be even for positional rotation")
+        (cos, sin), decay_mask = XPos(config.d_model, config.num_heads).forward(slen=config.seq_len)
+        self.register_buffer("freq_cos", cos, persistent=False)
+        self.register_buffer("freq_sin", sin, persistent=False)
         self.register_buffer("decay_mask", decay_mask, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -125,7 +133,7 @@ class RetNet(nn.Module):
         x = self.word_emb(x)
 
         for layer in self.layers:
-            x = layer(x, self.decay_mask)
+            x = layer(x, self.decay_mask, (self.freq_cos, self.freq_sin))
 
         x = self.norm(x)
         return self.vocab_proj(x)

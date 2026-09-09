@@ -22,7 +22,7 @@ from ohara.tokenizer import get_tokenizer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = PROJECT_ROOT.joinpath("examples", "train_llama_engine.py")
-SCALING_RECIPE_VERSION = 3
+SCALING_RECIPE_VERSION = 5
 
 
 def _int_list(value: str) -> list[int]:
@@ -70,6 +70,12 @@ def _add_plan_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-unembedding-learning-rate", type=float, default=0.008)
     parser.add_argument("--base-scalar-learning-rate", type=float, default=0.5)
     parser.add_argument("--base-weight-decay", type=float, default=0.28)
+    parser.add_argument("--moe-num-experts", type=int, default=0)
+    parser.add_argument("--moe-experts-per-tok", type=int, default=2)
+    parser.add_argument("--moe-layer-interval", type=int, default=1)
+    parser.add_argument("--moe-grouped", action="store_true")
+    parser.add_argument("--moe-num-shared-experts", type=int, default=0)
+    parser.add_argument("--moe-gate-fn", choices=("softmax", "sigmoid"), default="softmax")
 
 
 def parse_args() -> argparse.Namespace:
@@ -183,6 +189,12 @@ def build_plans(args: argparse.Namespace) -> list[ScalingPlan]:
                     base_unembedding_learning_rate=args.base_unembedding_learning_rate,
                     base_scalar_learning_rate=args.base_scalar_learning_rate,
                     base_weight_decay=args.base_weight_decay,
+                    moe_num_experts=args.moe_num_experts,
+                    moe_experts_per_tok=args.moe_experts_per_tok,
+                    moe_layer_interval=args.moe_layer_interval,
+                    moe_grouped=args.moe_grouped,
+                    moe_num_shared_experts=args.moe_num_shared_experts,
+                    moe_gate_fn=args.moe_gate_fn,
                 )
             )
     return plans
@@ -190,13 +202,14 @@ def build_plans(args: argparse.Namespace) -> list[ScalingPlan]:
 
 def print_plans(plans: list[ScalingPlan]) -> None:
     print(
-        "budget,depth,dim,params,effective_params,batch,accum,iters,tokens,"
+        "budget,depth,dim,total_params,capacity_params,active_params,batch,accum,iters,tokens,"
         "actual_flops,matrix_lr,embedding_lr,unembedding_lr,scalar_lr,wd"
     )
     for plan in plans:
         print(
             f"{plan.flops_budget:.6g},{plan.depth},{plan.hidden_size},"
-            f"{plan.params_total},{plan.params_effective},{plan.total_batch_size},"
+            f"{plan.params_total},{plan.params_capacity_effective},{plan.params_effective},"
+            f"{plan.total_batch_size},"
             f"{plan.grad_accum_steps},{plan.num_iterations},{plan.tokens_trained},"
             f"{plan.actual_training_flops:.6g},{plan.matrix_learning_rate:.6g},"
             f"{plan.embedding_learning_rate:.6g},"
@@ -293,7 +306,7 @@ def _training_command(
             str(plan.num_heads),
             "--no-weight-tying",
             "--init-style",
-            "nanochat",
+            "standard" if args.optimizer in {"muonh", "adamh"} else "nanochat",
             "--lr-schedule",
             "wsd",
             "--warmdown-ratio",
@@ -304,7 +317,7 @@ def _training_command(
             "0",
             "--evaluate-bpb",
             "--token-bytes-cache",
-            str(Path(args.results_dir).joinpath("token_bytes.pt")),
+            str(Path(args.results_dir).resolve().joinpath("token_bytes.pt")),
             "--precision",
             args.precision,
             "--num-workers",
@@ -314,7 +327,7 @@ def _training_command(
             "--tp",
             "1",
             "--result-json",
-            str(result_json),
+            str(result_json.resolve()),
             "--scaling-depth",
             str(plan.depth),
             "--flops-budget",
@@ -329,6 +342,25 @@ def _training_command(
         command.extend(
             ["--hypersphere-learning-rate", str(args.hypersphere_learning_rate)]
         )
+    if args.moe_num_experts:
+        command.extend(
+            [
+                "--moe-num-experts",
+                str(args.moe_num_experts),
+                "--moe-experts-per-tok",
+                str(args.moe_experts_per_tok),
+                "--moe-layer-interval",
+                str(args.moe_layer_interval),
+                "--moe-gate-fn",
+                args.moe_gate_fn,
+            ]
+        )
+        if args.moe_grouped:
+            command.append("--moe-grouped")
+        if args.moe_num_shared_experts:
+            command.extend(
+                ["--moe-num-shared-experts", str(args.moe_num_shared_experts)]
+            )
     return command
 
 
@@ -364,6 +396,12 @@ def _experiment_manifest(args: argparse.Namespace) -> dict[str, object]:
         "base_unembedding_learning_rate": args.base_unembedding_learning_rate,
         "base_scalar_learning_rate": args.base_scalar_learning_rate,
         "base_weight_decay": args.base_weight_decay,
+        "moe_num_experts": args.moe_num_experts,
+        "moe_experts_per_tok": args.moe_experts_per_tok,
+        "moe_layer_interval": args.moe_layer_interval,
+        "moe_grouped": args.moe_grouped,
+        "moe_num_shared_experts": args.moe_num_shared_experts,
+        "moe_gate_fn": args.moe_gate_fn,
         "warmup_steps_ceiling": args.warmup_steps,
         "muon_momentum_warmup_iters_ceiling": args.muon_momentum_warmup_iters,
         "warmup_fraction": args.warmup_fraction,
@@ -414,6 +452,11 @@ def _corpus_token_budget(dataset: str) -> int | None:
     staged without --tokenizer (no stats file, or a stats file with no
     token count), in which case the epoch-budget check is skipped.
     """
+    train_bin = Path(dataset) / "train.bin"
+    if train_bin.exists() and (Path(dataset) / "validation.bin").exists():
+        from ohara.tokenbin import read_token_bin_metadata
+
+        return int(read_token_bin_metadata(train_bin)["tokens"])
     stats_path = Path(dataset).joinpath("stats.train.json")
     if not stats_path.exists():
         return None
@@ -462,6 +505,11 @@ def _numeric_result_row(result: Mapping[str, object]) -> dict[str, object]:
 
 
 def run_sweep(args: argparse.Namespace, plans: list[ScalingPlan]) -> None:
+    args.results_dir = str(Path(args.results_dir).resolve())
+    for name in ("dataset", "tokenizer"):
+        value = getattr(args, name)
+        if Path(value).exists():
+            setattr(args, name, str(Path(value).resolve()))
     results_dir = Path(args.results_dir)
     results_file = results_dir.joinpath("results.csv")
     if not args.dry_run:
@@ -507,8 +555,8 @@ def run_sweep(args: argparse.Namespace, plans: list[ScalingPlan]) -> None:
         subprocess.run(command, cwd=PROJECT_ROOT, check=True)
         with open(result_json, encoding="utf-8") as handle:
             result = json.load(handle)
-        if int(result["params_effective"]) != plan.params_effective:
-            raise RuntimeError("trained model does not match the planned parameter count")
+        if int(result["params_total"]) != plan.params_total:
+            raise RuntimeError("trained model does not match the planned total parameter count")
         if int(result["total_batch_size"]) != plan.total_batch_size:
             raise RuntimeError("training result does not match planned total_batch_size")
         recorded_optimizer = result.get("optimizer")
@@ -519,8 +567,8 @@ def run_sweep(args: argparse.Namespace, plans: list[ScalingPlan]) -> None:
             )
         if result.get("optimizer_muon") != float(args.optimizer == "muon"):
             raise RuntimeError("training result did not use the planned optimizer recipe")
-        if result.get("initialization_nanochat") != 1.0:
-            raise RuntimeError("training result did not use the planned nanochat initialization")
+        if result.get("initialization_nanochat") != float(args.optimizer not in {"adamh", "muonh"}):
+            raise RuntimeError("training result did not use the planned initialization")
         for field in (
             "matrix_learning_rate",
             "embedding_learning_rate",
@@ -531,7 +579,12 @@ def run_sweep(args: argparse.Namespace, plans: list[ScalingPlan]) -> None:
         ):
             if not math.isclose(float(result[field]), float(getattr(plan, field))):
                 raise RuntimeError(f"training result does not match planned {field}")
-        append_result_csv(results_file, _numeric_result_row(result))
+        row = _numeric_result_row(result)
+        row["params_capacity_effective"] = row["params_effective"]
+        row["params_active_transformer"] = plan.params_active_transformer
+        row["params_effective"] = plan.params_effective
+        row["tokens_per_effective_param"] = plan.tokens_per_effective_param
+        append_result_csv(results_file, row)
         completed.add(key)
         print(f"recorded {results_file}: budget={plan.flops_budget:.6g} depth={plan.depth}")
 
@@ -578,6 +631,16 @@ def main() -> None:
             raise ValueError("final-lr-fraction must be in [0, 1]")
         if args.max_corpus_epochs <= 0:
             raise ValueError("max-corpus-epochs must be positive")
+        if args.moe_num_experts < 0 or args.moe_experts_per_tok < 1:
+            raise ValueError("invalid MoE expert counts")
+        if args.moe_num_experts and args.moe_experts_per_tok > args.moe_num_experts:
+            raise ValueError("moe_experts_per_tok cannot exceed moe_num_experts")
+        if args.moe_layer_interval < 1:
+            raise ValueError("moe_layer_interval must be positive")
+        if args.moe_num_shared_experts < 0:
+            raise ValueError("moe_num_shared_experts cannot be negative")
+        if args.moe_num_shared_experts and not args.moe_grouped:
+            raise ValueError("shared experts require --moe-grouped")
 
     plans = build_plans(args)
     print_plans(plans)

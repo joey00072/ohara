@@ -222,7 +222,7 @@ def test_moe_gradient_reaches_the_gate_and_every_chosen_expert() -> None:
 
 def test_quantile_balancing_needs_room_for_the_threshold() -> None:
     # QB reads the (k+1)-th logit, so top-k over every expert is not representable.
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         MoE(dim=16, num_experts=4, num_experts_per_tok=4)
     MoE(dim=16, num_experts=4, num_experts_per_tok=4, quantile_balancing=False)
 
@@ -307,7 +307,7 @@ def test_swa_mask_matches_manual_attention_window() -> None:
     window = 3
 
     mask = make_swa_mask(6, window, device=q.device, dtype=q.dtype)
-    expected = torch.softmax(q @ k.transpose(-1, -2) + mask, dim=-1) @ v
+    expected = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
 
     torch.testing.assert_close(
         sliding_window_attention_with_mask(q, k, v, window_size=window), expected

@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="top-k for MoE checkpoints; no tensor shape records it",
     )
+    parser.add_argument("--moe-shared-exclusive", action="store_true")
     parser.add_argument("--moe-gate-fn", choices=("softmax", "sigmoid"), default="softmax")
     parser.add_argument(
         "--moe-no-normalize-weights",
@@ -85,6 +86,7 @@ def main() -> None:
             moe_experts_per_tok=args.moe_experts_per_tok,
             moe_gate_fn=args.moe_gate_fn,
             moe_normalize_weights=not args.moe_no_normalize_weights,
+            moe_shared_exclusive=args.moe_shared_exclusive,
         )
     else:
         engine = ChatEngine.from_pretrained(

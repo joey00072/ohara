@@ -15,6 +15,9 @@ pretraining — the point is to teach the conversation format, not new knowledge
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+from dataclasses import fields
+
 import argparse
 import json
 import os
@@ -33,7 +36,7 @@ from ohara.chat import (
     special_token_ids,
 )
 from ohara.chat_engine import config_from_state_dict, strip_wrapper_prefixes
-from ohara.models.llama import Llama
+from ohara.models.llama import Config, Llama
 from ohara.optimizer import build_adamw, build_muon_adamw
 from ohara.runtime import (
     EngineConfig,
@@ -171,12 +174,16 @@ def load_pretrained(
     state = checkpoint.get("model", checkpoint)
     state = {strip_wrapper_prefixes(key): value for key, value in state.items()}
 
-    config = config_from_state_dict(
-        state,
-        moe_experts_per_tok=moe_experts_per_tok,
-        moe_gate_fn=moe_gate_fn,
-        moe_normalize_weights=moe_normalize_weights,
-    )
+    if isinstance(checkpoint.get("model_config"), dict):
+        names = {field.name for field in fields(Config)}
+        config = Config(**{k: v for k, v in checkpoint["model_config"].items() if k in names})
+    else:
+        config = config_from_state_dict(
+            state,
+            moe_experts_per_tok=moe_experts_per_tok,
+            moe_gate_fn=moe_gate_fn,
+            moe_normalize_weights=moe_normalize_weights,
+        )
     pretrained_vocab = config.vocab_size
 
     if seq_len is not None:
@@ -212,6 +219,11 @@ def load_pretrained(
 
 
 def run() -> None:
+    with ExitStack() as cleanup:
+        _run(cleanup)
+
+
+def _run(cleanup: ExitStack) -> None:
     args = parse_args()
     if args.batch_size < 1 or args.grad_accum_steps < 1 or args.max_iters < 1:
         raise ValueError("batch-size, grad-accum-steps and max-iters must be at least 1")
@@ -233,6 +245,7 @@ def run() -> None:
         )
     )
     engine.launch()
+    cleanup.callback(engine.close)
 
     tokenizer = load_chat_tokenizer(
         hf_name=args.tokenizer,
@@ -251,6 +264,7 @@ def run() -> None:
     )
     seq_len = config.max_sequence_length
     model = engine.prepare(raw_model)
+    torch.manual_seed(args.seed + engine.data_parallel_rank)
 
     if engine.is_global_zero:
         print(
@@ -258,7 +272,7 @@ def run() -> None:
             f"hidden={config.hidden_size} heads={config.num_attention_heads} "
             f"ctx={seq_len} params={sum(p.numel() for p in raw_model.parameters()):,}"
         )
-        if pretrained_vocab != vocab_size:
+        if pretrained_vocab < vocab_size:
             print(
                 f"grew vocabulary {pretrained_vocab:,} -> {vocab_size:,} for "
                 f"{len(CHAT_SPECIAL_TOKENS)} chat special tokens"
@@ -299,6 +313,7 @@ def run() -> None:
                 "world_size": engine.data_parallel_world_size,
             },
         )
+        cleanup.callback(tracker.finish)
         engine.loggers = [tracker]
     else:
         tracker = None
@@ -379,6 +394,8 @@ def run() -> None:
         if args.evaluate_bpb
         else None
     )
+    if token_bytes is not None and token_bytes.numel() < config.vocab_size:
+        token_bytes = torch.nn.functional.pad(token_bytes, (0, config.vocab_size - token_bytes.numel()))
     trainer = Trainer(
         engine=engine,
         model=model,
@@ -451,9 +468,6 @@ def run() -> None:
             result_path.parent.mkdir(parents=True, exist_ok=True)
             result_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
-    if tracker is not None:
-        tracker.finish()
-    engine.close()
     time.sleep(2.0)
 
 

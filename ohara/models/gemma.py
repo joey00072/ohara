@@ -1,3 +1,5 @@
+"""Experimental Gemma-inspired model; not compatible with Hugging Face Gemma checkpoints."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -17,7 +19,7 @@ class GemmaConfig:
     vocab_size: int = 51200
     max_sequence_length: int = 2048
     hidden_size: int = 2048
-    intermediate_size = 16 * 2048
+    intermediate_size: int = 16384
     num_attention_heads: int = 32
     num_key_value_heads: int = 1
     num_hidden_layers: int = 32
@@ -81,24 +83,11 @@ class GemmaAttention(nn.Module):
 
         # TODO: add code for kv chache
 
-        # Grouped Query Attention
-        if self.num_key_value_heads != self.num_attention_heads:
-            key = torch.repeat_interleave(k, self.num_queries_per_kv, dim=2)
-            value = torch.repeat_interleave(v, self.num_queries_per_kv, dim=2)
-        else:
-            key = k
-            value = v
-
-        q = q.transpose(1, 2)
-        k = key.transpose(1, 2)
-        v = value.transpose(1, 2)
-
-        attn_mtx = torch.matmul(q, k.transpose(2, 3)) * self.scaling
-        if mask is not None:
-            attn_mtx = attn_mtx + mask[:, :, :seq_len, :seq_len]
-        attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(q)
-
-        output = torch.matmul(attn_mtx, v)
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+        output = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=mask[..., :seq_len, :seq_len] if mask is not None else None,
+            is_causal=mask is None, enable_gqa=self.num_key_value_heads != self.num_attention_heads,
+        )
 
         output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
         output = self.o_proj(output)
@@ -155,7 +144,7 @@ class Gemma(nn.Module):
 
         cos, sin = precompute_freqs_cis(
             config.hidden_size // config.num_attention_heads,
-            config.max_sequence_length * 2,
+            config.max_sequence_length,
         )
         # Buffers rather than plain attributes, so .to(device) moves them.
         self.register_buffer("freq_cos", cos, persistent=False)

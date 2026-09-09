@@ -4,6 +4,7 @@ import math
 from collections import deque
 from contextlib import nullcontext
 from pathlib import Path
+from dataclasses import asdict, is_dataclass
 
 import torch
 import torch.nn as nn
@@ -34,7 +35,7 @@ class RuntimeEngine(Protocol):
     def clip_gradients(
         self, model: nn.Module, optimizer: optim.Optimizer, max_norm: float
     ) -> torch.Tensor: ...
-    def optimizer_step(self, optimizer: optim.Optimizer) -> None: ...
+    def optimizer_step(self, optimizer: optim.Optimizer) -> bool: ...
     def synchronize(self) -> None: ...
     def save(self, path: str | Path, state: dict[str, Any]) -> None: ...
     def log_dict(self, payload: dict[str, Any], step: int | None = None) -> None: ...
@@ -116,6 +117,7 @@ class Trainer:
         self.total_training_time_s: float = 0.0
         self.timed_steps: int = 0
         self.train_batches_consumed: int = 0
+        self._start_iter = 0
         self._validation_batches: list[tuple[torch.Tensor, torch.Tensor]] = []
 
         self.tokens_per_iter = 0
@@ -141,6 +143,24 @@ class Trainer:
         if self._is_distributed():
             dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
         return tensor
+
+    def _all_reduce_data_sum(self, tensor: torch.Tensor) -> torch.Tensor:
+        if self._is_distributed() and self.world_size > 1:
+            dist.all_reduce(
+                tensor, op=dist.ReduceOp.SUM,
+                group=getattr(self.engine, "data_parallel_group", None),
+            )
+        return tensor
+
+    def _raw_model(self) -> nn.Module:
+        model = self.model
+        while True:
+            child = getattr(model, "module", None)
+            if not isinstance(child, nn.Module):
+                child = getattr(model, "_orig_mod", None)
+            if not isinstance(child, nn.Module):
+                return model
+            model = child
 
     def _infer_flops_per_token(self) -> float | None:
         model = self.model.module if hasattr(self.model, "module") else self.model
@@ -191,7 +211,7 @@ class Trainer:
             if denom > 0:
                 mfu = 100.0 * (flops_per_sec / denom)
 
-        if idx > self.timing_warmup_steps:
+        if idx - self._start_iter > self.timing_warmup_steps:
             self.total_training_time_s += elapsed_time
             self.timed_steps += 1
 
@@ -401,6 +421,10 @@ class Trainer:
 
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
+        self._start_iter = start_iter
+        self.total_training_time_s = 0.0
+        self.timed_steps = 0
+        uses_scaler = bool(getattr(self.engine, "grad_scaling_enabled", False))
 
         idx: int = start_iter
         while True:
@@ -442,6 +466,7 @@ class Trainer:
                 (target != self.ignore_index).sum()
                 for _, target in accumulated_batches
             )
+            total_valid_tokens = self._all_reduce_data_sum(total_valid_tokens)
             if total_valid_tokens.item() == 0:
                 raise RuntimeError(f"training batch at iter={idx} has no valid target tokens")
 
@@ -469,13 +494,13 @@ class Trainer:
                             ignore_index=self.ignore_index,
                             reduction="sum",
                         )
-                    if not torch.isfinite(loss_sum.detach()):
+                    if not uses_scaler and not torch.isfinite(loss_sum.detach()):
                         raise RuntimeError(
                             f"Non-finite loss detected at iter={idx}, micro_step={micro_step}: "
                             f"{float(loss_sum.detach())}"
                         )
                     accumulated_loss_sum += loss_sum.detach()
-                    self.engine.backward(loss_sum / total_valid_tokens)
+                    self.engine.backward(loss_sum * self.world_size / total_valid_tokens)
 
             if self.grad_clip_norm is not None and self.grad_clip_norm > 0:
                 grad_norm = self.engine.clip_gradients(
@@ -483,21 +508,30 @@ class Trainer:
                     self.optimizer,
                     max_norm=float(self.grad_clip_norm),
                 )
-                if not torch.isfinite(grad_norm):
+                if not uses_scaler and not torch.isfinite(grad_norm):
                     raise RuntimeError(
                         f"Non-finite gradient norm detected at iter={idx}: {float(grad_norm)}"
                     )
 
-            self.engine.optimizer_step(self.optimizer)
+            stepped = self.engine.optimizer_step(self.optimizer)
             self.optimizer.zero_grad(set_to_none=True)
-            if self.apply_router_balancing is not None:
+            if stepped is False:
+                # Forward overflow can also poison routing statistics. Discard
+                # them with the skipped gradients rather than updating the bias
+                # or carrying them into the next valid optimizer step.
+                for module in self._raw_model().modules():
+                    for name in ("qb_beta_sum", "qb_beta_count"):
+                        buffer = getattr(module, name, None)
+                        if isinstance(buffer, torch.Tensor):
+                            buffer.zero_()
+            elif self.apply_router_balancing is not None:
                 # Quantile balancing solves for the router bias in closed form from
                 # statistics accumulated over this step's micro-batches, so it belongs
                 # here, once per optimizer step, not inside the accumulation loop.
                 self.apply_router_balancing(self.model)
 
-            step_loss_tensor = accumulated_loss_sum / total_valid_tokens
-            if not torch.isfinite(step_loss_tensor):
+            step_loss_tensor = self._all_reduce_data_sum(accumulated_loss_sum) / total_valid_tokens
+            if not uses_scaler and not torch.isfinite(step_loss_tensor):
                 raise RuntimeError(
                     f"Non-finite loss detected at iter={idx}: {float(step_loss_tensor)}"
                 )
@@ -555,7 +589,7 @@ class Trainer:
                 idx % self.save_ckpt_iters == 0 or idx == self.max_iters
             ):
                 state = {
-                    "model": self.model.state_dict(),
+                    "model": self._raw_model().state_dict(),
                     "optimizer": self.optimizer.state_dict(),
                     "idx": idx,
                     "lr": lr,
@@ -564,14 +598,25 @@ class Trainer:
                     "train_batches_consumed": self.train_batches_consumed,
                     "torch_rng_state": torch.get_rng_state(),
                 }
+                model_config = getattr(self._raw_model(), "config", None)
+                if model_config is not None:
+                    state["model_config"] = (
+                        asdict(model_config) if is_dataclass(model_config) else vars(model_config)
+                    )
                 if torch.cuda.is_available():
                     state["cuda_rng_state_all"] = torch.cuda.get_rng_state_all()
+                if self._is_distributed():
+                    local_rng = {"torch_rng_state": state["torch_rng_state"]}
+                    if "cuda_rng_state_all" in state:
+                        local_rng["cuda_rng_state_all"] = state["cuda_rng_state_all"]
+                    rng_states = [None] * dist.get_world_size()
+                    dist.all_gather_object(rng_states, local_rng)
+                    state["rng_states"] = rng_states
                 self.engine.save(self.checkpoint_path, state)
-                model_config = getattr(self.model, "config", None)
                 if model_config is not None:
                     model_config.ckpt_iter = idx
-                if self.push_to_hub:
-                    self.model.push_to_hub(
+                if self.push_to_hub and self.engine.is_global_zero:
+                    self._raw_model().push_to_hub(
                         self.model_name, commit_message=f"checkpoint iter: {idx}"
                     )
 

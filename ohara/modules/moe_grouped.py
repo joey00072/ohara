@@ -54,8 +54,15 @@ class GroupedMoE(nn.Module):
             expert independently, which behaves better as ``num_experts`` grows
             because softmax over hundreds of logits drives every weight tiny.
         normalize_weights: rescale the chosen weights to sum to 1. With sigmoid
-            this keeps the residual contribution at a stable scale.
+            this keeps the residual contribution at a stable scale. Top-1 keeps
+            its unnormalised probability so the router can learn.
         quantile_balancing: closed-form router bias, no auxiliary loss.
+        shared_exclusive: make the routed sum orthogonal to the shared expert's
+            output before adding them, so routed experts can only contribute in
+            directions the shared expert does not already cover. Borrowed from
+            exclusive self-attention (XSA), which rejects an attention output
+            against the token's own value. Turns shared-expert isolation from a
+            hope into a constraint. Costs no parameters.
     """
 
     def __init__(
@@ -68,6 +75,7 @@ class GroupedMoE(nn.Module):
         gate_fn: str = "sigmoid",
         normalize_weights: bool = True,
         quantile_balancing: bool = True,
+        shared_exclusive: bool = False,
     ) -> None:
         super().__init__()
         if not 1 <= num_experts_per_tok <= num_experts:
@@ -90,6 +98,9 @@ class GroupedMoE(nn.Module):
         self.gate_fn = gate_fn
         self.normalize_weights = normalize_weights
         self.quantile_balancing = quantile_balancing
+        if shared_exclusive and num_shared_experts == 0:
+            raise ValueError("shared_exclusive needs at least one shared expert to reject against")
+        self.shared_exclusive = shared_exclusive
 
         # Routed experts, stacked. SwiGLU: down(silu(gate(x)) * up(x)).
         self.w_gate = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
@@ -139,10 +150,14 @@ class GroupedMoE(nn.Module):
         # the router's only gradient path, since top-k itself is not differentiable.
         selected = logits.gather(-1, expert_indices)
         if self.gate_fn == "softmax":
-            weights = selected.softmax(dim=-1)
+            weights = (
+                logits.softmax(dim=-1).gather(-1, expert_indices)
+                if self.num_experts_per_tok == 1
+                else selected.softmax(dim=-1)
+            )
         else:
             weights = torch.sigmoid(selected)
-            if self.normalize_weights:
+            if self.normalize_weights and self.num_experts_per_tok > 1:
                 weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
         return expert_indices, weights, logits, alpha
 
@@ -206,18 +221,49 @@ class GroupedMoE(nn.Module):
     def _shared(self, x: torch.Tensor) -> torch.Tensor:
         return self.shared_down(F.silu(self.shared_gate(x)) * self.shared_up(x))
 
+    @staticmethod
+    def _reject(target: torch.Tensor, basis: torch.Tensor) -> torch.Tensor:
+        """Remove the component of ``target`` lying along ``basis``, per token.
+
+        Vector rejection, the operation behind exclusive self-attention (XSA):
+        normalize the basis, project onto it, subtract. The result is orthogonal
+        to ``basis`` in every row.
+
+        ``F.normalize`` returns zeros for a zero-length vector rather than NaN,
+        which matters here: the shared expert's output projection is zero-init, so
+        ``basis`` is exactly zero on the first step and this has to degrade to a
+        no-op instead of poisoning the model.
+        """
+        unit = F.normalize(basis.float(), dim=-1)
+        projection = (target.float() * unit).sum(dim=-1, keepdim=True) * unit
+        return (target.float() - projection).to(target.dtype)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch, seq_len, dim = x.shape
         flat_x = x.reshape(batch * seq_len, dim)
 
         expert_indices, expert_weights, logits, alpha = self._route(flat_x)
 
-        use_grouped = flat_x.is_cuda and _grouped_mm_available()
+        compute_dtype = (
+            torch.get_autocast_dtype("cuda") if torch.is_autocast_enabled("cuda") else flat_x.dtype
+        )
+        # CUDA grouped GEMMs require bf16 and 16-byte aligned row strides.
+        # Other configurations remain valid through the reference dispatcher.
+        use_grouped = (
+            flat_x.is_cuda
+            and _grouped_mm_available()
+            and compute_dtype == torch.bfloat16
+            and self.dim % 8 == 0
+            and self.hidden_dim % 8 == 0
+        )
         dispatch = self._dispatch_grouped if use_grouped else self._dispatch_reference
         out = dispatch(flat_x, expert_indices, expert_weights.to(flat_x.dtype))
 
         if self.num_shared_experts > 0:
-            out = out + self._shared(flat_x)
+            shared = self._shared(flat_x)
+            if self.shared_exclusive:
+                out = self._reject(out, shared)
+            out = out + shared
 
         if self.training:
             if self.quantile_balancing:
@@ -244,11 +290,14 @@ class GroupedMoE(nn.Module):
     @torch.no_grad()
     def apply_qb_update(self) -> None:
         """Fold accumulated statistics into the router bias. Once per optimizer step."""
-        if float(self.qb_beta_count) == 0:
-            return
-        beta = self.qb_beta_sum / self.qb_beta_count
+        beta_sum = self.qb_beta_sum.clone()
+        count = self.qb_beta_count.clone()
         if dist.is_available() and dist.is_initialized():
-            dist.all_reduce(beta, op=dist.ReduceOp.AVG)
+            dist.all_reduce(beta_sum)
+            dist.all_reduce(count)
+        if count.item() == 0:
+            return
+        beta = beta_sum / count
         bias = -beta
         # Adding a constant to every expert cannot change the top-k, so remove the
         # mean to stop the vector drifting over a long run.

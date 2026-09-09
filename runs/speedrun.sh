@@ -52,7 +52,7 @@ export OMP_NUM_THREADS=1
 cd "$(dirname "$0")/.."
 
 if [ -z "${NPROC:-}" ]; then
-  NPROC=$(python - <<'PY'
+  NPROC=$(uv run python - <<'PY'
 try:
     import torch
     print(max(1, torch.cuda.device_count()))
@@ -79,7 +79,7 @@ if [ -d "${DATA_DIR}" ] && [ -n "$(ls -A "${DATA_DIR}" 2>/dev/null)" ]; then
   echo "[1/4] corpus already staged at ${DATA_DIR}, skipping"
 else
   echo "[1/4] staging ClimbMix corpus -> ${DATA_DIR}"
-  python examples/prepare_scaling_data.py \
+  uv run python examples/prepare_scaling_data.py \
     --climbmix-train-shards "${SHARDS}" \
     --train-documents "${TRAIN_DOCS}" \
     --validation-documents "${VAL_DOCS}" \
@@ -94,7 +94,7 @@ fi
 #    pretraining will actually build.
 
 echo "[2/4] planning depth=${DEPTH}"
-eval "$(python - <<PY
+eval "$(uv run python - <<PY
 from ohara.chat import CHAT_SPECIAL_TOKENS
 from ohara.scaling import plan_scaling_run
 from ohara.tokenizer import get_tokenizer
@@ -136,9 +136,9 @@ printf ' budget: %s tokens over %s iters, batch %s tokens (accum %s)\n' \
 # 3) Pretrain.
 
 if [ "$NPROC" -gt 1 ]; then
-  LAUNCH="torchrun --standalone --nproc_per_node=${NPROC}"
+  LAUNCH="uv run torchrun --standalone --nproc_per_node=${NPROC}"
 else
-  LAUNCH="python"
+  LAUNCH="uv run python"
 fi
 
 echo "[3/4] pretraining -> ${BASE_CKPT}"
@@ -191,7 +191,7 @@ echo "done. base=${BASE_CKPT} sft=${SFT_CKPT}"
 if [ "$SERVE" = "1" ]; then
   echo "starting chat UI on port ${PORT}"
   echo "from your laptop:  ssh -N -L ${PORT}:localhost:${PORT} <user>@<host>"
-  python examples/chat_web.py --checkpoint "${SFT_CKPT}" --port "${PORT}"
+  uv run python examples/chat_web.py --checkpoint "${SFT_CKPT}" --port "${PORT}"
 else
-  echo "chat with it:  python examples/chat_web.py --checkpoint ${SFT_CKPT}"
+  echo "chat with it:  uv run python examples/chat_web.py --checkpoint ${SFT_CKPT}"
 fi

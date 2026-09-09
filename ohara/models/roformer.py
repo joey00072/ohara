@@ -8,7 +8,6 @@ position embedding replaced by RoPE applied to q/k inside attention.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import torch
@@ -46,8 +45,6 @@ class Attention(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.res_dropout = nn.Dropout(config.dropout)
 
-        self.flash_attn = hasattr(F, "scaled_dot_product_attention")
-
     def forward(
         self,
         x: torch.Tensor,
@@ -72,21 +69,14 @@ class Attention(nn.Module):
         q = q.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        if self.flash_attn:
-            output = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=None,
-                dropout_p=self.attn_dropout.p if self.training else 0.0,
-                is_causal=True,
-            )
-        else:
-            attn_mtx = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
-            attn_mtx = attn_mtx + mask[:, :, :seq_len, :seq_len]
-            attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(k)
-            attn_mtx = self.attn_dropout(attn_mtx)
-            output = torch.matmul(attn_mtx, v)
+        output = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=None,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=True,
+        )
 
         output = output.transpose(1, 2).contiguous().view(batch, seq_len, d_model)
         output = self.proj(output)
@@ -132,16 +122,11 @@ class RoFormer(nn.Module):
         self.norm = nn.LayerNorm(config.d_model)
         self.vocab_proj = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
-        freqs_cos, freqs_sin = precompute_freqs_cis(head_dim, config.seq_len * 2)
+        freqs_cos, freqs_sin = precompute_freqs_cis(head_dim, config.seq_len)
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
 
-        if hasattr(F, "scaled_dot_product_attention"):
-            self.mask = None
-        else:
-            print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
-            mask = torch.full((1, 1, config.seq_len, config.seq_len), float("-inf"))
-            self.register_buffer("mask", torch.triu(mask, diagonal=1), persistent=False)
+        self.mask = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 2:

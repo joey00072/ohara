@@ -9,6 +9,8 @@ from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ohara.models.qwen3 import Qwen3
+from ohara.models.llama import Llama
+from huggingface_hub import hf_hub_download
 from ohara.perplexity import fixed_block_perplexity, sliding_window_perplexity
 from ohara.utils import auto_accelerator
 
@@ -36,7 +38,14 @@ def main() -> None:
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float32
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if args.backend == "ohara":
-        model = Qwen3.from_pretrained(args.model, device=device, dtype=dtype)
+        config_path = Path(args.model) / "config.json"
+        if not config_path.is_file():
+            config_path = Path(hf_hub_download(args.model, "config.json"))
+        model_type = json.loads(config_path.read_text())["model_type"]
+        model_classes = {"ohara_llama": Llama, "qwen3": Qwen3}
+        if model_type not in model_classes:
+            raise ValueError(f"unsupported Ohara model_type: {model_type}")
+        model = model_classes[model_type].from_pretrained(args.model, device=device, dtype=dtype)
     else:
         model = AutoModelForCausalLM.from_pretrained(
             args.model,

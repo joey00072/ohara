@@ -26,6 +26,7 @@ class Recipe:
     tokenizer: str
     splits: list[str] = field(default_factory=lambda: ["train", "validation"])
     name: str | None = None
+    min_length: int = 512
     revision: str | None = None
     preprocessor: type[DatasetPreprocessor] = DatasetPreprocessor
 
@@ -33,6 +34,7 @@ class Recipe:
 RECIPES: dict[str, Recipe] = {
     "tinystories": Recipe(
         dataset="roneneldan/TinyStories",
+        min_length=2,
         tokenizer="microsoft/phi-2",
     ),
     "minipile": Recipe(
@@ -77,6 +79,7 @@ def main() -> None:
         "dataset_name": recipe.dataset,
         "tokenizer_name": tokenizer,
         "splits": recipe.splits,
+        "min_length": recipe.min_length,
         "hf_cache": HF_CACHE,
         "num_proc": args.num_proc,
     }

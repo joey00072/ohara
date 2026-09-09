@@ -23,7 +23,7 @@ class DoRALinear(nn.Module):
         self.merged = False
         self.enable_dora = True
 
-        self.lora_dropout = nn.Dropout(p=lora_dropout) if lora_dropout > 0.0 else lambda x: x
+        self.lora_dropout = nn.Dropout(p=lora_dropout) if lora_dropout > 0.0 else nn.Identity()
         self.linear = torch.nn.Linear(in_features, out_features, **kwargs)
 
         if rank > 0:
@@ -45,17 +45,18 @@ class DoRALinear(nn.Module):
         self.reset_magnitude()
         # funny story behind math.sqrt(5) I'll write blog later
 
-    def reset_parameters(self, lora_only=False):
-        nn.init.kaiming_normal_(self.linear.weight, a=math.sqrt(5))
+    def reset_parameters(self):
         if hasattr(self, "lora_A") and hasattr(self, "lora_B"):
             self.reset_dora_parameters()
 
     def dora_trainable_only(self):
-        self.linear.train(False)
-        self.lora_A.requires_grad = True
-        self.lora_B.requires_grad = True
-        self.magnitude.requires_grad = True
+        self.linear.requires_grad_(False)
+        if self.rank > 0:
+            self.lora_A.requires_grad_(True)
+            self.lora_B.requires_grad_(True)
+            self.magnitude.requires_grad_(True)
 
+    @torch.no_grad()
     def merge(self):
         if not self.merged and self.rank > 0:
             delta = (self.lora_B @ self.lora_A) * self.scaling
@@ -63,7 +64,7 @@ class DoRALinear(nn.Module):
             weight_norm = torch.norm(weight, p=2, dim=1, keepdim=True)
             weight_norm = torch.clamp(weight_norm, min=1e-6)
             weight = weight * (self.magnitude / weight_norm)
-            self.linear.weight.data = weight
+            self.linear.weight.copy_(weight)
             self.merged = True
 
     def forward(self, x: torch.Tensor):
@@ -74,7 +75,7 @@ class DoRALinear(nn.Module):
         weight = self.linear.weight + delta
         weight_norm = torch.norm(weight, p=2, dim=1, keepdim=True)
         weight_norm = torch.clamp(weight_norm, min=1e-6)
-        scale = self.magnitude / weight_norm
+        scale = self.magnitude / weight_norm.detach()
 
         base = F.linear(x, self.linear.weight, bias=None)
         lora = F.linear(self.lora_dropout(x), delta, bias=None)
@@ -93,12 +94,13 @@ def dora_from_linear(linear: nn.Linear, lora_alpha: int = 1, lora_dropout: float
         lora_alpha=lora_alpha,
         lora_dropout=lora_dropout,
         rank=rank,
+        bias=linear.bias is not None,
     )
-    dora = dora.to(device)
-    dora.load_state_dict(linear.state_dict(), strict=False)
+    dora = dora.to(device=device, dtype=dtype)
+    dora.linear.load_state_dict(linear.state_dict())
     if rank > 0:
         dora.reset_magnitude()
-    return dora.to(device).to(dtype)
+    return dora.train(linear.training)
 
 
 def replace_with_dora(
@@ -108,7 +110,7 @@ def replace_with_dora(
     lora_dropout: float = 0.0,
     rank: int = 16,
 ):
-    if isinstance(model, nn.Linear):
+    if isinstance(model, nn.Linear) and target_layer is None:
         return dora_from_linear(model, lora_alpha, lora_dropout, rank)
 
     if isinstance(model, (nn.Module, nn.ModuleDict)):
@@ -124,14 +126,18 @@ def mark_dora_as_trainable(model: nn.Module, target_layer: list[str] | None = No
     # freeze hole model
     for param in model.parameters():
         param.requires_grad = False
-    for module in model.modules():
-        if isinstance(module, DoRALinear):
+    for name, module in model.named_modules():
+        if isinstance(module, DoRALinear) and (
+            target_layer is None or name in target_layer or name.rsplit(".", 1)[-1] in target_layer
+        ):
             module.dora_trainable_only()
     return model
 
 
 def merge_dora(model: nn.Module, target_layer: list[str] | None = None):
-    for module in model.modules():
-        if isinstance(module, DoRALinear):
+    for name, module in model.named_modules():
+        if isinstance(module, DoRALinear) and (
+            target_layer is None or name in target_layer or name.rsplit(".", 1)[-1] in target_layer
+        ):
             module.merge()
     return model

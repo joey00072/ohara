@@ -8,7 +8,6 @@ grouped-query attention, half-rotation RoPE, and tied token/output embeddings.
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,6 +47,10 @@ class Qwen3Config:
     def from_hf_config(cls, payload: dict[str, Any]) -> "Qwen3Config":
         if payload.get("model_type") != "qwen3":
             raise ValueError(f"expected a qwen3 config, got {payload.get('model_type')!r}")
+        if payload.get("use_sliding_window") or "sliding_attention" in payload.get(
+            "layer_types", []
+        ):
+            raise ValueError("sliding-window Qwen3 checkpoints are not supported")
         return cls(
             vocab_size=int(payload["vocab_size"]),
             max_sequence_length=int(payload["max_position_embeddings"]),
@@ -56,7 +59,9 @@ class Qwen3Config:
             num_hidden_layers=int(payload["num_hidden_layers"]),
             num_attention_heads=int(payload["num_attention_heads"]),
             num_key_value_heads=int(payload["num_key_value_heads"]),
-            head_dim=int(payload.get("head_dim", payload["hidden_size"] // payload["num_attention_heads"])),
+            head_dim=int(
+                payload.get("head_dim", payload["hidden_size"] // payload["num_attention_heads"])
+            ),
             rms_norm_eps=float(payload.get("rms_norm_eps", 1e-6)),
             rope_theta=float(payload.get("rope_theta", 1_000_000.0)),
             attention_dropout=float(payload.get("attention_dropout", 0.0)),
@@ -159,22 +164,21 @@ class Qwen3Attention(nn.Module):
 
         if kv_cache is not None:
             key, value = kv_cache.forward(key, value, start_pos)
-        if self.num_queries_per_kv > 1:
-            key = torch.repeat_interleave(key, self.num_queries_per_kv, dim=2)
-            value = torch.repeat_interleave(value, self.num_queries_per_kv, dim=2)
-
-        query = query.transpose(1, 2)
-        key = key.transpose(1, 2)
-        value = value.transpose(1, 2)
-        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(self.head_dim)
-
-        query_positions = start_pos + torch.arange(seq_len, device=x.device)
-        key_positions = torch.arange(key.size(-2), device=x.device)
-        causal = key_positions.unsqueeze(0) <= query_positions.unsqueeze(1)
-        scores = scores.masked_fill(~causal.view(1, 1, seq_len, key.size(-2)), float("-inf"))
-        weights = F.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
-        weights = F.dropout(weights, p=self.dropout, training=self.training)
-        output = torch.matmul(weights, value)
+        query, key, value = query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2)
+        causal = None
+        if kv_cache is not None:
+            query_positions = start_pos + torch.arange(seq_len, device=x.device)
+            key_positions = torch.arange(key.size(-2), device=x.device)
+            causal = key_positions.unsqueeze(0) <= query_positions.unsqueeze(1)
+        output = F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=causal,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=kv_cache is None,
+            enable_gqa=self.num_queries_per_kv > 1,
+        )
         output = output.transpose(1, 2).contiguous().view(batch, seq_len, -1)
         return self.proj(output)
 
@@ -275,22 +279,30 @@ class Qwen3(nn.Module):
             x = layer(x, freqs, cache, start_pos)
         return self.vocab_proj(self.norm(x))
 
-    def build_kv_cache(self, batch_size: int = 1) -> list[KVCache]:
+    def build_kv_cache(
+        self, batch_size: int = 1, *, max_sequence_length: int | None = None, int8: bool = False
+    ) -> list[KVCache]:
+        max_sequence_length = (
+            self.config.max_sequence_length if max_sequence_length is None else max_sequence_length
+        )
+        if not 1 <= max_sequence_length <= self.config.max_sequence_length:
+            raise ValueError("cache length must be in [1, max_sequence_length]")
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
         shape = (
             batch_size,
-            self.config.max_sequence_length,
+            max_sequence_length,
             self.config.num_key_value_heads,
             self.config.head_dim,
         )
         return [
             KVCache(
                 shape,
-                self.config.max_sequence_length,
+                max_sequence_length,
                 index,
                 device=self.token_emb.weight.device,
                 dtype=self.token_emb.weight.dtype,
+                int8=int8,
             )
             for index in range(self.config.num_hidden_layers)
         ]
@@ -398,7 +410,20 @@ class Qwen3(nn.Module):
         if not config_path.is_file():
             raise FileNotFoundError(f"model config not found: {config_path}")
         config = Qwen3Config.from_hf_config(json.loads(config_path.read_text(encoding="utf-8")))
-        model = cls(config).to(device=device, dtype=dtype)
+        with torch.device("meta"):
+            model = cls(config)
+        for module in model.modules():
+            for buffer_name, buffer in module._buffers.items():
+                if buffer is not None:
+                    module._buffers[buffer_name] = torch.zeros(
+                        buffer.shape, dtype=buffer.dtype, device=device
+                    )
+        cos, sin = precompute_freqs_cis(
+            config.head_dim,
+            config.max_sequence_length,
+            theta=config.rope_theta,
+        )
+        model.freq_cos, model.freq_sin = cos.to(device), sin.to(device)
 
         if explicit_weights is not None:
             weight_files = [explicit_weights]
@@ -429,7 +454,13 @@ class Qwen3(nn.Module):
             if duplicates:
                 raise ValueError(f"duplicate tensors across shards: {sorted(duplicates)[:5]}")
             loaded.update(shard)
-            model.load_state_dict(shard, strict=False)
+            shard = {
+                key: value.to(dtype=dtype)
+                if dtype is not None and value.is_floating_point()
+                else value
+                for key, value in shard.items()
+            }
+            model.load_state_dict(shard, strict=False, assign=True)
 
         allowed_missing = {"vocab_proj.weight"} if config.weight_tying else set()
         missing = sorted(expected - loaded - allowed_missing)
@@ -440,5 +471,12 @@ class Qwen3(nn.Module):
                 details.append(f"missing keys: {missing[:5]}")
             if unexpected:
                 details.append(f"unexpected keys: {unexpected[:5]}")
-            raise RuntimeError("checkpoint does not match Qwen3 config (" + "; ".join(details) + ")")
+            raise RuntimeError(
+                "checkpoint does not match Qwen3 config (" + "; ".join(details) + ")"
+            )
+        if config.weight_tying:
+            if "token_emb.weight" in loaded:
+                model.vocab_proj.weight = model.token_emb.weight
+            else:
+                model.token_emb.weight = model.vocab_proj.weight
         return model.eval()

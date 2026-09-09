@@ -6,7 +6,6 @@ shape (``mlp="mlp"``, a GELU/SiLU MLP) and the SwiGLU variant (``mlp="swiglu"``)
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import torch
@@ -44,8 +43,6 @@ class Attention(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.res_dropout = nn.Dropout(config.dropout)
 
-        self.flash_attn = hasattr(F, "scaled_dot_product_attention")
-
     def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         batch, seq_len, hidden_size = x.shape
 
@@ -59,21 +56,14 @@ class Attention(nn.Module):
         q = q.view(shape).transpose(1, 2)
         v = v.view(shape).transpose(1, 2)
 
-        if self.flash_attn:
-            output = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=None,
-                dropout_p=self.attn_dropout.p if self.training else 0.0,
-                is_causal=True,
-            )
-        else:
-            attn_mtx = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
-            attn_mtx = attn_mtx + mask[:, :, :seq_len, :seq_len]
-            attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(k)
-            attn_mtx = self.attn_dropout(attn_mtx)
-            output = torch.matmul(attn_mtx, v)  # (B, num_heads, T, head_dim)
+        output = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=None,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=True,
+        )
 
         # Concatenate the heads back into the residual stream.
         output = output.transpose(1, 2).contiguous().view(batch, seq_len, hidden_size)
@@ -119,14 +109,7 @@ class GPT(nn.Module):
         self.norm = nn.LayerNorm(config.hidden_size)
         self.vocab_proj = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-        if hasattr(F, "scaled_dot_product_attention"):
-            self.mask = None
-        else:
-            print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
-            mask = torch.full(
-                (1, 1, config.max_sequence_length, config.max_sequence_length), float("-inf")
-            )
-            self.register_buffer("mask", torch.triu(mask, diagonal=1), persistent=False)
+        self.mask = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 2:

@@ -68,7 +68,7 @@ class MambaConfig:
     dt_max: float = 0.1
     dt_init: str = "random"  # "random" or "constant"
     dt_scale: float = 1.0
-    dt_init_floor = 1e-4
+    dt_init_floor: float = 1e-4
 
     bias: bool = False
     conv_bias: bool = True
@@ -223,7 +223,7 @@ class MambaBlock(nn.Module):
         # z branch
         z = F.silu(z)
 
-        output = y * z
+        output = y.to(x.dtype) * z
         output = self.out_proj(output)  # (B, L, D)
 
         return output
@@ -247,9 +247,9 @@ class MambaBlock(nn.Module):
         delta = F.softplus(self.dt_proj(delta))  # (B, L, ED)
 
         if self.config.pscan:
-            y = self.selective_scan(x, delta, A, B, C, D)
+            y = self.selective_scan(x.float(), delta.float(), A, B.float(), C.float(), D)
         else:
-            y = self.selective_scan_seq(x, delta, A, B, C, D)
+            y = self.selective_scan_seq(x.float(), delta.float(), A, B.float(), C.float(), D)
 
         return y
 
@@ -358,7 +358,7 @@ class MambaBlock(nn.Module):
         # z branch
         z = F.silu(z)
 
-        output = y * z
+        output = y.to(x.dtype) * z
         output = self.out_proj(output)  # (B, D)
 
         # prepare cache for next call
@@ -389,6 +389,7 @@ class MambaBlock(nn.Module):
         )  # (B, dt_rank), (B, N), (B, N)
         delta = F.softplus(self.dt_proj(delta))  # (B, ED)
 
+        x, delta, B, C = x.float(), delta.float(), B.float(), C.float()
         deltaA = torch.exp(delta.unsqueeze(-1) * A)  # (B, ED, N)
         deltaB = delta.unsqueeze(-1) * B.unsqueeze(1)  # (B, ED, N)
 
@@ -409,4 +410,4 @@ class MambaBlock(nn.Module):
         y = y + D * x
 
         # todo : pq h.squeeze(1) ??
-        return y, h.squeeze(1)
+        return y, h

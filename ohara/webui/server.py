@@ -18,6 +18,7 @@ from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from ohara.chat_engine import ChatEngine, SamplingConfig
 
@@ -31,6 +32,7 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
     server_version = "ohara-webui"
     protocol_version = "HTTP/1.1"
+    timeout = 30
 
     # Injected by create_server.
     engine: ChatEngine
@@ -61,6 +63,13 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _read_json(self) -> dict[str, Any]:
+        if self.headers.get_content_type() != "application/json":
+            raise ValueError("Content-Type must be application/json")
+        origin = self.headers.get("Origin")
+        if origin is not None:
+            parsed = urlsplit(origin)
+            if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != self.headers.get("Host", "").lower():
+                raise ValueError("cross-origin requests are not allowed")
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
             raise ValueError("request body is empty")
@@ -126,17 +135,18 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("message content must be a string")
             defaults = self.default_sampling
             sampling = SamplingConfig(
-                temperature=float(payload.get("temperature", defaults.temperature)),
-                top_p=float(payload.get("top_p", defaults.top_p)),
-                top_k=int(payload.get("top_k", defaults.top_k)),
-                max_new_tokens=int(payload.get("max_new_tokens", defaults.max_new_tokens)),
+                temperature=payload.get("temperature", defaults.temperature),
+                top_p=payload.get("top_p", defaults.top_p),
+                top_k=payload.get("top_k", defaults.top_k),
+                max_new_tokens=payload.get("max_new_tokens", defaults.max_new_tokens),
             )
             seed = payload.get("seed")
             seed = int(seed) if seed is not None else None
             enable_thinking = payload.get("enable_thinking", self.engine.enable_thinking)
             if not isinstance(enable_thinking, bool):
                 raise ValueError("'enable_thinking' must be a boolean")
-        except (ValueError, json.JSONDecodeError) as error:
+        except (ValueError, TypeError, OverflowError, UnicodeDecodeError) as error:
+            self.close_connection = True
             self._send_json({"error": str(error)}, status=400)
             return
 
@@ -149,27 +159,30 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         try:
-            with self.generation_lock:
-                for delta in self.engine.generate_stream(
-                    messages,
-                    sampling,
-                    seed=seed,
-                    enable_thinking=enable_thinking,
-                ):
-                    self._send_event({"delta": delta})
+            stream = self.engine.generate_stream(
+                messages, sampling, seed=seed, enable_thinking=enable_thinking,
+            )
+            while True:
+                # Each request owns its KV cache. Serialize model execution,
+                # but do not hold the model lock during socket writes.
+                with self.generation_lock:
+                    delta = next(stream, None)
+                if delta is None:
+                    break
+                self._send_event({"delta": delta})
             self._send_event({"done": True})
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
             # The browser navigated away or hit stop; nothing left to send.
             return
         except Exception as error:  # noqa: BLE001 - surface any failure in the UI
             try:
                 self._send_event({"error": f"{type(error).__name__}: {error}"})
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 return
         finally:
             try:
                 self._write_chunk(b"")
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 pass
 
     def _write_chunk(self, data: bytes) -> None:

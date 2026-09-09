@@ -40,9 +40,6 @@ class Inference:
         logits = logits[:, -1]
         if temperature <= 0:
             return torch.argmax(logits, dim=-1, keepdim=True)
-        if temperature == 1 and top_p <= 0:
-            # Keep existing default behavior deterministic.
-            return torch.argmax(logits, dim=-1, keepdim=True)
         logits = logits / temperature
 
         probs = torch.softmax(logits, dim=-1)

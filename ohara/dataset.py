@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 
-from datasets import load_from_disk, load_dataset
+from datasets import load_from_disk, load_dataset, IterableDataset as HFIterableDataset
+from datasets.distributed import split_dataset_by_node
 
 import torch
 import torch.nn.functional as F
@@ -9,7 +10,6 @@ from torch.utils.data import IterableDataset, get_worker_info
 import torch.distributed as dist
 from pathlib import Path
 
-import os
 import requests
 import random
 
@@ -105,8 +105,11 @@ class PreTokenizedDataset(IterableDataset):
                 x = torch.tensor(self.ds[index]["input_ids"], dtype=torch.long)
                 if x.shape[0] > self.max_length:
                     x = x[: self.max_length]
+                valid_length = x.shape[0]
                 x = F.pad(x, (0, self.max_length - x.shape[0]), "constant", value=self.PAD)
-                yield x[:-1], x[1:]
+                targets = x[1:].clone()
+                targets[max(valid_length - 1, 0):] = -1
+                yield x[:-1], targets
 
 
 class StreamingTextDataset(IterableDataset):
@@ -166,8 +169,8 @@ class StreamingTextDataset(IterableDataset):
         if local_path.exists():
             builders = {
                 ".txt": "text",
-                ".json": "json",
                 ".jsonl": "json",
+                ".json": "json",
                 ".parquet": "parquet",
             }
             if local_path.is_file():
@@ -180,7 +183,12 @@ class StreamingTextDataset(IterableDataset):
                 matches = []
                 builder = None
                 for suffix, candidate_builder in builders.items():
-                    candidates = sorted(local_path.glob(f"{self.split}*{suffix}"))
+                    candidates = sorted(
+                        path for path in local_path.glob(f"{self.split}*{suffix}")
+                        if not (suffix == ".json" and (
+                            path.with_suffix(".bin").exists() or path.name.endswith(".bin.json")
+                        ))
+                    )
                     if candidates:
                         matches = candidates
                         builder = candidate_builder
@@ -222,6 +230,10 @@ class StreamingTextDataset(IterableDataset):
         num_shards = world_size * num_workers
 
         base_stream = self._load_stream()
+        if isinstance(base_stream, HFIterableDataset):
+            # HF owns worker sharding; applying it again drops documents.
+            base_stream = split_dataset_by_node(base_stream, rank=rank, world_size=world_size)
+            shard_id, num_shards = 0, 1
         token_buffer: list[int] = []
         buffer_start = 0
         blocks_to_skip = self.start_block
@@ -262,6 +274,8 @@ class StreamingTextDataset(IterableDataset):
                     token_buffer = token_buffer[buffer_start:]
                     buffer_start = 0
             if not yielded_document:
+                if worker is not None:
+                    return
                 raise RuntimeError(
                     f"no usable documents found in {self.dataset_name!r} split {self.split!r}"
                 )
@@ -276,7 +290,9 @@ class TinyShakespeareDataset(IterableDataset):
         min_length: int = 512,
         max_length: int = 512,
         cache_dir=None,
+        seed: int = 42,
     ):
+        self.seed = seed
         self.tokenizer = _resolve_tokenizer(tokenizer, cache_dir=cache_dir)
         self.length = len(self.tokenizer)
         self.PAD = self.tokenizer.pad_token_id
@@ -289,27 +305,27 @@ class TinyShakespeareDataset(IterableDataset):
 
         self.data_path = path.joinpath(self.dataset_name + ".txt")
 
-        try:  # ugly ik
+        try:
             with open(self.data_path) as f:
-                self.data = torch.Tensor(self.tokenizer.encode(f.read())).long()
-        except Exception:
+                self.data = torch.tensor(self.tokenizer.encode(f.read()), dtype=torch.long)
+        except FileNotFoundError:
             self.download_data()
             with open(self.data_path) as f:
-                self.data = torch.Tensor(self.tokenizer.encode(f.read())).long()
+                self.data = torch.tensor(self.tokenizer.encode(f.read()), dtype=torch.long)
 
         self.length = len(self.data)
 
     def __iter__(self) -> torch.Tensor:
+        rng = random.Random(self.seed)
         while True:
-            idx = random.randint(0, (self.length - self.max_length - 1))
+            idx = rng.randint(0, (self.length - self.max_length - 1))
             x = self.data[idx : idx + self.max_length + 1]
             yield x[:-1][: self.max_length], x[1:][: self.max_length]
 
     def download_data(self):
         url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
         response = requests.get(url)
-        if not os.path.exists(PATH):
-            os.makedirs(PATH)
+        self.data_path.parent.mkdir(parents=True, exist_ok=True)
         if response.status_code == 200:
             with open(self.data_path, "w", encoding="utf-8") as file:
                 file.write(response.text)

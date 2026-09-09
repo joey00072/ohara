@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import fields
 from contextlib import nullcontext
 
 import torch
@@ -10,7 +11,7 @@ from transformers import AutoModelForCausalLM
 from ohara.chat import add_chat_tokens
 from ohara.chat_engine import config_from_state_dict, strip_wrapper_prefixes
 from ohara.core_eval import evaluate_core
-from ohara.models.llama import Llama
+from ohara.models.llama import Llama, Config
 from ohara.tokenizer import get_tokenizer
 from ohara.utils import auto_accelerator
 
@@ -46,6 +47,7 @@ def main():
         default=2,
         help="top-k for MoE checkpoints; no tensor shape records it",
     )
+    parser.add_argument("--moe-shared-exclusive", action="store_true")
     parser.add_argument("--moe-gate-fn", choices=("softmax", "sigmoid"), default="softmax")
     parser.add_argument(
         "--moe-no-normalize-weights",
@@ -102,9 +104,14 @@ def main():
             moe_experts_per_tok=args.moe_experts_per_tok,
             moe_gate_fn=args.moe_gate_fn,
             moe_normalize_weights=not args.moe_no_normalize_weights,
+            moe_shared_exclusive=args.moe_shared_exclusive,
         )
+        if "model_config" in checkpoint:
+            names = {field.name for field in fields(Config)}
+            config = Config(**{k: v for k, v in checkpoint["model_config"].items() if k in names})
         model = Llama(config)
-        model.load_state_dict(state, strict=False)
+        state = {k: v for k, v in state.items() if k not in {"freq_cos", "freq_sin", "mask"}}
+        model.load_state_dict(state, strict=True)
         model = model.to(device=device, dtype=model_dtype)
         print(
             f"loaded {args.checkpoint}: {config.num_hidden_layers}L "
@@ -116,7 +123,7 @@ def main():
             )
         )
     else:
-        model = AutoModelForCausalLM.from_pretrained(args.hf_model, torch_dtype=model_dtype)
+        model = AutoModelForCausalLM.from_pretrained(args.hf_model, dtype=model_dtype)
         model = model.to(device)
     model.eval()
 

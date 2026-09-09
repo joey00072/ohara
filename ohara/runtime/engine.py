@@ -120,11 +120,23 @@ class OharaEngine:
         """Number of independent data-parallel replicas."""
         return self.topology.dp_world_size
 
+    @property
+    def data_parallel_group(self):
+        return self._dp_group
+
+    @property
+    def grad_scaling_enabled(self) -> bool:
+        return self._scaler.is_enabled()
+
     def launch(self, function: Callable[..., Any] | None = None, *args: Any, **kwargs: Any) -> Any:
         if self._launched:
             if function is not None:
                 return function(*args, **kwargs)
             return None
+
+        for name in ("pp", "cp", "ep"):
+            if getattr(self.config.parallel, name) != 1:
+                raise ValueError(f"{name} parallelism is not implemented; use {name}=1")
 
         world_size = int(os.environ.get("WORLD_SIZE", "1"))
         distributed_requested = world_size > 1 or int(os.environ.get("RANK", "0")) > 0
@@ -149,8 +161,11 @@ class OharaEngine:
         if dist.is_initialized():
             world_size = dist.get_world_size()
             selected_backend = dist.get_backend()
+            distributed_requested = world_size > 1
 
         self.topology = ParallelTopology.from_config(world_size, self.config.parallel)
+        if self.topology.tp_enabled and self.config.precision.mode == PrecisionMode.FP16_MIXED:
+            raise ValueError("FP16 GradScaler is not supported with tensor parallelism; use FP32 or BF16")
 
         if torch.cuda.is_available() and (
             not distributed_requested or selected_backend == Backend.NCCL.value
@@ -167,6 +182,11 @@ class OharaEngine:
             strategy = StrategyType.DDP if self.topology.dp_enabled else StrategyType.SINGLE
         if strategy == StrategyType.DDP and not self.topology.distributed_enabled:
             strategy = StrategyType.SINGLE
+        if self.topology.tp_enabled and self.topology.dp_enabled:
+            raise ValueError(
+                "combined tensor and data parallelism is not supported by this engine; "
+                "use pure TP or pure DDP"
+            )
 
         if self.topology.tp_enabled:
             self._build_meshes()
@@ -312,12 +332,22 @@ class OharaEngine:
         if dataloader.batch_size is None:
             return dataloader
 
+        seed = (dataloader.generator.initial_seed() if dataloader.generator is not None
+                else torch.initial_seed())
+        if dist.is_initialized() and self._dp_world_size > 1:
+            seed_value = [seed]
+            dist.broadcast_object_list(
+                seed_value, src=self.topology.data_parallel_group_ranks()[0], group=self._dp_group
+            )
+            seed = seed_value[0]
+
         sampler = DistributedSampler(
             dataset,
             num_replicas=self._dp_world_size,
             rank=self._dp_rank,
             shuffle=isinstance(dataloader.sampler, RandomSampler),
             drop_last=dataloader.drop_last,
+            seed=seed,
         )
 
         kwargs: dict[str, Any] = {
@@ -331,9 +361,11 @@ class OharaEngine:
             "timeout": dataloader.timeout,
             "worker_init_fn": dataloader.worker_init_fn,
             "persistent_workers": dataloader.persistent_workers,
+            "generator": dataloader.generator,
         }
         if dataloader.num_workers > 0:
             kwargs["prefetch_factor"] = dataloader.prefetch_factor
+            kwargs["multiprocessing_context"] = dataloader.multiprocessing_context
         return DataLoader(**kwargs)
 
     def prepare_dataloaders(self, *dataloaders: DataLoader):
@@ -389,14 +421,32 @@ class OharaEngine:
     ) -> torch.Tensor:
         if self._scaler.is_enabled():
             self._scaler.unscale_(optimizer)
+        if self.topology.tp_enabled:
+            from torch.distributed.tensor import DTensor
+
+            gradients = [parameter.grad for parameter in model.parameters() if parameter.grad is not None]
+            norms = []
+            for gradient in gradients:
+                norm = torch.linalg.vector_norm(gradient.detach().float())
+                norms.append(norm.full_tensor() if isinstance(norm, DTensor) else norm)
+            if not norms:
+                return torch.zeros((), device=self.device)
+            total_norm = torch.linalg.vector_norm(torch.stack(norms))
+            coefficient = min(1.0, float(max_norm / (total_norm + 1e-6)))
+            for gradient in gradients:
+                gradient.mul_(coefficient)
+            return total_norm
         return clip_grad_norm_(model.parameters(), max_norm=max_norm)
 
-    def optimizer_step(self, optimizer: Optimizer) -> None:
+    def optimizer_step(self, optimizer: Optimizer) -> bool:
         if self._scaler.is_enabled():
+            scale = self._scaler.get_scale()
             self._scaler.step(optimizer)
             self._scaler.update()
+            return self._scaler.get_scale() >= scale
         else:
             optimizer.step()
+            return True
 
     def barrier(self) -> None:
         if dist.is_initialized():
@@ -427,6 +477,8 @@ class OharaEngine:
         selected = reduce_op if reduce_op is not None else reduce_type
         if isinstance(selected, str):
             selected = ReduceType(selected)
+        if selected == ReduceType.MEAN and not (tensor.is_floating_point() or tensor.is_complex()):
+            tensor = tensor.float()
         if not dist.is_initialized():
             return tensor
         dist.all_reduce(tensor, op=_to_reduce_op(selected), group=group)
@@ -445,6 +497,23 @@ class OharaEngine:
 
     def save(self, path: str | Path, state: dict[str, Any]) -> None:
         path = Path(path)
+        if self.topology.tp_enabled:
+            from torch.distributed.tensor import DTensor
+
+            def materialize(value):
+                if isinstance(value, DTensor):
+                    return value.full_tensor().cpu()
+                if isinstance(value, dict):
+                    return {key: materialize(item) for key, item in value.items()}
+                if isinstance(value, list):
+                    return [materialize(item) for item in value]
+                if isinstance(value, tuple):
+                    return tuple(materialize(item) for item in value)
+                return value
+
+            # Every TP rank must participate in the gathers, even though only
+            # rank zero writes. This covers model and optimizer tensors.
+            state = materialize(state)
         if self.is_global_zero:
             path.parent.mkdir(parents=True, exist_ok=True)
             temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
@@ -469,8 +538,42 @@ class OharaEngine:
             if key not in payload:
                 continue
             value = payload[key]
+            if isinstance(obj, torch.nn.Module):
+                while True:
+                    child = getattr(obj, "module", None)
+                    if not isinstance(child, torch.nn.Module):
+                        child = getattr(obj, "_orig_mod", None)
+                    if not isinstance(child, torch.nn.Module):
+                        break
+                    obj = child
+
+                def clean_name(name):
+                    while name.startswith(("module.", "_orig_mod.")):
+                        name = name.split(".", 1)[1]
+                    return name
+                value = {clean_name(name): tensor for name, tensor in value.items()}
+                if self.topology.tp_enabled:
+                    from torch.distributed.tensor import DTensor, distribute_tensor
+
+                    expected = obj.state_dict()
+                    value = {
+                        name: distribute_tensor(tensor, expected[name].device_mesh, expected[name].placements)
+                        if isinstance(expected.get(name), DTensor) else tensor
+                        for name, tensor in value.items()
+                    }
             if hasattr(obj, "load_state_dict"):
                 obj.load_state_dict(value)
+                if isinstance(obj, Optimizer) and self.topology.tp_enabled:
+                    from torch.distributed.tensor import DTensor, distribute_tensor
+
+                    for parameter, optimizer_state in obj.state.items():
+                        if not isinstance(parameter, DTensor):
+                            continue
+                        for name, tensor in optimizer_state.items():
+                            if isinstance(tensor, torch.Tensor) and tensor.shape == parameter.shape:
+                                optimizer_state[name] = distribute_tensor(
+                                    tensor, parameter.device_mesh, parameter.placements
+                                )
             else:
                 state[key] = value
         return payload

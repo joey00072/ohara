@@ -7,6 +7,8 @@ from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
+_name_rng = random.SystemRandom()
+
 _NAMES_FILE = Path(__file__).parent / "data" / "pokemon_names.txt"
 
 
@@ -19,4 +21,4 @@ def pokemon_names() -> tuple[str, ...]:
 def random_name() -> str:
     """A random name suffixed with the current local timestamp."""
     stamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    return f"{random.choice(pokemon_names())}-{stamp}"
+    return f"{_name_rng.choice(pokemon_names())}-{stamp}"

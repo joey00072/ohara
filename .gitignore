@@ -69,3 +69,6 @@ wandb/
 /dev
 dep
 ref
+
+# Downloaded evaluation assets
+eval_bundle/

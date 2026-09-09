@@ -37,7 +37,7 @@ class RG_LRU(nn.Module):
 
         beta = (1 - alpha**2 + 1e-6).sqrt()
         xbeta: Tensor = beta * input_gate.sigmoid() * x
-        h = scan(alpha.mT.contiguous(), xbeta.mT.contiguous()).mT
+        h = scan(alpha, xbeta)
         # TODO: wirte recurrence for inference
         return h
 

@@ -37,11 +37,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--text-column", default="text")
     parser.add_argument("--batch-size", type=int, default=1024)
+    parser.add_argument(
+        "--max-documents",
+        type=int,
+        default=None,
+        help=(
+            "stop after this many documents per split. A short experiment needs far "
+            "fewer tokens than the whole corpus, and tokenizing the rest is wasted time"
+        ),
+    )
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 
 
-def read_jsonl(path: Path, text_column: str) -> Iterator[str]:
+def read_jsonl(
+    path: Path, text_column: str, max_documents: int | None = None
+) -> Iterator[str]:
+    if max_documents is not None and max_documents < 1:
+        raise ValueError("max_documents must be at least 1")
+    emitted = 0
     with open(path, encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
@@ -51,6 +65,9 @@ def read_jsonl(path: Path, text_column: str) -> Iterator[str]:
             text = row.get(text_column)
             if isinstance(text, str) and text:
                 yield text
+                emitted += 1
+                if max_documents is not None and emitted >= max_documents:
+                    return
 
 
 def main() -> None:
@@ -74,23 +91,34 @@ def main() -> None:
             raise FileNotFoundError(f"missing staged split: {source}")
         destination = corpus / f"{split}.bin"
 
+        build_options = {
+            "max_documents": args.max_documents,
+            "text_column": args.text_column,
+            "source_size": source.stat().st_size,
+            "source_mtime_ns": source.stat().st_mtime_ns,
+        }
         if destination.exists() and not args.force:
             existing = read_token_bin_metadata(destination)
-            if existing["vocab_size"] == len(tokenizer):
+            if (
+                existing["vocab_size"] == len(tokenizer)
+                and existing.get("tokenizer") == tokenizer.name_or_path
+                and existing.get("build_options") == build_options
+            ):
                 print(f"reuse {destination}: {existing['tokens']:,} tokens")
                 continue
             raise FileExistsError(
                 f"{destination} was built with a {existing['vocab_size']:,} token vocabulary "
-                f"but this run has {len(tokenizer):,}; pass --force to rebuild"
+                f"or different tokenizer/source/build options; pass --force to rebuild"
             )
 
         print(f"tokenizing {source} -> {destination}")
         started = time.perf_counter()
         metadata = write_token_bin(
-            read_jsonl(source, args.text_column),
+            read_jsonl(source, args.text_column, args.max_documents),
             tokenizer,
             destination,
             batch_size=args.batch_size,
+            build_options=build_options,
         )
         elapsed = time.perf_counter() - started
         rate = metadata["tokens"] / max(elapsed, 1e-9)

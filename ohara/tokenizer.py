@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -167,17 +168,38 @@ def get_token_bytes(
                 raise ValueError(f"invalid token-byte cache: {cache_file}")
             if token_bytes.ndim != 1 or token_bytes.numel() != len(tokenizer):
                 raise ValueError(f"token-byte cache vocabulary mismatch: {cache_file}")
-            return token_bytes.to(device=device)
+            if isinstance(payload, dict) and payload.get("byte_count_version") == 2:
+                return token_bytes.to(device=device)
 
     vocab_size = len(tokenizer)
     special_ids = set(getattr(tokenizer, "all_special_ids", []) or [])
     token_bytes = torch.zeros(vocab_size, dtype=torch.int32, device="cpu")
 
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    decoder_state = backend.decoder.__getstate__() if backend is not None and backend.decoder else b"{}"
+    decoder_config = json.loads(decoder_state)
+
+    def has_bytelevel(value):
+        if isinstance(value, dict):
+            return value.get("type") == "ByteLevel" or any(has_bytelevel(v) for v in value.values())
+        return isinstance(value, list) and any(has_bytelevel(v) for v in value)
+
+    bytelevel = has_bytelevel(decoder_config) or hasattr(tokenizer, "byte_decoder")
+    added_ids = set(getattr(tokenizer, "get_added_vocab", dict)().values())
     for token_id in range(vocab_size):
         if not include_special and token_id in special_ids:
             continue
-        text = tokenizer.decode([token_id], skip_special_tokens=False)
-        token_bytes[token_id] = len(text.encode("utf-8"))
+        if bytelevel and token_id not in added_ids and token_id not in special_ids:
+            # ByteLevel's reversible alphabet maps one character to one byte,
+            # even when this token is only a fragment of a UTF-8 character.
+            token_bytes[token_id] = len(tokenizer.convert_ids_to_tokens(token_id))
+        else:
+            token = getattr(tokenizer, "convert_ids_to_tokens", lambda _: "")(token_id)
+            if len(token) == 6 and token.startswith("<0x") and token.endswith(">"):
+                token_bytes[token_id] = 1
+            else:
+                text = tokenizer.decode([token_id], skip_special_tokens=False)
+                token_bytes[token_id] = len(text.encode("utf-8"))
 
     if cache_path is not None:
         cache_file = Path(cache_path)
@@ -187,6 +209,7 @@ def get_token_bytes(
             with open(temporary, "wb") as f:
                 torch.save(
                     {
+                        "byte_count_version": 2,
                         "tokenizer": str(getattr(tokenizer, "name_or_path", "unknown")),
                         "include_special": include_special,
                         "token_bytes": token_bytes,

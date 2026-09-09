@@ -97,7 +97,7 @@ class GLU(nn.Module):
     def forward(self, x):
         up = self.up(x)
         gate = self.gate(x)
-        down = self.down(F.silu(gate) * up)
+        down = self.down(self.activation(gate) * up)
         return self.dropout(down)
 
     def reset_parameters(self, init_std=None, factor=1.0):

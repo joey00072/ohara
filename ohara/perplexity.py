@@ -86,11 +86,11 @@ def sliding_window_perplexity(
     stride: int = 512,
     progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, float | int | str]:
-    """Hugging Face-style strided token perplexity, scoring every token once."""
+    """Hugging Face-style strided token perplexity, scoring each eligible token once."""
     if token_ids.ndim != 1:
         raise ValueError("token_ids must be one-dimensional")
-    if sequence_length < 2 or not 1 <= stride <= sequence_length:
-        raise ValueError("stride must be between 1 and sequence_length")
+    if sequence_length < 2 or not 1 <= stride < sequence_length:
+        raise ValueError("stride must be between 1 and sequence_length - 1")
     if token_ids.numel() < 2:
         raise ValueError("at least two tokens are required")
 

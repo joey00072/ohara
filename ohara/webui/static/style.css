@@ -1,6 +1,4 @@
-/* The layout is Tailwind (loaded from the CDN in index.html). This file holds
-   only what utility classes express badly: the streaming caret animation, range
-   input theming, and the two component classes the chat JS applies at runtime. */
+/* Layout utilities are bundled in utilities.css for offline use. */
 
 :root {
   --accent: #6366f1;
@@ -108,3 +106,6 @@
   .streaming .prose-body::after { animation: none; }
   #messages { scroll-behavior: auto; }
 }
+
+.thinking { margin-bottom: 1rem; opacity: .8; }
+.thinking summary { cursor: pointer; font-size: .875rem; }

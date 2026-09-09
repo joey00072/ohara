@@ -42,6 +42,12 @@ class CachedDummyModel(DummyModel):
 
 
 class InferenceTests(unittest.TestCase):
+    def test_unit_temperature_samples_when_top_p_disabled(self):
+        torch.manual_seed(5)
+        logits = torch.tensor([[[2., 1.9, 1.8, 1.7]]]).expand(200, -1, -1)
+        samples = Inference.sampler(logits, temperature=1., top_p=0.)
+        self.assertEqual(set(samples.flatten().tolist()), {0, 1, 2, 3})
+
     def test_sampler_temperature_zero_is_greedy(self):
         logits = torch.tensor([[[0.1, 0.2, 0.9]]], dtype=torch.float32)
         token = Inference.sampler(logits, temperature=0.0)

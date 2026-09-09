@@ -5,7 +5,6 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file, save_file
 
@@ -30,6 +29,8 @@ class Config:
     multiple_of: int = 4
     bias: bool = False
     weight_tying: bool = False
+    rms_norm_eps: float = 1e-5
+    moe_expert_hidden_dim: int | None = None
     rope_theta: float = 100000
     init_style: str = "standard"
     # Mixture of experts. 0 experts keeps every layer's feed-forward dense.
@@ -47,6 +48,10 @@ class Config:
     moe_grouped: bool = False
     moe_num_shared_experts: int = 0
     moe_normalize_weights: bool = True
+    # Make the routed sum orthogonal to the shared expert's output before adding
+    # them (vector rejection, as in exclusive self-attention). Enforces shared
+    # expert isolation instead of hoping for it. See ohara/modules/moe_grouped.py.
+    moe_shared_exclusive: bool = False
 
 
 class Attention(nn.Module):
@@ -101,11 +106,6 @@ class Attention(nn.Module):
             assert position_ids is not None
             k, v = kv_cache.forward(k, v, position_ids)
 
-        # Grouped Query Attention
-        if self.num_key_value_heads != self.num_attention_heads:
-            k = torch.repeat_interleave(k, self.num_queries_per_kv, dim=2)
-            v = torch.repeat_interleave(v, self.num_queries_per_kv, dim=2)
-
         k = k.transpose(1, 2)
         q = q.transpose(1, 2)
         v = v.transpose(1, 2)
@@ -116,27 +116,15 @@ class Attention(nn.Module):
             key_positions = torch.arange(k.size(2), device=q.device)
             cache_mask = key_positions.unsqueeze(0) <= query_positions.unsqueeze(1)
 
-        if self.flash_attn:
-            output = torch.nn.functional.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=cache_mask,
-                dropout_p=self.attn_dropout.p if self.training else 0.0,
-                is_causal=kv_cache is None,
-            )
-        else:
-            attn_mtx = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
-            if cache_mask is not None:
-                attn_mtx = attn_mtx.masked_fill(
-                    ~cache_mask.view(1, 1, seq_len, k.size(2)),
-                    float("-inf"),
-                )
-            elif mask is not None:
-                attn_mtx = attn_mtx + mask[:, :, :seq_len, : k.size(2)]
-            attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(k)
-            attn_mtx = self.attn_dropout(attn_mtx)
-            output = torch.matmul(attn_mtx, v)
+        output = torch.nn.functional.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=cache_mask,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=kv_cache is None,
+            enable_gqa=self.num_key_value_heads != self.num_attention_heads,
+        )
 
         output = (
             output.transpose(1, 2)
@@ -164,18 +152,19 @@ class Block(nn.Module):
         if self.is_moe and cfg.moe_grouped:
             self.ff = GroupedMoE(
                 dim=cfg.hidden_size,
-                hidden_dim=cfg.intermediate_size,
+                hidden_dim=cfg.moe_expert_hidden_dim or cfg.intermediate_size,
                 num_experts=cfg.moe_num_experts,
                 num_experts_per_tok=cfg.moe_experts_per_tok,
                 num_shared_experts=cfg.moe_num_shared_experts,
                 gate_fn=cfg.moe_gate_fn,
                 normalize_weights=cfg.moe_normalize_weights,
                 quantile_balancing=cfg.moe_quantile_balancing,
+                shared_exclusive=cfg.moe_shared_exclusive,
             )
         elif self.is_moe:
             self.ff = MoE(
                 dim=cfg.hidden_size,
-                hidden_dim=cfg.intermediate_size,
+                hidden_dim=cfg.moe_expert_hidden_dim or cfg.intermediate_size,
                 num_experts=cfg.moe_num_experts,
                 num_experts_per_tok=cfg.moe_experts_per_tok,
                 gate_fn=cfg.moe_gate_fn,
@@ -189,8 +178,8 @@ class Block(nn.Module):
                 bias=cfg.bias,
             )
 
-        self.norm1 = RMSNorm(cfg.hidden_size)
-        self.norm2 = RMSNorm(cfg.hidden_size)
+        self.norm1 = RMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps)
+        self.norm2 = RMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps)
 
     def forward(
         self,
@@ -213,6 +202,8 @@ class Llama(nn.Module):
             raise ValueError("vocab_size must be at least 2")
         if cfg.hidden_size < 1 or cfg.num_hidden_layers < 1:
             raise ValueError("hidden_size and num_hidden_layers must be positive")
+        if cfg.moe_expert_hidden_dim is not None and cfg.moe_expert_hidden_dim < 1:
+            raise ValueError("moe_expert_hidden_dim must be positive")
         if cfg.intermediate_size < 1:
             raise ValueError("intermediate_size must be positive")
         if cfg.num_attention_heads < 1 or cfg.hidden_size % cfg.num_attention_heads != 0:
@@ -222,7 +213,9 @@ class Llama(nn.Module):
             raise ValueError("attention head dimension must be even for rotary embeddings")
         if cfg.max_sequence_length < 2:
             raise ValueError("max_sequence_length must be at least 2")
-        kv_heads = cfg.num_attention_heads if cfg.num_key_value_heads == 0 else cfg.num_key_value_heads
+        kv_heads = (
+            cfg.num_attention_heads if cfg.num_key_value_heads == 0 else cfg.num_key_value_heads
+        )
         if kv_heads < 1 or cfg.num_attention_heads % kv_heads != 0:
             raise ValueError("num_key_value_heads must divide num_attention_heads")
         if not 0.0 <= cfg.dropout < 1.0:
@@ -248,11 +241,9 @@ class Llama(nn.Module):
 
         self.token_emb = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
 
-        self.layers = nn.ModuleList(
-            [Block(cfg, idx) for idx in range(cfg.num_hidden_layers)]
-        )
+        self.layers = nn.ModuleList([Block(cfg, idx) for idx in range(cfg.num_hidden_layers)])
 
-        self.norm = RMSNorm(cfg.hidden_size)
+        self.norm = RMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps)
         self.vocab_proj = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
 
         if cfg.weight_tying:
@@ -266,19 +257,21 @@ class Llama(nn.Module):
         self.register_buffer("freq_cos", cos)
         self.register_buffer("freq_sin", isin)
 
-        if not hasattr(torch.nn.functional, "scaled_dot_product_attention"):
-            print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
-            mask = torch.full(
-                (1, 1, cfg.max_sequence_length, cfg.max_sequence_length), float("-inf")
-            )
-            mask = torch.triu(mask, diagonal=1)
-            self.register_buffer("mask", mask)
-        else:
-            self.mask = None
+        self.mask = None
 
         self.apply(self._init_weights)
         if cfg.init_style == "nanochat":
             self._init_nanochat_weights()
+
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
+        for name in ("freq_cos", "freq_sin"):
+            state_dict[prefix + name] = getattr(self, name)
+        state_dict.pop(prefix + "mask", None)
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
 
     def forward(
         self,
@@ -326,8 +319,15 @@ class Llama(nn.Module):
         x = self.vocab_proj(x)
         return x
 
-    def build_kv_cache(self, batch_size: int = 1) -> list[KVCache]:
+    def build_kv_cache(
+        self, batch_size: int = 1, *, max_sequence_length: int | None = None, int8: bool = False
+    ) -> list[KVCache]:
         """Build an empty KV cache suitable for the model's configuration."""
+        max_sequence_length = (
+            self.config.max_sequence_length if max_sequence_length is None else max_sequence_length
+        )
+        if not 1 <= max_sequence_length <= self.config.max_sequence_length:
+            raise ValueError("cache length must be in [1, max_sequence_length]")
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
         kv_heads = (
@@ -337,7 +337,7 @@ class Llama(nn.Module):
         )
         shape = (
             batch_size,
-            self.config.max_sequence_length,
+            max_sequence_length,
             kv_heads,
             self.config.hidden_size // self.config.num_attention_heads,
         )
@@ -347,7 +347,7 @@ class Llama(nn.Module):
 
         for idx in range(self.config.num_hidden_layers):
             kv_cache.append(
-                KVCache(shape, self.config.max_sequence_length, idx, device=device, dtype=dtype)
+                KVCache(shape, max_sequence_length, idx, device=device, dtype=dtype, int8=int8)
             )
         return kv_cache
 
@@ -355,9 +355,7 @@ class Llama(nn.Module):
         """Return parameter groups used by compute-optimal scaling analysis."""
         token_embeddings = self.token_emb.weight.numel()
         lm_head = (
-            0
-            if self.vocab_proj.weight is self.token_emb.weight
-            else self.vocab_proj.weight.numel()
+            0 if self.vocab_proj.weight is self.token_emb.weight else self.vocab_proj.weight.numel()
         )
         transformer_matrices = sum(
             parameter.numel()
@@ -399,9 +397,7 @@ class Llama(nn.Module):
                 total += per_expert * ff.num_shared_experts
                 total += ff.router.weight.numel()
             elif block.is_moe:
-                per_expert = sum(
-                    p.numel() for p in block.ff.experts[0].parameters() if p.ndim >= 2
-                )
+                per_expert = sum(p.numel() for p in block.ff.experts[0].parameters() if p.ndim >= 2)
                 total += per_expert * block.ff.num_experts_per_tok
                 total += block.ff.gate.weight.numel()
             else:
@@ -550,7 +546,20 @@ class Llama(nn.Module):
         config_fields = {field.name for field in fields(Config)}
         config = Config(**{key: value for key, value in payload.items() if key in config_fields})
 
-        model = cls(config).to(device=device, dtype=dtype)
+        with torch.device("meta"):
+            model = cls(config)
+        for module in model.modules():
+            for buffer_name, buffer in module._buffers.items():
+                if buffer is not None:
+                    module._buffers[buffer_name] = torch.zeros(
+                        buffer.shape, dtype=buffer.dtype, device=device
+                    )
+        cos, sin = precompute_freqs_cis(
+            config.hidden_size // config.num_attention_heads,
+            config.max_sequence_length * 2,
+            theta=config.rope_theta,
+        )
+        model.freq_cos, model.freq_sin = cos.to(device), sin.to(device)
         if explicit_weights is not None:
             weight_files = [explicit_weights]
         else:
@@ -581,11 +590,17 @@ class Llama(nn.Module):
                     f"duplicate tensors across safetensors shards: {sorted(duplicates)[:5]}"
                 )
             loaded.update(shard)
-            model.load_state_dict(shard, strict=False)
+            shard = {
+                key: value.to(dtype=dtype)
+                if dtype is not None and value.is_floating_point()
+                else value
+                for key, value in shard.items()
+            }
+            model.load_state_dict(shard, strict=False, assign=True)
 
         unexpected = sorted(loaded - expected)
         allowed_missing = {"freq_cos", "freq_sin"}
-        if config.weight_tying:
+        if config.weight_tying and loaded.intersection({"token_emb.weight", "vocab_proj.weight"}):
             # Standard safetensors writers may store only one side of a tied pair.
             allowed_missing.update({"token_emb.weight", "vocab_proj.weight"})
         missing = sorted(expected - loaded - allowed_missing)
@@ -595,6 +610,13 @@ class Llama(nn.Module):
                 details.append(f"missing keys: {missing[:5]}")
             if unexpected:
                 details.append(f"unexpected keys: {unexpected[:5]}")
-            raise RuntimeError("checkpoint does not match Llama config (" + "; ".join(details) + ")")
+            raise RuntimeError(
+                "checkpoint does not match Llama config (" + "; ".join(details) + ")"
+            )
 
+        if config.weight_tying:
+            if "token_emb.weight" in loaded:
+                model.vocab_proj.weight = model.token_emb.weight
+            else:
+                model.token_emb.weight = model.vocab_proj.weight
         return model.eval()

@@ -72,6 +72,11 @@ class KVCache:
             self.value_scale = torch.zeros(stats_shape, device=device, dtype=torch.float32)
             self.value_min = torch.zeros(stats_shape, device=device, dtype=torch.float32)
 
+    def reset(self) -> None:
+        """Reuse the allocated storage for a new decoding sequence."""
+        self.length = 0
+        self.batch_size = None
+
     def forward(self, keys: Tensor, values: Tensor, start_pos: int) -> tuple[Tensor, Tensor]:
         """Append ``keys``/``values`` at ``start_pos`` and return the full cache so far."""
         bsz, seq_len, _, _ = keys.shape

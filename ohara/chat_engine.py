@@ -14,7 +14,8 @@ of the full generated sequence rather than decoding tokens one at a time.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
@@ -41,6 +42,13 @@ class SamplingConfig:
     max_new_tokens: int = 512
 
     def __post_init__(self) -> None:
+        for name in ("temperature", "top_p", "top_k", "max_new_tokens"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number")
+        for name in ("top_k", "max_new_tokens"):
+            if not isinstance(getattr(self, name), int):
+                raise ValueError(f"{name} must be an integer")
         if self.temperature < 0:
             raise ValueError("temperature cannot be negative")
         if not 0.0 <= self.top_p <= 1.0:
@@ -135,15 +143,16 @@ def config_from_state_dict(
     moe_experts_per_tok: int = 2,
     moe_gate_fn: str = "softmax",
     moe_normalize_weights: bool = True,
+    moe_shared_exclusive: bool = False,
 ) -> Config:
     """Recover a model config from checkpoint tensor shapes.
 
-    Checkpoints written by the training entrypoints hold a bare state dict, so
-    the architecture is inferred rather than read back. Everything is determined
-    by a shape except two things:
+    Legacy checkpoints may hold only a bare state dict. Prefer saved model_config
+    for new checkpoints; inference cannot recover every training choice.
+    Tensor shapes do not determine:
 
     - the head dimension, which comes from the rotary buffer;
-    - the MoE top-k, gate function, and sigmoid-weight normalization, which are
+    - the MoE top-k, gate function, shared-expert exclusivity, and normalization, which are
       routing choices and leave no trace in tensor shapes. Callers must pass the
       values used for training or the model will load the right weights but route
       differently.
@@ -172,10 +181,13 @@ def config_from_state_dict(
         shared = state.get(f"layers.{first}.ff.shared_gate.weight")
         num_shared = int(shared.shape[0] // intermediate_size) if shared is not None else 0
         interval = _moe_layer_interval(grouped_layers, num_layers)
+        dense_width = int(next((value.shape[0] for key, value in state.items()
+                                if key.endswith(".ff.up.weight")), intermediate_size))
         return Config(
             vocab_size=int(state["token_emb.weight"].shape[0]),
             hidden_size=int(hidden_size),
-            intermediate_size=int(intermediate_size),
+            intermediate_size=dense_width,
+            moe_expert_hidden_dim=int(intermediate_size) if intermediate_size != dense_width else None,
             max_sequence_length=_rotary_window(state),
             num_hidden_layers=num_layers,
             num_attention_heads=_head_count(state, "query"),
@@ -195,6 +207,7 @@ def config_from_state_dict(
             moe_num_shared_experts=num_shared,
             moe_gate_fn=moe_gate_fn,
             moe_normalize_weights=moe_normalize_weights,
+            moe_shared_exclusive=moe_shared_exclusive,
         )
 
     moe_layers = sorted(
@@ -231,10 +244,13 @@ def config_from_state_dict(
     max_sequence_length = int(freq_cos.shape[0]) // 2
     tied = state["vocab_proj.weight"].data_ptr() == state["token_emb.weight"].data_ptr()
 
+    dense_width = int(next((value.shape[0] for key, value in state.items()
+                            if key.endswith(".ff.up.weight")), intermediate_size))
     return Config(
         vocab_size=int(vocab_size),
         hidden_size=int(hidden_size),
-        intermediate_size=int(intermediate_size),
+        intermediate_size=dense_width,
+        moe_expert_hidden_dim=int(intermediate_size) if num_experts and intermediate_size != dense_width else None,
         max_sequence_length=max_sequence_length,
         num_hidden_layers=num_layers,
         num_attention_heads=num_heads,
@@ -245,6 +261,8 @@ def config_from_state_dict(
         moe_experts_per_tok=moe_experts_per_tok if num_experts else 2,
         moe_layer_interval=interval,
         moe_gate_fn=moe_gate_fn if num_experts else "softmax",
+        moe_normalize_weights=moe_normalize_weights,
+        moe_shared_exclusive=moe_shared_exclusive,
     )
 
 
@@ -413,6 +431,7 @@ class ChatEngine:
         moe_experts_per_tok: int = 2,
         moe_gate_fn: str = "softmax",
         moe_normalize_weights: bool = True,
+        moe_shared_exclusive: bool = False,
     ) -> "ChatEngine":
         """Load a checkpoint written by ``examples/train_sft.py``.
 
@@ -437,12 +456,17 @@ class ChatEngine:
 
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         state = _clean_state_dict(checkpoint.get("model", checkpoint))
-        config = config_from_state_dict(
-            state,
-            moe_experts_per_tok=moe_experts_per_tok,
-            moe_gate_fn=moe_gate_fn,
-            moe_normalize_weights=moe_normalize_weights,
-        )
+        if "model_config" in checkpoint:
+            names = {field.name for field in fields(Config)}
+            config = Config(**{k: v for k, v in checkpoint["model_config"].items() if k in names})
+        else:
+            config = config_from_state_dict(
+                state,
+                moe_experts_per_tok=moe_experts_per_tok,
+                moe_gate_fn=moe_gate_fn,
+                moe_normalize_weights=moe_normalize_weights,
+                moe_shared_exclusive=moe_shared_exclusive,
+            )
         # A model trained with --pad-vocab-to is wider than its tokenizer; those
         # extra rows are unreachable padding and are masked out before sampling.
         # A model *narrower* than the tokenizer is genuinely broken: it cannot
@@ -483,13 +507,15 @@ class ChatEngine:
         messages: Sequence[Mapping[str, Any]],
         *,
         enable_thinking: bool | None = None,
+        max_new_tokens: int = 1,
     ) -> list[int]:
         """Render a conversation, dropping old turns that do not fit the context.
 
         The window has to leave room for the reply, so entire leading turns are
-        dropped (never a partial turn) until the prompt fits.
+        dropped (never a partial turn) until the prompt fits. Reserve the requested
+        reply length, capped at half the context so a prompt still has space.
         """
-        budget = self.max_sequence_length
+        budget = self.max_sequence_length - min(max_new_tokens, max(1, self.max_sequence_length // 2))
         turns = list(messages)
         if enable_thinking is None:
             enable_thinking = self.enable_thinking
@@ -504,10 +530,13 @@ class ChatEngine:
                 ids = rendered["input_ids"] if isinstance(rendered, Mapping) else rendered
             else:
                 ids = render_for_completion(self.tokenizer, turns, max_tokens=budget)
-            if len(ids) < budget:
+            if len(ids) <= budget:
                 return list(ids)
             # Drop the oldest user/assistant pair and retry.
-            turns = turns[2:] if len(turns) > 2 else turns[1:]
+            start = 1 if turns[0].get("role") == "system" else 0
+            if len(turns) - start <= 2:
+                break
+            turns = turns[:start] + turns[start + 2:]
         raise ValueError("the latest message alone does not fit in the context window")
 
     @torch.inference_mode()
@@ -521,7 +550,8 @@ class ChatEngine:
     ) -> Iterator[str]:
         """Yield decoded text deltas for the assistant's reply."""
         config = config or SamplingConfig()
-        prompt_ids = self.render_prompt(messages, enable_thinking=enable_thinking)
+        prompt_ids = self.render_prompt(messages, enable_thinking=enable_thinking,
+                                        max_new_tokens=config.max_new_tokens)
         room = self.max_sequence_length - len(prompt_ids)
         if room < 1:
             raise ValueError("no room left in the context window for a reply")
@@ -531,7 +561,9 @@ class ChatEngine:
         if seed is not None:
             generator = torch.Generator(device=self.device).manual_seed(seed)
 
-        kv_cache = self.model.build_kv_cache(batch_size=1)
+        kv_cache = self.model.build_kv_cache(
+            batch_size=1, max_sequence_length=len(prompt_ids) + max_new_tokens
+        )
         tokens = torch.tensor(prompt_ids, dtype=torch.long, device=self.device).view(1, -1)
         model_input = tokens
         position = 0
@@ -553,9 +585,12 @@ class ChatEngine:
             # Decode the whole reply and emit only what is new: a single token
             # may not be valid text on its own.
             text = self.tokenizer.decode(produced, skip_special_tokens=True)
-            if len(text) > len(emitted):
+            if not text.endswith("\ufffd") and len(text) > len(emitted):
                 yield text[len(emitted):]
                 emitted = text
+        text = self.tokenizer.decode(produced, skip_special_tokens=True)
+        if len(text) > len(emitted):
+            yield text[len(emitted):]
 
     def generate(
         self,

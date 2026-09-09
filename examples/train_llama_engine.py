@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
+
 import argparse
 import json
 import math
@@ -114,6 +116,14 @@ def parse_args() -> argparse.Namespace:
         help="always-active experts per layer (DeepSeek-style shared expert isolation)",
     )
     parser.add_argument(
+        "--moe-shared-exclusive",
+        action="store_true",
+        help=(
+            "make the routed sum orthogonal to the shared expert output before adding "
+            "(XSA-style vector rejection); requires --moe-num-shared-experts >= 1"
+        ),
+    )
+    parser.add_argument(
         "--moe-no-normalize-weights",
         action="store_true",
         help="do not rescale routed weights to sum to 1 (grouped sigmoid gating only)",
@@ -188,6 +198,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def run() -> None:
+    with ExitStack() as cleanup:
+        _run(cleanup)
+
+
+def _run(cleanup: ExitStack) -> None:
     args = parse_args()
     if args.hidden_size % args.num_heads != 0:
         raise ValueError("hidden-size must be divisible by num-heads")
@@ -233,6 +248,7 @@ def run() -> None:
         )
     )
     engine.launch()
+    cleanup.callback(engine.close)
 
     tokenizer = get_tokenizer(
         hf_name=args.tokenizer,
@@ -269,6 +285,7 @@ def run() -> None:
         moe_grouped=args.moe_grouped,
         moe_num_shared_experts=args.moe_num_shared_experts,
         moe_normalize_weights=not args.moe_no_normalize_weights,
+        moe_shared_exclusive=args.moe_shared_exclusive,
     )
     raw_model = Llama(model_cfg)
     model = raw_model
@@ -277,8 +294,9 @@ def run() -> None:
         # specialize. Compile before the engine wraps the module for DDP.
         model = torch.compile(model, dynamic=False)
     model = engine.prepare(model)
-    if args.optimizer in ("muon", "muonh") and args.tp != 1:
-        raise ValueError("the hybrid Muon optimizers currently require --tp 1")
+    torch.manual_seed(args.seed + engine.data_parallel_rank)
+    if args.optimizer in ("muon", "muonh", "adamh") and args.tp != 1:
+        raise ValueError("Muon and hyperspherical optimizers currently require --tp 1; use AdamW for TP")
 
     if args.optimizer == "muon":
         optimizer = build_muon_adamw(
@@ -335,6 +353,7 @@ def run() -> None:
                 "world_size": engine.data_parallel_world_size,
             },
         )
+        cleanup.callback(tracker.finish)
         engine.loggers = [tracker]
     else:
         tracker = None
@@ -498,10 +517,15 @@ def run() -> None:
             raise ValueError("exact --resume currently requires --num-workers 0")
         train_ds.start_block = batches_consumed * args.batch_size
         trainer.train_batches_consumed = batches_consumed
-        if "torch_rng_state" in checkpoint:
-            torch.set_rng_state(checkpoint["torch_rng_state"].cpu())
-        if torch.cuda.is_available() and "cuda_rng_state_all" in checkpoint:
-            torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state_all"])
+        rng = checkpoint
+        if "rng_states" in checkpoint:
+            if len(checkpoint["rng_states"]) != engine.world_size:
+                raise ValueError("exact --resume requires the saved distributed world size")
+            rng = checkpoint["rng_states"][engine.global_rank]
+        if "torch_rng_state" in rng:
+            torch.set_rng_state(rng["torch_rng_state"].cpu())
+        if torch.cuda.is_available() and "cuda_rng_state_all" in rng:
+            torch.cuda.set_rng_state_all(rng["cuda_rng_state_all"])
         if engine.is_global_zero:
             print(
                 f"resumed checkpoint={args.checkpoint_path} at iter={start_iter}; "
@@ -604,9 +628,6 @@ def run() -> None:
             os.replace(temporary, result_path)
         finally:
             temporary.unlink(missing_ok=True)
-    if tracker is not None:
-        tracker.finish()
-    engine.close()
     # Give remote-stream cleanup callbacks a chance to finish before CPython
     # tears down extension-module thread states. This applies regardless of the
     # accelerator: the readers and tokenizer workers live on the CPU.

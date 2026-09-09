@@ -19,7 +19,7 @@ uv run python examples/train_llama_engine.py
 
 | Path | What is in it |
 | --- | --- |
-| [`ohara/models/`](./ohara/models/) | Standalone model implementations (llama, gpt, phi, gemma, mamba, roformer, retnet) |
+| [`ohara/models/`](./ohara/models/) | Standalone model implementations (llama, qwen3, transformer, gpt, phi, gemma, mamba, roformer, retnet) |
 | [`ohara/modules/`](./ohara/modules/) | Shared blocks: attention, MLP/GLU variants, MoE, norms, KV cache |
 | [`ohara/embeddings_pos/`](./ohara/embeddings_pos/) | Position embeddings: rotary, alibi, xpos |
 | [`ohara/runtime/`](./ohara/runtime/) | `OharaEngine`: device placement, precision, DDP, tensor parallel |
@@ -55,13 +55,13 @@ The stages are ordinary scripts, so you can also run them one at a time:
 
 ```bash
 # 1. pretrain on raw text, reserving the conversation tokens in the vocabulary
-python examples/train_llama_engine.py --dataset ./data/scaling_corpus --chat-tokens ...
+uv run python examples/train_llama_engine.py --dataset ./data/scaling_corpus --chat-tokens ...
 
 # 2. finetune on SmolTalk + MMLU + GSM8K, supervising only assistant tokens
-python examples/train_sft.py --pretrained-checkpoint ./ckpt/base_d12.pt
+uv run python examples/train_sft.py --pretrained-checkpoint ./ckpt/base_d12.pt
 
 # 3. chat with it in the browser
-python examples/chat_web.py --checkpoint ./ckpt/sft_d12.pt
+uv run python examples/chat_web.py --checkpoint ./ckpt/sft_d12.pt
 
 # Or load a standard config.json + model.safetensors repo directly from the Hub
 uv run python examples/chat_web.py \
@@ -143,7 +143,7 @@ exponent is not.
 
 Reproduce with `examples/prepare_scaling_data.py` (stages ClimbMix shards by default) then
 `examples/scaling_laws.py run` / `analyze`; raw results are in
-[`scaling_results/climbmix_full/`](./scaling_results/climbmix_full/).
+the local, gitignored `scaling_results/climbmix_full/` directory (not shipped in this repository).
 
 ## TinyStories scaling pilot
 
@@ -227,3 +227,48 @@ uv run ruff check .    # lint (experiments/ is excluded on purpose)
 - be nice,
 - code explanations || docs are appreciated
 - memes on pr recommend
+
+## Evaluation and export
+
+```bash
+uv run python examples/core_eval.py --checkpoint ckpt/base_d12.pt
+uv run python examples/evaluate_perplexity.py --model ./my-qwen3 --backend ohara
+uv run python examples/export_safetensors.py --checkpoint ckpt/base_d12.pt --out export/base --dtype bfloat16
+```
+
+Ohara Llama exports use an Ohara-native config and tensor names in the standard
+safetensors directory layout. Load them with `ohara.Llama.from_pretrained`;
+they are not interchangeable with Hugging Face Llama weights. Qwen3 supports
+its Hugging Face configuration and tensor naming convention.
+
+## Runtime support and reproducibility
+
+The engine supports single-process execution, pure DDP, and pure tensor
+parallelism. Combined TP+DDP and pipeline/context/expert parallelism are rejected
+until those integrations are implemented and validated. Tensor parallel attention
+requires both query and KV head counts to be divisible by the TP degree.
+Use AdamW with FP32 or BF16 for TP; hyperspherical/Muon optimizers and FP16
+GradScaler are rejected for that mode.
+
+AdamH and MuonH require nonzero initial matrix norms. The optimizer builders
+reject zero-initialized residual branches rather than silently freezing them;
+use standard initialization for dense hyperspherical runs. Grouped MoE's
+zero-initialized output projections require an additive optimizer unless they
+are explicitly initialized to a nonzero scale.
+
+`pyproject.toml` deliberately pins PyTorch 2.10.0 for the project's CUDA 12
+baseline, independent of any global Python environment. Use `uv sync` to obtain
+that baseline. Lightweight model summaries using Lightning are optional:
+`uv sync --extra summary`. Ordinary training and inference do not import it.
+
+Scaling analysis uses quadratic iso-FLOP interpolation and OLS in log-log space.
+It does not implement Chinchilla's joint parametric fit, bootstrap confidence
+intervals, or uncertainty estimates; do not interpret fitted exponents as precise
+measurements. Raw grid optima are excluded from the interpolated power-law fit.
+
+Gemma is a research implementation with no Hugging Face checkpoint loader or
+KV cache; use Llama or Qwen3 for the supported chat and export workflows.
+
+With tied embeddings, hybrid optimizers place the shared matrix in the embedding
+group and use its learning rate. For nanochat-style untied optimizer comparisons,
+pass `--no-weight-tying`; tied-weight learning rates are a separate recipe.

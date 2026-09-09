@@ -26,9 +26,11 @@ class DDPStrategy(BaseStrategy):
                 output_device=device.index,
                 process_group=process_group,
                 init_sync=self._init_sync,
+                broadcast_buffers=False,
             )
         return DistributedDataParallel(
             module,
             process_group=process_group,
             init_sync=self._init_sync,
+            broadcast_buffers=False,
         )

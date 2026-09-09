@@ -32,14 +32,24 @@ class DummyTokenizer:
         return "".join(chars)
 
 
-class NextTokenOracle(torch.nn.Module):
+class PrefixOracle(torch.nn.Module):
     def __init__(self, vocab_size=512):
         super().__init__()
         self.vocab_size = vocab_size
         self.max_seq_len = 4096
 
     def forward(self, input_ids):
-        target_ids = torch.roll(input_ids, shifts=-1, dims=1)
+        # Predictions depend only on the prefix, never future input tokens.
+        completions = ["2+2= 4", "1+1= 2", "The sky is blue .", "Water is wet .",
+                       "Hello world", "Good day", "A .", "Hi there"]
+        target_ids = torch.zeros_like(input_ids)
+        for row in range(input_ids.size(0)):
+            for pos in range(input_ids.size(1)):
+                prefix = "".join(chr(int(t) - 3) for t in input_ids[row, :pos + 1] if int(t) >= 3)
+                for completion in completions:
+                    if completion.startswith(prefix) and len(prefix) < len(completion):
+                        target_ids[row, pos] = ord(completion[len(prefix)]) + 3
+                        break
         bsz, seq_len = input_ids.shape
         logits = torch.full(
             (bsz, seq_len, self.vocab_size),
@@ -54,13 +64,29 @@ class NextTokenOracle(torch.nn.Module):
 class CoreEvalTests(unittest.TestCase):
     def setUp(self):
         self.device = torch.device("cpu")
-        self.model = NextTokenOracle()
+        self.model = PrefixOracle()
         self.tokenizer = DummyTokenizer()
+
+    def test_wrong_gold_fails_and_small_fewshot_population_works(self):
+        data = [{"query": "2+2=", "choices": ["5", "4"], "gold": 0}]
+        meta = {"task_type": "multiple_choice", "num_fewshot": 10, "continuation_delimiter": " "}
+        self.assertEqual(evaluate_task(self.model, self.tokenizer, data, self.device, meta), 0.0)
+        data[0]["gold"] = 1
+        self.assertEqual(evaluate_task(self.model, self.tokenizer, data, self.device, meta), 1.0)
+
+    def test_continuation_filling_context_is_not_scorable(self):
+        self.model.max_seq_len = 2
+        for kind, item in [
+            ("language_modeling", {"context": "X", "continuation": "ab"}),
+            ("multiple_choice", {"query": "X", "choices": ["ab", "cd"], "gold": 1}),
+        ]:
+            meta = {"task_type": kind, "num_fewshot": 0, "continuation_delimiter": ""}
+            self.assertEqual(evaluate_task(self.model, self.tokenizer, [item], self.device, meta), 0.0)
 
     def test_evaluate_task_multiple_choice(self):
         data = [
-            {"query": "2+2=", "choices": ["4", "5"], "gold": 0},
-            {"query": "1+1=", "choices": ["2", "3"], "gold": 0},
+            {"query": "2+2=", "choices": ["5", "4"], "gold": 1},
+            {"query": "1+1=", "choices": ["3", "2"], "gold": 1},
         ]
         task_meta = {
             "task_type": "multiple_choice",
@@ -72,8 +98,8 @@ class CoreEvalTests(unittest.TestCase):
 
     def test_evaluate_task_schema(self):
         data = [
-            {"context_options": ["The sky is blue", "The sky is green"], "continuation": ".", "gold": 0},
-            {"context_options": ["Water is wet", "Water is dry"], "continuation": ".", "gold": 0},
+            {"context_options": ["The sky is green", "The sky is blue"], "continuation": ".", "gold": 1},
+            {"context_options": ["Water is dry", "Water is wet"], "continuation": ".", "gold": 1},
         ]
         task_meta = {
             "task_type": "schema",
@@ -85,8 +111,8 @@ class CoreEvalTests(unittest.TestCase):
 
     def test_evaluate_task_language_modeling(self):
         data = [
-            {"context": "Hello", "continuation": " world"},
-            {"context": "Good", "continuation": " day"},
+            {"context": "Hello", "continuation": "world"},
+            {"context": "Good", "continuation": "day"},
         ]
         task_meta = {
             "task_type": "language_modeling",
@@ -143,13 +169,13 @@ class CoreEvalTests(unittest.TestCase):
                     f.write(f"{task['label']},50\n")
 
             mc_rows = [
-                {"query": "2+2=", "choices": ["4", "5"], "gold": 0},
+                {"query": "2+2=", "choices": ["5", "4"], "gold": 1},
             ]
             schema_rows = [
-                {"context_options": ["A", "B"], "continuation": ".", "gold": 0},
+                {"context_options": ["B", "A"], "continuation": ".", "gold": 1},
             ]
             lm_rows = [
-                {"context": "Hi", "continuation": " there"},
+                {"context": "Hi", "continuation": "there"},
             ]
 
             with open(data_dir.joinpath("tiny_mc.jsonl"), "w", encoding="utf-8") as f:

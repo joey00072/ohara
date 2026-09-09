@@ -8,12 +8,10 @@ their starting point.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from huggingface_hub import PyTorchModelHubMixin
 
 from ohara.embeddings_pos.rotary import apply_rope, precompute_freqs_cis
@@ -85,31 +83,19 @@ class Attention(nn.Module):
 
         q, k = apply_rope(q, k, freqs_cis)
 
-        # Grouped Query Attention
-        if self.num_kv_heads != self.num_heads:
-            k = torch.repeat_interleave(k, self.num_queries_per_kv, dim=2)
-            v = torch.repeat_interleave(v, self.num_queries_per_kv, dim=2)
-
         k = k.transpose(1, 2)  # shape = (B, num_heads, seq_len, head_dim)
         q = q.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        if self.flash_attn:
-            output = torch.nn.functional.scaled_dot_product_attention(
-                q,
-                k,
-                v,  # order impotent
-                attn_mask=None,
-                dropout_p=self.attn_dropout.p if self.training else 0.0,
-                is_causal=True,
-            )
-        else:
-            attn_mtx = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
-            attn_mtx = attn_mtx + mask[:, :, :seq_len, :seq_len]
-            attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(k)
-            attn_mtx = self.attn_dropout(attn_mtx)
-
-            output = torch.matmul(attn_mtx, v)  # (batch, n_head, seq_len, head_dim)
+        output = torch.nn.functional.scaled_dot_product_attention(
+            q,
+            k,
+            v,  # order impotent
+            attn_mask=None,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=True,
+            enable_gqa=self.num_kv_heads != self.num_heads,
+        )
 
         # restore time as batch dimension and concat heads
         output = output.transpose(1, 2).contiguous().view(batch, seq_len, d_model)
@@ -128,6 +114,7 @@ class Block(nn.Module):
         self.ff = MLP_BLOCK[config.mlp](
             dim=config.d_model,
             hidden_dim=config.hidden_dim,
+            activation_fn=config.activation,
             dropout=config.dropout,
             bias=config.bias,
         )
@@ -157,22 +144,28 @@ class Transformer(nn.Module):
         if config.weight_tying:
             self.token_emb.weight = self.vocab_proj.weight
 
-        cos, isin = precompute_freqs_cis(config.d_model // config.num_heads, config.seq_len * 2)
-        self.register_buffer("freq_cos", cos)
-        self.register_buffer("freq_sin", isin)
+        cos, isin = precompute_freqs_cis(config.d_model // config.num_heads, config.seq_len)
+        self.register_buffer("freq_cos", cos, persistent=False)
+        self.register_buffer("freq_sin", isin, persistent=False)
 
-        if not hasattr(torch.nn.functional, "scaled_dot_product_attention"):
-            print("WARNING: using slow attention | upgrade pytorch to 2.0 or above")
-            mask = torch.full((1, 1, config.seq_len, config.seq_len), float("-inf"))
-            mask = torch.triu(mask, diagonal=1)
-            self.register_buffer("mask", mask)
-        else:
-            self.mask = None
+        self.mask = None
 
         self.apply(self._init_weights)
 
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
+        for name in ("freq_cos", "freq_sin"):
+            state_dict.pop(prefix + name, None)
+        state_dict.pop(prefix + "mask", None)
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
+
     def forward(self, x: torch.Tensor):
         batch, seqlen = x.shape
+        if seqlen > self.config.seq_len:
+            raise ValueError("input exceeds the configured seq_len")
         x = self.token_emb(x)
         freqs_cis = self.freq_cos[:seqlen], self.freq_sin[:seqlen]
 

@@ -38,6 +38,64 @@ def small_llama(**overrides) -> Llama:
     return Llama(Config(**{**defaults, **overrides}))
 
 
+@pytest.mark.parametrize("builder", [build_adamh, build_muonh_adamh])
+def test_zero_initialized_branches_are_rejected(builder):
+    with pytest.raises(ValueError, match="zero-norm matrix"):
+        builder(small_llama(init_style="nanochat"))
+
+
+def test_adamh_intermittent_gradients_match_independent_optimizers():
+    torch.manual_seed(19)
+    params = [torch.nn.Parameter(torch.randn(3, 3)) for _ in range(2)]
+    independent = [torch.nn.Parameter(p.detach().clone()) for p in params]
+
+    def make(weights, kind="adamw"):
+        return MuonAdamW([dict(
+            params=weights, kind=kind, hypersphere=True, lr=0.02,
+            betas=(0.9, 0.95), eps=0.2, weight_decay=0,
+            momentum=0.9, beta2=0.9, ns_steps=3,
+        )])
+
+    combined = make(params)
+    separate = [make([p]) for p in independent]
+    for step in range(4):
+        for index, (p, reference) in enumerate(zip(params, independent)):
+            gradient = torch.randn_like(p) if index == 0 or step % 2 == 1 else None
+            p.grad = gradient
+            reference.grad = gradient.clone() if gradient is not None else None
+        combined.step()
+        for optimizer in separate:
+            optimizer.step()
+    for p, reference in zip(params, independent):
+        torch.testing.assert_close(p, reference)
+
+
+@pytest.mark.parametrize("hypersphere", [False, True])
+def test_muon_inactive_matrices_keep_their_state(hypersphere):
+    torch.manual_seed(21)
+    params = [torch.nn.Parameter(torch.randn(3, 3)) for _ in range(2)]
+    references = [torch.nn.Parameter(p.detach().clone()) for p in params]
+
+    def make(weights):
+        return MuonAdamW([dict(
+            params=weights, kind="muon", hypersphere=hypersphere, lr=0.02,
+            weight_decay=0, momentum=0.9, beta2=0.9, ns_steps=3,
+        )])
+
+    combined = make(params)
+    separate = [make([p]) for p in references]
+    for step in range(4):
+        for index, (p, reference) in enumerate(zip(params, references)):
+            gradient = torch.randn_like(p) if step % 2 == index else None
+            p.grad = gradient
+            reference.grad = gradient.clone() if gradient is not None else None
+        combined.step()
+        for optimizer in separate:
+            optimizer.step()
+    for p, reference in zip(params, references):
+        torch.testing.assert_close(p, reference)
+
+
 def train_steps(model: Llama, optimizer, steps: int = 20) -> list[float]:
     generator = torch.Generator().manual_seed(1)
     data = torch.randint(0, 64, (4, 16), generator=generator)

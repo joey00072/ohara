@@ -29,6 +29,11 @@ class PerplexityTests(unittest.TestCase):
         self.assertAlmostEqual(result["loss_nats_per_token"], math.log(7), places=6)
         self.assertAlmostEqual(result["token_perplexity"], 7.0, places=5)
 
+    def test_nonoverlapping_sliding_windows_are_rejected(self):
+        with self.assertRaises(ValueError):
+            sliding_window_perplexity(UniformModel(5), torch.arange(12) % 5,
+                                      device="cpu", sequence_length=4, stride=4)
+
     def test_sliding_windows_score_each_token_after_the_first_once(self):
         model = UniformModel(vocab_size=5)
         result = sliding_window_perplexity(

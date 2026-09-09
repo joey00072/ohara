@@ -80,24 +80,30 @@ class CausalAttention(nn.Module):
         q = q.transpose(1, 2)
         v = v.transpose(1, 2)
 
+        if mask is not None:
+            mask = mask[..., :seq_len, :seq_len]
         attn_mtx = None
         if self.flash_attn and not verbose:
             output = F.scaled_dot_product_attention(
                 q,
                 k,
                 v,
-                attn_mask=None,
+                attn_mask=mask,
                 dropout_p=self.attn_dropout.p if self.training else 0.0,
-                is_causal=True,
+                is_causal=mask is None,
             )
         else:
             attn_mtx = torch.matmul(q, k.transpose(2, 3)) / math.sqrt(self.head_dim)
             if mask is not None:
-                attn_mtx = attn_mtx + mask[:, :, :seq_len, :seq_len]
+                attn_mtx = (
+                    attn_mtx.masked_fill(~mask, float("-inf"))
+                    if mask.dtype == torch.bool
+                    else attn_mtx + mask
+                )
             else:
                 causal = torch.ones(seq_len, seq_len, dtype=torch.bool, device=x.device).tril()
                 attn_mtx = attn_mtx.masked_fill(~causal, float("-inf"))
-            attn_mtx = F.softmax(attn_mtx.float(), dim=-1).type_as(k)
+            attn_mtx = F.softmax(attn_mtx.float(), dim=-1).nan_to_num(0.0).type_as(k)
             output = torch.matmul(self.attn_dropout(attn_mtx), v)
 
         # Concatenate the heads back into the residual stream.
@@ -110,7 +116,7 @@ class CausalAttention(nn.Module):
         return output
 
     def reset_parameters(self, init_std: float | None = None, factor: float = 1.0) -> None:
-        init_std = init_std or (self.head_dim ** (-0.5))
+        init_std = init_std or (self.query.in_features ** (-0.5))
 
         for w in (self.key, self.query, self.value):
             nn.init.trunc_normal_(
@@ -125,8 +131,8 @@ class CausalAttention(nn.Module):
             self.proj.weight,
             mean=0.0,
             std=init_std / factor,
-            a=-3 * init_std,
-            b=3 * init_std,
+            a=-3 * init_std / factor,
+            b=3 * init_std / factor,
         )
 
 

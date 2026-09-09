@@ -17,7 +17,7 @@ def get_alibi_mask(number_of_heads, max_seq_len):
     nh = number_of_heads
     n = max_seq_len
 
-    rows = torch.arange(1, n + 1).view(1, -1, 1)
+    rows = torch.arange(n).view(1, -1, 1)
     cols = torch.arange(n).view(1, 1, -1)
 
     matrix = rows - cols

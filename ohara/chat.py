@@ -184,7 +184,7 @@ def render_conversation(
         mask.extend([mask_value] * len(token_ids))
 
     def encode(text: str) -> list[int]:
-        return tokenizer.encode(text, add_special_tokens=False)
+        return tokenizer.encode(text, add_special_tokens=False, split_special_tokens=True)
 
     add(boundary_token_id(tokenizer), 0)
     for message in normalized:
