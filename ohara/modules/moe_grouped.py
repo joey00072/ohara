@@ -35,6 +35,8 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ohara.modules.router import RouterLinear
+
 
 def _grouped_mm_available() -> bool:
     return hasattr(torch, "_grouped_mm")
@@ -115,7 +117,7 @@ class GroupedMoE(nn.Module):
             self.shared_up = nn.Linear(dim, shared_hidden, bias=False)
             self.shared_down = nn.Linear(shared_hidden, dim, bias=False)
 
-        self.router = nn.Linear(dim, num_experts, bias=False)
+        self.router = RouterLinear(dim, num_experts, bias=False)
 
         # A buffer, not a Parameter: quantile balancing solves for it directly, so
         # the optimizer must never touch it. Checkpointed, so a resumed run starts
@@ -134,7 +136,7 @@ class GroupedMoE(nn.Module):
         """Return (expert_indices, expert_weights, logits, alpha) for each token."""
         # fp32 for the router: quantile balancing works on quantiles of logit
         # differences, and in bf16 too many of those differences collide.
-        logits = self.router(flat_x).float()
+        logits = self.router(flat_x)
 
         alpha = None
         if self.quantile_balancing:

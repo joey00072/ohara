@@ -261,24 +261,43 @@ class TokenBinDataset(IterableDataset):
             world_size = dist.get_world_size() if distributed else 1
         return rank * num_workers + worker_id, world_size * num_workers
 
+    def validate_capacity(self, num_workers: int = 0) -> None:
+        _, ranks = self._shard()
+        # Called in the parent process before workers exist.
+        shards = ranks * max(1, num_workers)
+        if self.num_blocks < shards:
+            raise ValueError(f"token-bin has {self.num_blocks} blocks for {shards} rank/worker shards")
+
+    def state_dict(self) -> dict:
+        return {"version": 1, "blocks_consumed": getattr(self, "_blocks_consumed", self.start_block)}
+
+    def load_state_dict(self, state: dict) -> None:
+        if state.get("version") != 1 or state["blocks_consumed"] < 0:
+            raise ValueError("invalid token-bin cursor")
+        self.start_block = int(state["blocks_consumed"])
+        self._blocks_consumed = self.start_block
+
     def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
         tokens = self._memmap()
         shard_id, num_shards = self._shard()
-        epoch = 0
-        skip = self.start_block
-
+        if self.num_blocks < num_shards:
+            raise ValueError(f"token-bin has {self.num_blocks} blocks for {num_shards} rank/worker shards")
+        blocks_per_epoch = len(range(shard_id, self.num_blocks, num_shards))
+        epoch, skip = divmod(self.start_block, blocks_per_epoch)
+        self._blocks_consumed = self.start_block
+        if not self.infinite and epoch > 0:
+            return
         while True:
             order = np.arange(self.num_blocks)
             if self.shuffle:
                 np.random.default_rng(self.seed + epoch).shuffle(order)
-            for position in range(shard_id, self.num_blocks, num_shards):
-                if skip > 0:
-                    skip -= 1
-                    continue
+            for position in range(shard_id + skip * num_shards, self.num_blocks, num_shards):
                 start = int(order[position]) * self.block_size
                 block = np.asarray(tokens[start : start + self.block_size], dtype=np.int64)
                 chunk = torch.from_numpy(block)
+                self._blocks_consumed += 1
                 yield chunk[:-1], chunk[1:]
             if not self.infinite:
                 return
             epoch += 1
+            skip = 0

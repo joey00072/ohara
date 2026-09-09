@@ -35,6 +35,11 @@ locked Torch 2.10.0.
 
 ## Implementation status — 2026-09-09
 
+A subsequent [TorchTitan comparison](torchtitan-comparison-2026-09-09.md)
+identified and fixed additional checkpoint, input-state, router precision, and
+training-performance issues. That follow-up passed 414 tests and 2 subtests,
+with one CUDA-only skip; its report records the newer compatibility limits.
+
 The fixes below are applied to the working tree. The original findings are kept
 as an audit trail; their old line numbers and pre-fix observations are historical.
 No files under `experiments/` or `ref/` were changed. Existing uncommitted feature

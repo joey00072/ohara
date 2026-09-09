@@ -1,4 +1,5 @@
 import gc
+import copy
 import time
 import math
 from collections import deque
@@ -15,6 +16,7 @@ import torch.distributed as dist
 from typing import Any, Callable, Mapping, Protocol
 
 from ohara.utils import BetterCycle
+from ohara.data_resume import capture_input_state
 
 from torch.utils.data import DataLoader
 
@@ -117,6 +119,7 @@ class Trainer:
         self.total_training_time_s: float = 0.0
         self.timed_steps: int = 0
         self.train_batches_consumed: int = 0
+        self.train_tokens_seen: int = 0
         self._start_iter = 0
         self._validation_batches: list[tuple[torch.Tensor, torch.Tensor]] = []
 
@@ -194,26 +197,29 @@ class Trainer:
             "RTX 4090": 1.65e14,
             "RTX 6000 ADA": 1.46e14,
         }
-        for key, value in peak_map.items():
+        for key, value in sorted(peak_map.items(), key=lambda item: len(item[0]), reverse=True):
             if key in name:
                 return value
         return None
 
     def _compute_perf_metrics(
-        self, idx: int, elapsed_time: float
+        self, idx: int, elapsed_time: float, *, steps: int = 1,
+        tokens: int | None = None,
     ) -> tuple[float, float | None, float | None, float | None]:
-        tokens_per_sec = self.global_tokens_per_iter / max(elapsed_time, 1e-9)
+        tokens_per_sec = (
+            self.global_tokens_per_iter * steps if tokens is None else tokens
+        ) / max(elapsed_time * steps, 1e-9)
 
         mfu = None
         if self.flops_per_token and self.peak_flops:
             flops_per_sec = self.flops_per_token * tokens_per_sec
-            denom = self.peak_flops * max(1, self.world_size)
+            denom = self.peak_flops * max(1, getattr(self.engine, "world_size", self.world_size))
             if denom > 0:
                 mfu = 100.0 * (flops_per_sec / denom)
 
         if idx - self._start_iter > self.timing_warmup_steps:
-            self.total_training_time_s += elapsed_time
-            self.timed_steps += 1
+            self.total_training_time_s += elapsed_time * steps
+            self.timed_steps += steps
 
         eta_seconds = None
         avg_step = None
@@ -223,8 +229,45 @@ class Trainer:
 
         return tokens_per_sec, mfu, eta_seconds, avg_step
 
+    @staticmethod
+    def _check_device_condition(condition: torch.Tensor, message: str) -> None:
+        # CUDA checks remain ordered with subsequent optimizer kernels without
+        # copying a scalar to the host for every microbatch. CPU errors stay
+        # ordinary, catchable exceptions.
+        if condition.device.type == "cuda":
+            torch._assert_async(condition, message)
+        elif not bool(condition):
+            raise RuntimeError(message)
+
     @torch.no_grad()
     def evaluate(self, dataloader: DataLoader, num_batches: int) -> dict[str, float]:
+        source = dataloader.iterable if isinstance(dataloader, BetterCycle) else dataloader
+        dataset = getattr(source, "dataset", None)
+        save_state = getattr(dataset, "state_dict", None)
+        load_state = getattr(dataset, "load_state_dict", None)
+        state = None
+        if callable(save_state) and callable(load_state):
+            try:
+                state = copy.deepcopy(save_state())
+            except ValueError:
+                # Some streaming sources support ordinary iteration but cannot
+                # expose a resumable cursor. Their fresh evaluation iterator is
+                # still valid; checkpoint capture records the limitation.
+                pass
+        was_training = self.model.training
+        cpu_rng = torch.get_rng_state()
+        cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None
+        try:
+            return self._evaluate(dataloader, num_batches)
+        finally:
+            if state is not None:
+                load_state(state)
+            torch.set_rng_state(cpu_rng)
+            if cuda_rng is not None:
+                torch.cuda.set_rng_state_all(cuda_rng)
+            self.model.train(was_training)
+
+    def _evaluate(self, dataloader: DataLoader, num_batches: int) -> dict[str, float]:
         was_training = self.model.training
         self.model.eval()
 
@@ -384,7 +427,7 @@ class Trainer:
             "validation_bits_per_token": val_eval["bits_per_token"],
             "validation_accuracy": val_eval["accuracy"],
             "iter": idx,
-            "tokens": idx * self.global_tokens_per_iter,
+            "tokens": self.train_tokens_seen,
             "lr": lr,
             "time": elapsed_time,
             "total_training_time_s": self.total_training_time_s,
@@ -425,14 +468,35 @@ class Trainer:
         self.total_training_time_s = 0.0
         self.timed_steps = 0
         uses_scaler = bool(getattr(self.engine, "grad_scaling_enabled", False))
+        window_steps = 0
+        total_seen = torch.tensor(self.train_tokens_seen, dtype=torch.int64, device=self.engine.device)
+        window_tokens_tensor = torch.zeros_like(total_seen)
+        cuda_timing = self.engine.device.type == "cuda"
+        timing_stream = torch.cuda.current_stream(self.engine.device) if cuda_timing else None
+        timing_start = torch.cuda.Event(enable_timing=True) if cuda_timing else None
+        timing_end = torch.cuda.Event(enable_timing=True) if cuda_timing else None
 
         idx: int = start_iter
         while True:
             if idx >= self.max_iters:
                 break
             idx += 1
-            self.engine.synchronize()
-            start_time: float = time.perf_counter()
+            evaluate_step = self.eval_iters > 0 and (
+                idx % self.eval_iters == 0 or idx == self.max_iters
+            )
+            checkpoint_step = self.save_ckpt_iters > 0 and (
+                idx % self.save_ckpt_iters == 0 or idx == self.max_iters
+            )
+            observe_step = (
+                idx % self.print_every == 0 or self.log_iter_loss
+                or evaluate_step or checkpoint_step or idx == self.max_iters
+                or idx - start_iter == self.timing_warmup_steps
+            )
+            if window_steps == 0:
+                start_time = time.perf_counter()
+                if timing_start is not None:
+                    timing_start.record(timing_stream)
+            window_steps += 1
 
             lr = self.get_lr(idx)
             if not math.isfinite(lr) or lr < 0:
@@ -462,21 +526,28 @@ class Trainer:
                 for _ in range(self.micro_batch)
             ]
             self.train_batches_consumed += self.micro_batch
-            total_valid_tokens = sum(
+            self.tokens_per_iter = sum(data.numel() for data, _ in accumulated_batches)
+            local_valid_tokens = sum(
                 (target != self.ignore_index).sum()
                 for _, target in accumulated_batches
             )
-            total_valid_tokens = self._all_reduce_data_sum(total_valid_tokens)
-            if total_valid_tokens.item() == 0:
-                raise RuntimeError(f"training batch at iter={idx} has no valid target tokens")
+            counts = self._all_reduce_data_sum(torch.stack((
+                local_valid_tokens,
+                local_valid_tokens.new_tensor(self.tokens_per_iter),
+            )))
+            total_valid_tokens = counts[0]
+            total_seen.add_(counts[1])
+            window_tokens_tensor.add_(counts[1])
+            self._check_device_condition(
+                total_valid_tokens > 0,
+                f"training batch at iter={idx} has no valid target tokens",
+            )
 
             accumulated_loss_sum = torch.zeros(
                 (), device=self.engine.device, dtype=torch.float32
             )
+            loss_is_finite = torch.ones((), device=self.engine.device, dtype=torch.int32)
             for micro_step, (data, target) in enumerate(accumulated_batches):
-                if self.tokens_per_iter == 0:
-                    self.tokens_per_iter = int(data.numel() * self.micro_batch)
-                    self.global_tokens_per_iter = self.tokens_per_iter * self.world_size
                 sync_context = (
                     self.engine.no_backward_sync(
                         self.model, enabled=micro_step < self.micro_batch - 1
@@ -494,12 +565,11 @@ class Trainer:
                             ignore_index=self.ignore_index,
                             reduction="sum",
                         )
-                    if not uses_scaler and not torch.isfinite(loss_sum.detach()):
-                        raise RuntimeError(
-                            f"Non-finite loss detected at iter={idx}, micro_step={micro_step}: "
-                            f"{float(loss_sum.detach())}"
-                        )
-                    accumulated_loss_sum += loss_sum.detach()
+                    del logits
+                    if not uses_scaler:
+                        loss_is_finite.logical_and_(torch.isfinite(loss_sum.detach()))
+                    if observe_step:
+                        accumulated_loss_sum += loss_sum.detach()
                     self.engine.backward(loss_sum * self.world_size / total_valid_tokens)
 
             if self.grad_clip_norm is not None and self.grad_clip_norm > 0:
@@ -508,10 +578,18 @@ class Trainer:
                     self.optimizer,
                     max_norm=float(self.grad_clip_norm),
                 )
-                if not uses_scaler and not torch.isfinite(grad_norm):
-                    raise RuntimeError(
-                        f"Non-finite gradient norm detected at iter={idx}: {float(grad_norm)}"
-                    )
+                if not uses_scaler:
+                    loss_is_finite.logical_and_(torch.isfinite(grad_norm))
+
+            if not uses_scaler:
+                if self._is_distributed():
+                    # Finite status must reach every participating rank, while
+                    # loss normalization remains data-parallel only.
+                    dist.all_reduce(loss_is_finite, op=dist.ReduceOp.MIN)
+                self._check_device_condition(
+                    loss_is_finite,
+                    f"Non-finite loss or gradient norm detected at iter={idx}",
+                )
 
             stepped = self.engine.optimizer_step(self.optimizer)
             self.optimizer.zero_grad(set_to_none=True)
@@ -530,17 +608,23 @@ class Trainer:
                 # here, once per optimizer step, not inside the accumulation loop.
                 self.apply_router_balancing(self.model)
 
+            if not observe_step:
+                continue
             step_loss_tensor = self._all_reduce_data_sum(accumulated_loss_sum) / total_valid_tokens
-            if not uses_scaler and not torch.isfinite(step_loss_tensor):
-                raise RuntimeError(
-                    f"Non-finite loss detected at iter={idx}: {float(step_loss_tensor)}"
-                )
+            if timing_end is not None:
+                timing_end.record(timing_stream)
+                timing_end.synchronize()
+                elapsed_time = timing_start.elapsed_time(timing_end) / (1000 * window_steps)
+            else:
+                elapsed_time = (time.perf_counter() - start_time) / window_steps
             step_loss = float(step_loss_tensor)
-
-            self.engine.synchronize()
-            curr_time: float = time.perf_counter()
-            elapsed_time: float = curr_time - start_time
-            tokens_per_sec, mfu, eta_seconds, _ = self._compute_perf_metrics(idx, elapsed_time)
+            self.train_tokens_seen = int(total_seen)
+            self.global_tokens_per_iter = int(counts[1])
+            tokens_per_sec, mfu, eta_seconds, _ = self._compute_perf_metrics(
+                idx, elapsed_time, steps=window_steps, tokens=int(window_tokens_tensor),
+            )
+            window_steps = 0
+            window_tokens_tensor.zero_()
             if idx % self.print_every == 0 and self.engine.is_global_zero:
                 base_msg = (
                     f"iter: {idx} | loss: {step_loss:.4f} | lr: {lr:e} | time: {elapsed_time:.4f}s "
@@ -561,7 +645,7 @@ class Trainer:
                             "train_iter_loss": step_loss,
                             "train_iter_loss_100": iter_loss_avg,
                             "iter": idx,
-                            "tokens": idx * self.global_tokens_per_iter,
+                            "tokens": self.train_tokens_seen,
                             "lr": lr,
                             "time": elapsed_time,
                             "tokens_per_sec": tokens_per_sec,
@@ -572,7 +656,7 @@ class Trainer:
                 except Exception as e:
                     print(f"Error logging iter loss: {e}")
 
-            if self.eval_iters > 0 and (idx % self.eval_iters == 0 or idx == self.max_iters):
+            if evaluate_step:
                 self.model.eval()
                 self.log_function(
                     idx=idx,
@@ -585,9 +669,7 @@ class Trainer:
                 )
                 self.model.train()
 
-            if self.save_ckpt_iters > 0 and (
-                idx % self.save_ckpt_iters == 0 or idx == self.max_iters
-            ):
+            if checkpoint_step:
                 state = {
                     "model": self._raw_model().state_dict(),
                     "optimizer": self.optimizer.state_dict(),
@@ -596,6 +678,7 @@ class Trainer:
                     "train_step_loss": step_loss,
                     "gradient_accumulation_steps": self.micro_batch,
                     "train_batches_consumed": self.train_batches_consumed,
+                    "train_tokens_seen": self.train_tokens_seen,
                     "torch_rng_state": torch.get_rng_state(),
                 }
                 model_config = getattr(self._raw_model(), "config", None)
@@ -605,6 +688,12 @@ class Trainer:
                     )
                 if torch.cuda.is_available():
                     state["cuda_rng_state_all"] = torch.cuda.get_rng_state_all()
+                input_state = capture_input_state(
+                    self.train_dataloader.iterable,
+                    gradient_accumulation_steps=self.micro_batch,
+                    data_rank=getattr(self.engine, "data_parallel_rank", 0),
+                    data_world_size=self.world_size,
+                )
                 if self._is_distributed():
                     local_rng = {"torch_rng_state": state["torch_rng_state"]}
                     if "cuda_rng_state_all" in state:
@@ -612,6 +701,11 @@ class Trainer:
                     rng_states = [None] * dist.get_world_size()
                     dist.all_gather_object(rng_states, local_rng)
                     state["rng_states"] = rng_states
+                    input_states = [None] * dist.get_world_size()
+                    dist.all_gather_object(input_states, input_state)
+                    state["input_states"] = input_states
+                else:
+                    state["input_states"] = [input_state]
                 self.engine.save(self.checkpoint_path, state)
                 if model_config is not None:
                     model_config.ckpt_iter = idx

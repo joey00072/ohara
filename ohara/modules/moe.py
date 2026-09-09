@@ -5,6 +5,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from ohara.modules.mlp import MLP_MAP
+from ohara.modules.router import RouterLinear
 
 
 class MoE(nn.Module):
@@ -55,7 +56,7 @@ class MoE(nn.Module):
         mlp_block = MLP_MAP[mlp]  # SwiGLU is default
 
         self.experts = nn.ModuleList([mlp_block(dim, hidden_dim) for _ in range(num_experts)])
-        self.gate = nn.Linear(dim, num_experts, bias=False)
+        self.gate = RouterLinear(dim, num_experts, bias=False)
 
         # A buffer, not a Parameter: quantile balancing solves for it in closed form, so the
         # optimizer must never touch it. Checkpointed, so a resumed run starts already balanced.
@@ -77,7 +78,7 @@ class MoE(nn.Module):
 
         # fp32 for the router: quantile balancing works on quantiles of logit differences,
         # and in bf16 too many of those differences round to the same value.
-        logits = self.gate(flat_x).float()  # (N, num_experts)
+        logits = self.gate(flat_x)  # (N, num_experts), FP32 even under autocast
 
         alpha = None
         if self.quantile_balancing:

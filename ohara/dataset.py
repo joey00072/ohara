@@ -12,6 +12,7 @@ from pathlib import Path
 
 import requests
 import random
+import copy
 
 from transformers import PreTrainedTokenizerBase
 
@@ -100,6 +101,8 @@ class PreTokenizedDataset(IterableDataset):
         shard_id = rank * num_workers + worker_id
         num_shards = world_size * num_workers
 
+        if len(self.ds) < num_shards:
+            raise ValueError(f"dataset has {len(self.ds)} rows for {num_shards} rank/worker shards")
         while True:
             for index in range(shard_id, len(self.ds), num_shards):
                 x = torch.tensor(self.ds[index]["input_ids"], dtype=torch.long)
@@ -123,6 +126,7 @@ class StreamingTextDataset(IterableDataset):
         split: str,
         max_length: int,
         name: str | None = None,
+        revision: str | None = None,
         text_column: str = "text",
         shuffle: bool = False,
         shuffle_buffer_size: int = 1_000,
@@ -147,6 +151,7 @@ class StreamingTextDataset(IterableDataset):
             raise ValueError("start_block cannot be negative")
         self.dataset_name = dataset_name
         self.name = name
+        self.revision = revision
         self.split = split
         self.max_length = max_length
         self.text_column = text_column
@@ -198,6 +203,9 @@ class StreamingTextDataset(IterableDataset):
                         f"no {self.split!r} text, JSONL, JSON, or Parquet files in {local_path}"
                     )
                 data_files = {self.split: [str(path) for path in matches]}
+            self._source_files = data_files[self.split]
+            if isinstance(self._source_files, str):
+                self._source_files = [self._source_files]
             return load_dataset(
                 builder,
                 data_files=data_files,
@@ -214,6 +222,8 @@ class StreamingTextDataset(IterableDataset):
         }
         if self.name is not None:
             kwargs["name"] = self.name
+        if self.revision is not None:
+            kwargs["revision"] = self.revision
         return load_dataset(**kwargs)
 
     def __iter__(self):
@@ -234,45 +244,77 @@ class StreamingTextDataset(IterableDataset):
             # HF owns worker sharding; applying it again drops documents.
             base_stream = split_dataset_by_node(base_stream, rank=rank, world_size=world_size)
             shard_id, num_shards = 0, 1
-        token_buffer: list[int] = []
-        buffer_start = 0
-        blocks_to_skip = self.start_block
-        epoch = 0
+        self._source_checkpointable = hasattr(base_stream, "state_dict") and hasattr(base_stream, "load_state_dict")
+        pristine_stream = copy.deepcopy(base_stream)
+        restored = copy.deepcopy(getattr(self, "_resume_state", None))
+        epoch = restored["epoch"] if restored else 0
+        token_buffer = restored["token_buffer"] if restored else []
+        buffer_start = restored.get("buffer_start", 0) if restored else 0
+        rng = random.Random(self.seed + epoch)
+        shuffle_buffer = restored["shuffle_buffer"] if restored else []
+        if restored:
+            rng.setstate(restored["rng_state"])
+            if not hasattr(base_stream, "load_state_dict"):
+                raise ValueError("stream source cannot restore iterator state")
+            if hasattr(base_stream, "set_epoch"):
+                base_stream.set_epoch(epoch)
+            base_stream.load_state_dict(restored["source"])
+        blocks_to_skip = self.start_block if restored is None else 0
+        block_size = self.max_length + 1
         while True:
-            stream = base_stream
-            if self.shuffle:
-                stream = stream.shuffle(
-                    seed=self.seed + epoch,
-                    buffer_size=self.shuffle_buffer_size,
-                )
-            yielded_document = False
-            for document_index, row in enumerate(stream):
-                if document_index % num_shards != shard_id:
-                    continue
+            source_iter = iter(base_stream)
+            source_done = restored["source_done"] if restored else False
+            yielded_document = restored["yielded_document"] if restored else False
+            document_index = restored["document_index"] if restored else 0
+            restored = None
+            while True:
+                # Packing leftovers are consumed before advancing the source. The
+                # source cursor already includes the document that produced them.
+                while len(token_buffer) - buffer_start >= block_size:
+                    block = torch.tensor(token_buffer[buffer_start:buffer_start + block_size], dtype=torch.long)
+                    buffer_start += block_size
+                    if hasattr(base_stream, "state_dict"):
+                        self._iterator_state = {
+                            "version": 1, "epoch": epoch,
+                            "source": copy.deepcopy(base_stream.state_dict()),
+                            "source_done": source_done, "document_index": document_index,
+                            "yielded_document": yielded_document,
+                            "token_buffer": token_buffer, "buffer_start": buffer_start,
+                            "shuffle_buffer": shuffle_buffer,
+                            "rng_state": rng.getstate(),
+                        }
+                    if blocks_to_skip:
+                        blocks_to_skip -= 1
+                    else:
+                        yield block[:-1], block[1:]
+                if buffer_start:
+                    token_buffer = token_buffer[buffer_start:]
+                    buffer_start = 0
+                # Own the shuffle buffer: HF's shuffle state excludes buffered
+                # examples, so using it would silently lose data on restoration.
+                capacity = self.shuffle_buffer_size if self.shuffle else 1
+                while not source_done and len(shuffle_buffer) < capacity:
+                    try:
+                        row = next(source_iter)
+                    except StopIteration:
+                        source_done = True
+                        break
+                    selected = document_index % num_shards == shard_id
+                    document_index += 1
+                    if selected:
+                        shuffle_buffer.append(row)
+                if not shuffle_buffer:
+                    break
+                index = rng.randrange(len(shuffle_buffer)) if self.shuffle else 0
+                row = shuffle_buffer.pop(index)
                 if self.text_column not in row:
-                    raise KeyError(
-                        f"dataset row does not contain text column {self.text_column!r}"
-                    )
+                    raise KeyError(f"dataset row does not contain text column {self.text_column!r}")
                 text = row[self.text_column]
                 if not isinstance(text, str) or not text:
                     continue
                 yielded_document = True
                 token_buffer.append(self.boundary_token_id)
-                token_buffer.extend(
-                    self.tokenizer.encode(text, add_special_tokens=False)
-                )
-                block_size = self.max_length + 1
-                while len(token_buffer) - buffer_start >= block_size:
-                    block_end = buffer_start + block_size
-                    block = torch.tensor(token_buffer[buffer_start:block_end], dtype=torch.long)
-                    buffer_start = block_end
-                    if blocks_to_skip > 0:
-                        blocks_to_skip -= 1
-                    else:
-                        yield block[:-1], block[1:]
-                if buffer_start >= block_size * 16:
-                    token_buffer = token_buffer[buffer_start:]
-                    buffer_start = 0
+                token_buffer.extend(self.tokenizer.encode(text, add_special_tokens=False))
             if not yielded_document:
                 if worker is not None:
                     return
@@ -280,6 +322,28 @@ class StreamingTextDataset(IterableDataset):
                     f"no usable documents found in {self.dataset_name!r} split {self.split!r}"
                 )
             epoch += 1
+            rng = random.Random(self.seed + epoch)
+            base_stream = copy.deepcopy(pristine_stream)
+            if hasattr(base_stream, "set_epoch"):
+                base_stream.set_epoch(epoch)
+
+    def state_dict(self) -> dict:
+        if getattr(self, "_source_checkpointable", True) is False:
+            raise ValueError("stream source does not support checkpointable iterator state")
+        if not hasattr(self, "_iterator_state"):
+            return {"version": 1, "unstarted": True, "start_block": self.start_block}
+        return copy.deepcopy(self._iterator_state)
+
+    def load_state_dict(self, state: dict) -> None:
+        if state.get("version") != 1:
+            raise ValueError("unsupported streaming cursor version")
+        if state.get("unstarted"):
+            self.__dict__.pop("_resume_state", None)
+            self.__dict__.pop("_iterator_state", None)
+            self.start_block = state.get("start_block", 0)
+            return
+        self._resume_state = copy.deepcopy(state)
+        self._iterator_state = copy.deepcopy(state)
 
 
 class TinyShakespeareDataset(IterableDataset):

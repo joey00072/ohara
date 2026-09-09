@@ -17,6 +17,7 @@ from ohara.chat import add_chat_tokens
 from ohara.dataset import StreamingTextDataset
 from ohara.lr_scheduler import CosineScheduler
 from ohara.tokenbin import TokenBinDataset
+from ohara.data_resume import restore_input_state
 from ohara.tracking import BACKENDS as TRACKING_BACKENDS, create_logger
 from ohara.models.llama import Config, Llama
 from ohara.modules.moe import apply_qb_update
@@ -42,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a small Llama on streamed text")
     parser.add_argument("--dataset", default="roneneldan/TinyStories")
     parser.add_argument("--dataset-config", default=None)
+    parser.add_argument("--dataset-revision", default=None, help="Immutable HF dataset commit for exact streaming resume")
     parser.add_argument("--tokenizer", default="EleutherAI/gpt-neo-125m")
     parser.add_argument("--tokenizer-local-files-only", action="store_true")
     parser.add_argument("--token-bytes-cache", default=None)
@@ -61,6 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grad-accum-steps", type=int, default=4)
     parser.add_argument("--max-iters", type=int, default=10_000)
     parser.add_argument("--eval-every", type=int, default=200)
+    parser.add_argument("--print-every", type=int, default=10)
     parser.add_argument("--eval-batches", type=int, default=20)
     parser.add_argument("--save-every", type=int, default=1_000)
     parser.add_argument("--checkpoint-path", default="./ckpt/model.pt")
@@ -206,6 +209,8 @@ def _run(cleanup: ExitStack) -> None:
     args = parse_args()
     if args.hidden_size % args.num_heads != 0:
         raise ValueError("hidden-size must be divisible by num-heads")
+    if args.print_every < 1:
+        raise ValueError("--print-every must be at least 1")
     if args.grad_accum_steps < 1:
         raise ValueError("grad-accum-steps must be at least 1")
     if args.batch_size < 1 or args.max_iters < 1:
@@ -384,6 +389,7 @@ def _run(cleanup: ExitStack) -> None:
         common_dataset_args = {
             "dataset_name": args.dataset,
             "name": args.dataset_config,
+            "revision": args.dataset_revision,
             "tokenizer": tokenizer,
             "max_length": args.seq_len,
             "text_column": args.text_column,
@@ -402,6 +408,20 @@ def _run(cleanup: ExitStack) -> None:
             shuffle=False,
             seed=args.seed,
         )
+    for dataset in (train_ds, val_ds):
+        if hasattr(dataset, "validate_capacity"):
+            dataset.validate_capacity(args.num_workers)
+    train_ds.training_recipe = {
+        key: value for key, value in vars(args).items()
+        if key in {
+            "optimizer", "max_iters", "lr_schedule", "learning_rate", "min_lr",
+            "matrix_learning_rate", "embedding_learning_rate", "unembedding_learning_rate",
+            "scalar_learning_rate", "hypersphere_learning_rate", "weight_decay",
+            "muon_momentum_warmup_iters", "warmup_iters", "warmdown_ratio",
+            "final_lr_fraction", "grad_clip_norm", "precision", "dropout",
+            "weight_tying", "hidden_size", "intermediate_size", "num_layers", "num_heads",
+        } or key.startswith("moe_")
+    }
     loader_args = {
         "batch_size": args.batch_size,
         "num_workers": args.num_workers,
@@ -479,7 +499,7 @@ def _run(cleanup: ExitStack) -> None:
         eval_iters=args.eval_every,
         save_ckpt_iters=args.save_every,
         ignore_index=-1,
-        print_every=1,
+        print_every=args.print_every,
         eval_val_batches=args.eval_batches,
         eval_train_batches=0,
         grad_clip_norm=args.grad_clip_norm or None,
@@ -500,23 +520,17 @@ def _run(cleanup: ExitStack) -> None:
             {"model": model, "optimizer": optimizer},
         )
         start_iter = int(checkpoint["idx"])
-        saved_accumulation = int(
-            checkpoint.get("gradient_accumulation_steps", args.grad_accum_steps)
+        input_states = checkpoint.get("input_states")
+        if input_states is None or len(input_states) != engine.world_size:
+            raise ValueError("checkpoint lacks input states for the current world size; legacy exact resume is unsupported")
+        restore_input_state(
+            train_dl, input_states[engine.global_rank],
+            gradient_accumulation_steps=args.grad_accum_steps,
+            data_rank=engine.data_parallel_rank,
+            data_world_size=engine.data_parallel_world_size,
         )
-        if saved_accumulation != args.grad_accum_steps:
-            raise ValueError(
-                "checkpoint gradient accumulation does not match --grad-accum-steps"
-            )
-        batches_consumed = int(
-            checkpoint.get(
-                "train_batches_consumed",
-                start_iter * args.grad_accum_steps,
-            )
-        )
-        if batches_consumed > 0 and args.num_workers != 0:
-            raise ValueError("exact --resume currently requires --num-workers 0")
-        train_ds.start_block = batches_consumed * args.batch_size
-        trainer.train_batches_consumed = batches_consumed
+        trainer.train_batches_consumed = int(checkpoint["train_batches_consumed"])
+        trainer.train_tokens_seen = int(checkpoint.get("train_tokens_seen", 0))
         rng = checkpoint
         if "rng_states" in checkpoint:
             if len(checkpoint["rng_states"]) != engine.world_size:
@@ -529,8 +543,11 @@ def _run(cleanup: ExitStack) -> None:
         if engine.is_global_zero:
             print(
                 f"resumed checkpoint={args.checkpoint_path} at iter={start_iter}; "
-                f"skipping {train_ds.start_block:,} previously consumed blocks"
+                "restored validated input cursor"
             )
+
+    if args.resume:
+        del checkpoint
 
     parameter_count = sum(parameter.numel() for parameter in raw_model.parameters())
     tokens_per_step = args.batch_size * args.seq_len * args.grad_accum_steps

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import math
 from contextlib import nullcontext
 from collections.abc import Mapping
 from datetime import timedelta
@@ -54,6 +55,32 @@ def _to_reduce_op(reduce_type: ReduceType) -> Any:
     raise ValueError(f"Unsupported reduce type: {reduce_type}")
 
 
+def _checkpoint_to_dtensor(tensor: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Slice a portable CPU checkpoint before allocating its local device shard."""
+    from torch.distributed.tensor import DTensor, Replicate, Shard
+
+    if tensor.shape != target.shape:
+        raise ValueError(f"checkpoint shape {tensor.shape} differs from target {target.shape}")
+    mesh = target.device_mesh
+    coordinate = mesh.get_coordinate()
+    if coordinate is None:
+        raise ValueError("current rank is outside checkpoint target mesh")
+    local = tensor
+    for axis, placement in enumerate(target.placements):
+        if isinstance(placement, Shard):
+            size = local.size(placement.dim)
+            shard_size = (size + mesh.size(axis) - 1) // mesh.size(axis)
+            start = min(coordinate[axis] * shard_size, size)
+            local = local.narrow(placement.dim, start, min(shard_size, size - start))
+        elif not isinstance(placement, Replicate):
+            raise ValueError("checkpoint loading requires Shard or Replicate placements")
+    local = local.contiguous().to(target.device)
+    return DTensor.from_local(
+        local, mesh, target.placements, run_check=False,
+        shape=target.shape, stride=target.stride(),
+    )
+
+
 class OharaEngine:
     def __init__(
         self, config: EngineConfig | None = None, loggers: list[Any] | None = None
@@ -81,6 +108,7 @@ class OharaEngine:
         self._dp_group: Any | None = None
         self._dp_rank: int = 0
         self._dp_world_size: int = 1
+        self._checkpoint_cpu_group: Any | None = None
 
     @staticmethod
     def _build_grad_scaler(enabled: bool):
@@ -172,6 +200,7 @@ class OharaEngine:
         ):
             local_rank = int(os.environ.get("LOCAL_RANK", "0"))
             self._device = torch.device(f"cuda:{local_rank}")
+            torch.cuda.set_device(self._device)
         elif torch.backends.mps.is_available():
             self._device = torch.device("mps")
         else:
@@ -422,19 +451,31 @@ class OharaEngine:
         if self._scaler.is_enabled():
             self._scaler.unscale_(optimizer)
         if self.topology.tp_enabled:
-            from torch.distributed.tensor import DTensor
+            from torch.distributed.tensor import DTensor, Partial, Replicate
 
-            gradients = [parameter.grad for parameter in model.parameters() if parameter.grad is not None]
-            norms = []
+            gradients = [p.grad for p in model.parameters() if p.grad is not None]
+            squared_norm = torch.zeros((), device=self.device, dtype=torch.float32)
             for gradient in gradients:
-                norm = torch.linalg.vector_norm(gradient.detach().float())
-                norms.append(norm.full_tensor() if isinstance(norm, DTensor) else norm)
-            if not norms:
-                return torch.zeros((), device=self.device)
-            total_norm = torch.linalg.vector_norm(torch.stack(norms))
-            coefficient = min(1.0, float(max_norm / (total_norm + 1e-6)))
+                if isinstance(gradient, DTensor):
+                    if any(isinstance(p, Partial) for p in gradient.placements):
+                        raise ValueError("TP clipping requires resolved, non-partial gradients")
+                    local = gradient.to_local()
+                    replicas = math.prod(
+                        gradient.device_mesh.size(axis)
+                        for axis, placement in enumerate(gradient.placements)
+                        if isinstance(placement, Replicate)
+                    )
+                else:
+                    local = gradient
+                    replicas = self.topology.tp
+                squared_norm.add_(local.detach().float().square().sum() / replicas)
+            assert self._tp_mesh is not None
+            dist.all_reduce(squared_norm, group=self._tp_mesh.get_group())
+            total_norm = squared_norm.sqrt()
+            coefficient = (max_norm / (total_norm + 1e-6)).clamp(max=1.0)
             for gradient in gradients:
-                gradient.mul_(coefficient)
+                local = gradient.to_local() if isinstance(gradient, DTensor) else gradient
+                local.mul_(coefficient)
             return total_norm
         return clip_grad_norm_(model.parameters(), max_norm=max_norm)
 
@@ -496,13 +537,42 @@ class OharaEngine:
         return gathered
 
     def save(self, path: str | Path, state: dict[str, Any]) -> None:
+        if "_ohara_engine" in state:
+            raise ValueError("_ohara_engine is reserved for runtime checkpoint state")
+        state = {**state, "_ohara_engine": {
+            "version": 1,
+            "precision": self.config.precision.mode.value,
+            "grad_scaler": self._scaler.state_dict(),
+        }}
         path = Path(path)
         if self.topology.tp_enabled:
-            from torch.distributed.tensor import DTensor
+            from torch.distributed.tensor import DTensor, Replicate, Shard
+
+            # The engine supports pure TP only. Gather CPU shards through gloo,
+            # so checkpoint saving never materializes a full parameter on GPU.
+            if dist.get_backend() != Backend.GLOO.value and self._checkpoint_cpu_group is None:
+                self._checkpoint_cpu_group = dist.new_group(
+                    backend=Backend.GLOO.value,
+                    timeout=timedelta(seconds=self.config.distributed.timeout_seconds),
+                )
 
             def materialize(value):
                 if isinstance(value, DTensor):
-                    return value.full_tensor().cpu()
+                    if len(value.placements) != 1:
+                        raise ValueError("portable TP saving requires a one-dimensional mesh")
+                    placement = value.placements[0]
+                    if isinstance(placement, Replicate):
+                        return value.to_local().detach().cpu() if self.is_global_zero else None
+                    if not isinstance(placement, Shard):
+                        raise ValueError("portable TP saving requires Shard or Replicate placements")
+                    shards = [None] * self.topology.tp if self.is_global_zero else None
+                    dist.gather_object(
+                        value.to_local().detach().cpu(), shards, dst=0,
+                        group=self._checkpoint_cpu_group,
+                    )
+                    return torch.cat(shards, dim=placement.dim) if self.is_global_zero else None
+                if isinstance(value, torch.Tensor):
+                    return value.detach().cpu() if self.is_global_zero else None
                 if isinstance(value, dict):
                     return {key: materialize(item) for key, item in value.items()}
                 if isinstance(value, list):
@@ -511,8 +581,8 @@ class OharaEngine:
                     return tuple(materialize(item) for item in value)
                 return value
 
-            # Every TP rank must participate in the gathers, even though only
-            # rank zero writes. This covers model and optimizer tensors.
+            # Only rank zero assembles full host tensors. Other ranks keep at
+            # most their local CPU shard during each model/optimizer gather.
             state = materialize(state)
         if self.is_global_zero:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -528,9 +598,20 @@ class OharaEngine:
         path = Path(path)
         payload: dict[str, Any] = torch.load(
             path,
-            map_location=self._device,
+            map_location="cpu",
             weights_only=False,
         )
+        runtime_state = payload.get("_ohara_engine")
+        if state is not None and runtime_state is not None:
+            if runtime_state.get("version") != 1:
+                raise ValueError("unsupported engine checkpoint state version")
+            if runtime_state.get("precision") != self.config.precision.mode.value:
+                raise ValueError("checkpoint precision differs from the current engine")
+            scaler_state = runtime_state.get("grad_scaler", {})
+            if bool(scaler_state) != self._scaler.is_enabled():
+                raise ValueError("checkpoint GradScaler mode differs from the current engine")
+            if scaler_state:
+                self._scaler.load_state_dict(scaler_state)
         if state is None:
             return payload
 
@@ -553,27 +634,29 @@ class OharaEngine:
                     return name
                 value = {clean_name(name): tensor for name, tensor in value.items()}
                 if self.topology.tp_enabled:
-                    from torch.distributed.tensor import DTensor, distribute_tensor
+                    from torch.distributed.tensor import DTensor
 
                     expected = obj.state_dict()
                     value = {
-                        name: distribute_tensor(tensor, expected[name].device_mesh, expected[name].placements)
+                        name: _checkpoint_to_dtensor(tensor, expected[name])
                         if isinstance(expected.get(name), DTensor) else tensor
                         for name, tensor in value.items()
                     }
-            if hasattr(obj, "load_state_dict"):
-                obj.load_state_dict(value)
-                if isinstance(obj, Optimizer) and self.topology.tp_enabled:
-                    from torch.distributed.tensor import DTensor, distribute_tensor
+            if isinstance(obj, Optimizer) and self.topology.tp_enabled:
+                from torch.distributed.tensor import DTensor
 
-                    for parameter, optimizer_state in obj.state.items():
+                # Shard moments before load_state_dict casts them to each
+                # parameter's GPU. Casting full moments first defeats TP memory savings.
+                value = {**value, "state": {key: dict(items) for key, items in value["state"].items()}}
+                for saved_group, live_group in zip(value["param_groups"], obj.param_groups):
+                    for saved_id, parameter in zip(saved_group["params"], live_group["params"]):
                         if not isinstance(parameter, DTensor):
                             continue
-                        for name, tensor in optimizer_state.items():
+                        for name, tensor in value["state"].get(saved_id, {}).items():
                             if isinstance(tensor, torch.Tensor) and tensor.shape == parameter.shape:
-                                optimizer_state[name] = distribute_tensor(
-                                    tensor, parameter.device_mesh, parameter.placements
-                                )
+                                value["state"][saved_id][name] = _checkpoint_to_dtensor(tensor, parameter)
+            if hasattr(obj, "load_state_dict"):
+                obj.load_state_dict(value)
             else:
                 state[key] = value
         return payload

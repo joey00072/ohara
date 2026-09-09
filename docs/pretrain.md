@@ -41,11 +41,26 @@ uv run torchrun --nproc-per-node 2 examples/train_llama_engine.py
 uv run torchrun --nproc-per-node 2 examples/train_llama_engine.py --tp 2
 ```
 
-Interrupted run? `--resume` picks the checkpoint back up, including the position in the data stream:
+For resumable runs, use `--num-workers 0` from the start. Remote streaming also
+needs `--dataset-revision` set to the dataset's immutable 40-character commit;
+local text/JSON/Parquet and token-bin inputs are fingerprinted automatically.
+Then `--resume` restores model, optimizer, precision state, RNG, and the saved
+input cursor without tokenizing the consumed history again:
 
 ```bash
-uv run python examples/train_llama_engine.py --resume --num-workers 0
+# Example: resume a run started with these same local-corpus arguments.
+uv run python examples/train_llama_engine.py --dataset ./data/my-corpus --num-workers 0 --resume
 ```
+
+Resume validates batch size, sequence length, seed, data identity, DP layout,
+and the training recipe. Old checkpoints without an input contract and runs
+started with worker prefetch cannot provide exact resume and are rejected by
+`--resume`; their model weights remain loadable. Changing worker count to zero
+only after interruption does not recover the missing worker state.
+
+`--print-every` defaults to 10. Loss/timing scalars are read at reporting,
+evaluation, and checkpoint intervals; use `--print-every 1` for per-step output.
+MFU accounts for every participating GPU, including tensor-parallel ranks.
 
 To watch it in W&B, run `uv run wandb login` first; `--logger trackio` logs locally without an account. It looks something like this:
 

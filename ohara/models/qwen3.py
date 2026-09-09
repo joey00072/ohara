@@ -51,6 +51,25 @@ class Qwen3Config:
             "layer_types", []
         ):
             raise ValueError("sliding-window Qwen3 checkpoints are not supported")
+        rope_theta = payload.get("rope_theta", 1_000_000.0)
+        # HF uses rope_scaling in older configs and rope_parameters in newer
+        # ones. Neither may silently change a scaled checkpoint into plain RoPE.
+        for key in ("rope_scaling", "rope_parameters"):
+            rope = payload.get(key)
+            if rope is None:
+                continue
+            if not isinstance(rope, dict):
+                raise ValueError(f"Qwen3 {key} must be a mapping")
+            allowed = {"rope_type", "type", "rope_theta"}
+            if (
+                any(rope.get(name, "default") != "default" for name in ("rope_type", "type"))
+                or set(rope) - allowed
+            ):
+                raise ValueError(
+                    f"scaled or per-layer Qwen3 RoPE in {key} is not supported; "
+                    "only default RoPE is implemented"
+                )
+            rope_theta = rope.get("rope_theta", rope_theta)
         return cls(
             vocab_size=int(payload["vocab_size"]),
             max_sequence_length=int(payload["max_position_embeddings"]),
@@ -63,7 +82,7 @@ class Qwen3Config:
                 payload.get("head_dim", payload["hidden_size"] // payload["num_attention_heads"])
             ),
             rms_norm_eps=float(payload.get("rms_norm_eps", 1e-6)),
-            rope_theta=float(payload.get("rope_theta", 1_000_000.0)),
+            rope_theta=float(rope_theta),
             attention_dropout=float(payload.get("attention_dropout", 0.0)),
             attention_bias=bool(payload.get("attention_bias", False)),
             weight_tying=bool(payload.get("tie_word_embeddings", True)),

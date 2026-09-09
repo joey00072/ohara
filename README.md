@@ -1,274 +1,57 @@
 # Ohara
 
-This is my collection of implementations of LLMs, papers, and things I have in my mind.
-I had a lot of fragmented code implementing different models — this is an attempt to keep
-everything in one place.
-
-This lib is for running/copying code for experiments.
+My collection of PyTorch implementations of language models and research papers.
+It includes dense and MoE models, training and fine-tuning scripts, and a browser
+chat UI. Use it to run experiments or copy pieces into your own projects.
 
 ## Install
+
+Requires Python 3.11+ and `uv`.
 
 ```bash
 git clone https://github.com/joey00072/ohara.git
 cd ohara
 uv sync
-uv run python examples/train_llama_engine.py
 ```
 
-## What is where
+## Quick start
 
-| Path | What is in it |
-| --- | --- |
-| [`ohara/models/`](./ohara/models/) | Standalone model implementations (llama, qwen3, transformer, gpt, phi, gemma, mamba, roformer, retnet) |
-| [`ohara/modules/`](./ohara/modules/) | Shared blocks: attention, MLP/GLU variants, MoE, norms, KV cache |
-| [`ohara/embeddings_pos/`](./ohara/embeddings_pos/) | Position embeddings: rotary, alibi, xpos |
-| [`ohara/runtime/`](./ohara/runtime/) | `OharaEngine`: device placement, precision, DDP, tensor parallel |
-| [`ohara/trainer.py`](./ohara/trainer.py) | The training loop (eval, checkpoints, MFU, bpb) |
-| [`ohara/optimizer.py`](./ohara/optimizer.py) | AdamW, Muon, and the constant-norm AdamH / MuonH |
-| [`ohara/scaling.py`](./ohara/scaling.py) | iso-FLOP sweep planning and curve fitting |
-| [`ohara/chat.py`](./ohara/chat.py) | Conversation special tokens, rendering, assistant-only loss masks |
-| [`ohara/sft.py`](./ohara/sft.py) | SFT conversation sources and best-fit packing |
-| [`ohara/chat_engine.py`](./ohara/chat_engine.py) | Streaming chat inference over a finetuned checkpoint |
-| [`ohara/webui/`](./ohara/webui/) | Browser chat UI (standard library only, no web framework) |
-| [`examples/`](./examples/) | Runnable entrypoints: pretokenize, train, eval, scaling sweeps |
-| [`experiments/`](./experiments/) | Frozen per-paper snapshots. Copy a folder and hack on it |
-| [`docs/notes/`](./docs/notes/) | Notes, mostly copied from my obsidian vault |
-
-Most-used bits are re-exported at the top level:
-
-```python
-from ohara import Llama, Config, Trainer, OharaEngine
-```
-
-## Train a chat model and talk to it
-
-The nanochat pipeline — pretrain, finetune, chat — on ohara's stack. One script,
-one dial (`DEPTH`); width, batch size, learning rates, weight decay and the token
-horizon are all derived from it by [`ohara/scaling.py`](./ohara/scaling.py).
+Try a pretrained chat model:
 
 ```bash
-DEPTH=12 bash runs/speedrun.sh          # data -> pretrain -> SFT -> web UI
-```
-
-It takes hours, so run it detached: `screen -L -Logfile runs/speedrun.log -S speedrun bash runs/speedrun.sh`.
-The stages are ordinary scripts, so you can also run them one at a time:
-
-```bash
-# 1. pretrain on raw text, reserving the conversation tokens in the vocabulary
-uv run python examples/train_llama_engine.py --dataset ./data/scaling_corpus --chat-tokens ...
-
-# 2. finetune on SmolTalk + MMLU + GSM8K, supervising only assistant tokens
-uv run python examples/train_sft.py --pretrained-checkpoint ./ckpt/base_d12.pt
-
-# 3. chat with it in the browser
-uv run python examples/chat_web.py --checkpoint ./ckpt/sft_d12.pt
-
-# Or load a standard config.json + model.safetensors repo directly from the Hub
 uv run python examples/chat_web.py \
   --checkpoint joey00072/ohara-moe-0.9B-a91M-chat-d12
 ```
 
-Models also support the usual directory workflow directly:
+Open <http://localhost:8080>. The model downloads from Hugging Face on first use.
 
-```python
-from ohara import Llama
-
-model = Llama.from_pretrained("joey00072/ohara-moe-0.9B-a91M-chat-d12")
-model.save_pretrained("./my-model")
-```
-
-Then open <http://localhost:8080>. When the model lives on a remote box, forward the
-port instead of binding it publicly: `ssh -N -L 8080:localhost:8080 <user>@<host>`.
-
-The web UI streams tokens over server-sent events and exposes temperature, top-p,
-top-k and a token budget. It is built on `http.server`, so serving the model adds
-no dependencies to a training box.
-
-**Conversation format.** Messages are wrapped in the same special tokens nanochat
-uses (`<|user_start|>`, `<|assistant_start|>`, and a `<|python_start|>` /
-`<|output_start|>` pair for tool calls). Loss is taken only on tokens the assistant
-should *produce* — including the closing `<|assistant_end|>`, so the model learns to
-stop — and never on user turns or on interpreter output the model only reads back:
-
-```python
-from ohara import load_chat_tokenizer, render_conversation
-
-tokenizer = load_chat_tokenizer(hf_name="EleutherAI/gpt-neo-125m")
-ids, mask = render_conversation(tokenizer, [
-    {"role": "user", "content": "why is the sky blue?"},
-    {"role": "assistant", "content": "rayleigh scattering."},
-])  # mask[i] == 1 marks a supervised token
-```
-
-SFT rows are packed best-fit from a lookahead buffer: each row starts at a
-conversation boundary, and leftover space is padded rather than filled with half a
-conversation, so no conversation is ever split across rows.
-
-## ClimbMix scaling laws
-
-A 26-run nanochat-style iso-FLOP sweep on NanoChat's ClimbMix corpus: depths 2–8 (7.0M–53.0M
-effective parameters) across four compute budgets (1e16 – 8e16 FLOPs), 5.86B training tokens
-total on 2x A100-80GB. All four budgets produced interior iso-FLOP minima.
-
-![ClimbMix iso-FLOP scaling curves](./docs/src/climbmix_scaling_laws.svg)
-
-| Budget | Optimal params | Optimal tokens | Tokens/param | val bpb |
-| --- | --- | --- | --- | --- |
-| 1e16 | 8.6M | 159M | 18.5 | 1.3296 |
-| 2e16 | 13.9M | 190M | 13.7 | 1.2052 |
-| 4e16 | 18.5M | 281M | 15.2 | 1.1321 |
-| 8e16 | 28.0M | 362M | 12.9 | 1.0810 |
-
-Fitted compute exponents, `N_opt ~ C^a` and `D_opt ~ C^b`:
-
-| Fit | a (params) | b (tokens) |
-| --- | --- | --- |
-| All sampled depths (what `scaling_laws.py analyze` reports) | 0.552 | 0.412 |
-| Local window, +/-2 depths around each curve's own minimum | 0.606 | 0.354 |
-| Local window, +/-3 depths | 0.598 | 0.358 |
-
-**Read the exponents as `a ~ 0.55-0.61`, not as three significant figures.** A single quadratic
-fitted across the whole depth grid is not a good model of an iso-FLOP curve: the deep end
-(d7-d8) is severely undertrained and rises steeply, which drags the fitted vertex left. Varying
-the depth window moves `a` over 0.32-0.78 while `r^2` stays above 0.98 in every case, so **`r^2`
-here is not evidence that the exponent is pinned down.** Restricting each curve to a consistent
-window around its own minimum is the more defensible reading and is stable at `a ~ 0.60`.
-The per-budget optima are much better determined than the exponent (+/-11% at 8e16, +/-14% at
-2e16, +/-37% at 1e16, whose minimum sits at the small-model edge of the grid).
-
-Against the TinyStories pilot below (`a = 0.656`, `b = 0.298`), ClimbMix is consistently more
-token-hungry: 13-18 tokens per parameter at the optimum versus 7-11.6, and a larger token
-exponent under every fitting method tried. That direction is robust even though the precise
-exponent is not.
-
-Reproduce with `examples/prepare_scaling_data.py` (stages ClimbMix shards by default) then
-`examples/scaling_laws.py run` / `analyze`; raw results are in
-the local, gitignored `scaling_results/climbmix_full/` directory (not shipped in this repository).
-
-## TinyStories scaling pilot
-
-A 15-run sweep across 13M–49M parameter models produced interior minima at all three compute
-budgets, with exponents 0.656 for optimal model size and 0.298 for training tokens. This
-validated the workflow on one A100; the values are specific to TinyStories.
-
-![TinyStories iso-FLOP scaling curves](./docs/src/tinystories_scaling_laws.svg)
-
-llama-20M trained on tinystories for 1.7B tokens.
-
-Inference on phi-2:
+To train your own small Llama on TinyStories:
 
 ```bash
-## this will download the model from hf and run it in torch.float16
-uv run python examples/phi_inference.py --prompt "Once upon a time"
-
-## look at the files and you can implement the rest of things easily,
-## I believe in you 😉
+uv run python examples/train_llama_engine.py --chat-tokens
 ```
 
-See [docs/pretrain.md](./docs/pretrain.md) for the pretraining walkthrough.
+This streams the dataset and saves checkpoints to `./ckpt/model.pt`.
+Then fine-tune for chat and serve the result:
 
-### The lib to maximize FAFO
+```bash
+uv run python examples/train_sft.py --pretrained-checkpoint ./ckpt/model.pt
+uv run python examples/chat_web.py --checkpoint ./ckpt/sft.pt
+```
 
-Papers and theory are on one side but `code is truth`; in the end what matters is the things that
-work (run). If you look into [docs](./docs/) you can find some written things, mostly copied from my
-obsidian notes.
+Training uses the GPU when available. See the [pretraining guide](./docs/pretrain.md)
+for your own data, multiple GPUs, and resuming runs. Each script accepts `--help`.
 
-### WORK IN PROGRESS (always)
+## Explore
 
-### papers / models
-
-- [Muon](./ohara/optimizer.py) | [modded-nanogpt](https://github.com/KellerJordan/Muon)
-- [MuonH & AdamH](./ohara/optimizer.py) — constant-norm training, no weight decay | [paper](https://arxiv.org/abs/2603.28743)
-- [TokenFormer](./experiments/tokenformer/pattention.py)
-- [MLA](./experiments/MLA/mla.py)
-- [Griffin & Hawk](./experiments/griffin_and_hawk/griffin_and_hawk.py)
-- [Galore](./experiments/galore/galore.py)
-- [Q-Sparse](./experiments/q_sparse/q_sparse.py)
-- [Bitnet](./experiments/bitnet/bitnet.py) | [md](./experiments/bitnet/bitnet.md)
-- [RetNet](./ohara/models/retnet.py)
-- [Mixture of Depth](./experiments/mixture_of_depth/mixture_of_depth.py) | [md](./experiments/mixture_of_depth/md/building_mixture_of_depth.md)
-- [Alibi Embeddings](./ohara/embeddings_pos/alibi.py) | [md](./docs/notes/alibi/alibi.md)
-- [Rotary Embeddings](./ohara/embeddings_pos/rotary.py) | [md](./docs/notes/rope/RoFormer.md)
-- [XPOS](./ohara/embeddings_pos/xpos.py)
-- [LoRA](./ohara/adaptor/lora.py) | [md](./docs/notes/lora/lora.md)
-- [DoRA](./ohara/adaptor/dora.py) | [paper](https://arxiv.org/abs/2402.09353)
-- [LLAMA](./ohara/models/llama.py) | [md](./docs/notes/llama/llama.md)
-- [Mamba](./ohara/models/mamba.py)
-- [GPT](./ohara/models/gpt.py) | [md](./docs/notes/gpt/gpt.md)
-- [GLU variants](./ohara/modules/mlp.py) | [md](<./docs/notes/glu/GLU Variants Improve Transformer.md>)
-
-### More things are not in this repo
-
-1. [TinyLora](https://github.com/joey00072/TinyLora)
-2. [Neural Style Transfer in Pytorch](https://github.com/joey00072/Neural-Style-Transfer-in-Pytorch)
+- [Models](./ohara/models/) — Llama, Qwen3, Mamba, RetNet, and others.
+- [Examples](./examples/) — training, evaluation, export, and scaling sweeps.
+- [Paper notes](./docs/notes/) and [experiments](./experiments/).
+- [Speedrun](./runs/speedrun.sh) — the full data → pretrain → fine-tune → chat pipeline.
 
 ## Development
 
 ```bash
-uv run pytest          # tests
-uv run ruff check .    # lint (experiments/ is excluded on purpose)
+uv run pytest
+uv run ruff check .
 ```
-
-## TODO (A lot)
-
-- [ ] make inferencer class better
-- [ ] finetuning in a structured way (I just rawdog code when I need it)
-- [ ] KV cache for gemma
-- [ ] recurrent + chunked forms for retnet
-- [ ] more/faster MoE variants
-- [ ] jagged cosine LR schedule for ReLoRA
-
-## Fund My Caffeine Addiction
-
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/R6R8KQTZ5)
-
-### contribution guidelines
-
-- be nice,
-- code explanations || docs are appreciated
-- memes on pr recommend
-
-## Evaluation and export
-
-```bash
-uv run python examples/core_eval.py --checkpoint ckpt/base_d12.pt
-uv run python examples/evaluate_perplexity.py --model ./my-qwen3 --backend ohara
-uv run python examples/export_safetensors.py --checkpoint ckpt/base_d12.pt --out export/base --dtype bfloat16
-```
-
-Ohara Llama exports use an Ohara-native config and tensor names in the standard
-safetensors directory layout. Load them with `ohara.Llama.from_pretrained`;
-they are not interchangeable with Hugging Face Llama weights. Qwen3 supports
-its Hugging Face configuration and tensor naming convention.
-
-## Runtime support and reproducibility
-
-The engine supports single-process execution, pure DDP, and pure tensor
-parallelism. Combined TP+DDP and pipeline/context/expert parallelism are rejected
-until those integrations are implemented and validated. Tensor parallel attention
-requires both query and KV head counts to be divisible by the TP degree.
-Use AdamW with FP32 or BF16 for TP; hyperspherical/Muon optimizers and FP16
-GradScaler are rejected for that mode.
-
-AdamH and MuonH require nonzero initial matrix norms. The optimizer builders
-reject zero-initialized residual branches rather than silently freezing them;
-use standard initialization for dense hyperspherical runs. Grouped MoE's
-zero-initialized output projections require an additive optimizer unless they
-are explicitly initialized to a nonzero scale.
-
-`pyproject.toml` deliberately pins PyTorch 2.10.0 for the project's CUDA 12
-baseline, independent of any global Python environment. Use `uv sync` to obtain
-that baseline. Lightweight model summaries using Lightning are optional:
-`uv sync --extra summary`. Ordinary training and inference do not import it.
-
-Scaling analysis uses quadratic iso-FLOP interpolation and OLS in log-log space.
-It does not implement Chinchilla's joint parametric fit, bootstrap confidence
-intervals, or uncertainty estimates; do not interpret fitted exponents as precise
-measurements. Raw grid optima are excluded from the interpolated power-law fit.
-
-Gemma is a research implementation with no Hugging Face checkpoint loader or
-KV cache; use Llama or Qwen3 for the supported chat and export workflows.
-
-With tied embeddings, hybrid optimizers place the shared matrix in the embedding
-group and use its learning rate. For nanochat-style untied optimizer comparisons,
-pass `--no-weight-tying`; tied-weight learning rates are a separate recipe.

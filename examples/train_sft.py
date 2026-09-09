@@ -100,6 +100,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-every", type=int, default=100)
     parser.add_argument("--eval-batches", type=int, default=20)
     parser.add_argument("--save-every", type=int, default=200)
+    parser.add_argument("--print-every", type=int, default=10)
     # Optimization
     parser.add_argument("--optimizer", choices=("muon", "adamw"), default="muon")
     parser.add_argument("--matrix-learning-rate", type=float, default=0.02)
@@ -231,6 +232,8 @@ def _run(cleanup: ExitStack) -> None:
         raise ValueError("init-lr-frac must be in (0, 1]")
     if args.weight_decay < 0 or args.grad_clip_norm < 0:
         raise ValueError("weight-decay and grad-clip-norm cannot be negative")
+    if args.print_every < 1:
+        raise ValueError("print-every must be at least 1")
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -409,7 +412,7 @@ def _run(cleanup: ExitStack) -> None:
         eval_iters=args.eval_every,
         save_ckpt_iters=args.save_every,
         ignore_index=-1,
-        print_every=10,
+        print_every=args.print_every,
         eval_val_batches=args.eval_batches,
         grad_clip_norm=args.grad_clip_norm or None,
         checkpoint_path=args.checkpoint_path,

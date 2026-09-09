@@ -1,6 +1,8 @@
 import unittest
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
@@ -169,6 +171,7 @@ class TrainerTests(unittest.TestCase):
         )
         trainer.train()
         self.assertEqual(trainer.train_dataloader.idx, 2)
+        self.assertEqual(trainer.train_tokens_seen, 64)
 
     def test_train_scales_group_learning_rates_and_muon_hyperparameters(self):
         trainer = self._build_trainer(max_iters=1, eval_iters=0)
@@ -245,6 +248,91 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual(trainer.timed_steps, 0)
         trainer._compute_perf_metrics(18, 2)
         self.assertEqual(trainer.total_training_time_s, 2)
+
+    def test_peak_lookup_distinguishes_l40s(self):
+        trainer = self._build_trainer(max_iters=1, eval_iters=0)
+        trainer.engine = SimpleNamespace(device=torch.device("cuda:0"))
+        with patch("torch.cuda.is_available", return_value=True), patch(
+            "torch.cuda.get_device_name", return_value="NVIDIA L40S"
+        ):
+            self.assertEqual(trainer._infer_peak_flops(), 3.62e14)
+
+    def test_mfu_accounts_for_all_tp_devices_and_measured_window(self):
+        trainer = self._build_trainer(max_iters=20, eval_iters=0)
+        trainer.engine = SimpleNamespace(world_size=4)
+        trainer.world_size = 1
+        trainer.peak_flops = 100
+        trainer.flops_per_token = 1
+        trainer.timing_warmup_steps = 0
+        speed, mfu, eta, average = trainer._compute_perf_metrics(
+            3, 2, steps=3, tokens=600,
+        )
+        self.assertEqual(speed, 100)
+        self.assertEqual(mfu, 25)
+        self.assertEqual(eta, 34)
+        self.assertEqual(average, 2)
+        self.assertEqual(trainer.total_training_time_s, 6)
+        self.assertEqual(trainer.timed_steps, 3)
+
+    def test_logging_interval_preserves_updates_without_device_wide_waits(self):
+        frequent = self._build_trainer(max_iters=5, eval_iters=0)
+        infrequent = self._build_trainer(max_iters=5, eval_iters=0)
+        frequent.micro_batch = infrequent.micro_batch = 2
+        infrequent.print_every = 100
+        frequent.train()
+        with patch.object(infrequent.engine, "synchronize") as synchronize:
+            infrequent.train()
+        synchronize.assert_not_called()
+        torch.testing.assert_close(frequent.model.scale, infrequent.model.scale)
+        self.assertEqual(frequent.train_tokens_seen, infrequent.train_tokens_seen)
+        for key in ("exp_avg", "exp_avg_sq", "step"):
+            torch.testing.assert_close(
+                frequent.optimizer.state[frequent.model.scale][key],
+                infrequent.optimizer.state[infrequent.model.scale][key],
+            )
+
+    def test_nonfinite_unlogged_step_stops_before_optimizer(self):
+        trainer = self._build_trainer(max_iters=5, eval_iters=0)
+        trainer.print_every = 100
+        trainer.model.scale.data.fill_(float("nan"))
+        with patch.object(trainer.engine, "optimizer_step") as step:
+            with self.assertRaisesRegex(RuntimeError, "Non-finite"):
+                trainer.train()
+        step.assert_not_called()
+        trainer.close()
+
+    def test_evaluation_preserves_stateful_training_cursor(self):
+        class StatefulEcho(EchoDataset):
+            def __init__(self):
+                super().__init__()
+                self.cursor = 0
+
+            def state_dict(self):
+                return {"cursor": self.cursor}
+
+            def load_state_dict(self, state):
+                self.cursor = state["cursor"]
+
+            def __iter__(self):
+                position = self.cursor
+                while True:
+                    value = torch.full((8,), position % 16, dtype=torch.long)
+                    position += 1
+                    self.cursor = position
+                    yield value, value.clone()
+
+        from ohara.utils import BetterCycle
+
+        trainer = self._build_trainer(max_iters=1, eval_iters=0)
+        dataset = StatefulEcho()
+        trainer.train_dataloader = BetterCycle(DataLoader(dataset, batch_size=2))
+        next(trainer.train_dataloader)
+        self.assertEqual(dataset.cursor, 2)
+        trainer.evaluate(trainer.train_dataloader, 2)
+        self.assertEqual(dataset.cursor, 2)
+        inputs, _ = next(trainer.train_dataloader)
+        self.assertEqual(inputs[:, 0].tolist(), [2, 3])
+        trainer.close()
 
 
 if __name__ == "__main__":
