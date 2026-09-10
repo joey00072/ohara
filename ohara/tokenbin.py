@@ -26,6 +26,8 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.utils.data import IterableDataset, get_worker_info
+
+from ohara.data_parallel import DataParallelIterableDataset
 from transformers import PreTrainedTokenizerBase
 
 
@@ -174,7 +176,7 @@ def read_token_bin_metadata(bin_path: str | Path) -> dict[str, object]:
     return json.loads(sidecar.read_text(encoding="utf-8"))
 
 
-class TokenBinDataset(IterableDataset):
+class TokenBinDataset(DataParallelIterableDataset, IterableDataset):
     """Yield ``(inputs, targets)`` blocks from a memory-mapped token array.
 
     Blocks are handed out round-robin across the flattened (rank, worker) grid,
@@ -274,10 +276,13 @@ class TokenBinDataset(IterableDataset):
     def load_state_dict(self, state: dict) -> None:
         if state.get("version") != 1 or state["blocks_consumed"] < 0:
             raise ValueError("invalid token-bin cursor")
+        if state["blocks_consumed"] > 0:
+            self._ohara_iterator_started = True
         self.start_block = int(state["blocks_consumed"])
         self._blocks_consumed = self.start_block
 
     def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+        self._mark_iterator_started()
         tokens = self._memmap()
         shard_id, num_shards = self._shard()
         if self.num_blocks < num_shards:

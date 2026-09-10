@@ -214,6 +214,39 @@ class QuantileBalancingTests(unittest.TestCase):
         self.assertEqual(counts.shape, (1, 8))
         self.assertEqual(int(counts.sum()), 2 * 10 * 2)
 
+    def test_balancing_buffers_keep_exact_fp32_values_across_casts(self):
+        moe = build()
+        values = torch.tensor([0.1001, -0.2002, 0.3003, -0.4004, 0.5005, -0.6006, 0.7007, -0.8008])
+        with torch.no_grad():
+            moe.router_bias.copy_(values)
+            moe.qb_beta_sum.copy_(values * 3)
+            moe.qb_beta_count.fill_(257)
+
+        moe.bfloat16().half()
+
+        self.assertEqual(moe.w_gate.dtype, torch.float16)
+        for name in ("router_bias", "qb_beta_sum", "qb_beta_count"):
+            self.assertEqual(getattr(moe, name).dtype, torch.float32)
+        self.assertTrue(torch.equal(moe.router_bias, values))
+        self.assertTrue(torch.equal(moe.qb_beta_sum, values * 3))
+        self.assertEqual(moe.qb_beta_count.item(), 257)
+
+    def test_assign_load_keeps_router_bias_fp32(self):
+        moe = build().bfloat16()
+        state = moe.state_dict()
+        state["router_bias"] = torch.arange(8, dtype=torch.bfloat16)
+        moe.load_state_dict(state, assign=True)
+        self.assertEqual(moe.router_bias.dtype, torch.float32)
+
+    def test_to_empty_materializes_fp32_balancing_buffers(self):
+        with torch.device("meta"):
+            moe = build()
+        moe.to_empty(device="cpu")
+        for name in ("router_bias", "qb_beta_sum", "qb_beta_count"):
+            buffer = getattr(moe, name)
+            self.assertEqual(buffer.device.type, "cpu")
+            self.assertEqual(buffer.dtype, torch.float32)
+
 
 class ConfigurationTests(unittest.TestCase):
     def test_rejects_top_k_above_expert_count(self):

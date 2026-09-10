@@ -17,6 +17,7 @@ import copy
 from transformers import PreTrainedTokenizerBase
 
 from ohara.tokenizer import load_tokenizer, TokenizerLoadResult
+from ohara.data_parallel import DataParallelIterableDataset
 
 PATH = Path("./data")
 # "google/byt5-small"
@@ -53,7 +54,7 @@ def get_tokenizer(
     return _resolve_tokenizer(tokenizer, cache_dir=cache_dir)
 
 
-class PreTokenizedDataset(IterableDataset):
+class PreTokenizedDataset(DataParallelIterableDataset, IterableDataset):
     def __init__(
         self,
         dataset_name: str = "JeanKaddour/minipile",
@@ -65,7 +66,15 @@ class PreTokenizedDataset(IterableDataset):
         max_length: int = 2048,
         hf=False,
         cache_dir=None,
+        data_rank: int | None = None,
+        data_world_size: int | None = None,
     ):
+        if (data_rank is None) != (data_world_size is None):
+            raise ValueError("data_rank and data_world_size must be provided together")
+        if data_world_size is not None and data_world_size < 1:
+            raise ValueError("data_world_size must be at least 1")
+        if data_rank is not None and not 0 <= data_rank < data_world_size:
+            raise ValueError("data_rank must be between 0 and data_world_size - 1")
         self.tokenizer = _resolve_tokenizer(tokenizer, cache_dir=cache_dir)
         self.length = len(self.tokenizer)
         self.PAD = self.tokenizer.pad_token_id
@@ -78,6 +87,8 @@ class PreTokenizedDataset(IterableDataset):
         self.max_length = max_length + 1
         self.cache_dir = cache_dir
         self.dataset_name = dataset_name
+        self.data_rank = data_rank
+        self.data_world_size = data_world_size
 
         fpath = path
         if path == PATH:
@@ -93,11 +104,16 @@ class PreTokenizedDataset(IterableDataset):
             raise ValueError(f"dataset split is empty: {fpath}")
 
     def __iter__(self) -> torch.Tensor:
+        self._mark_iterator_started()
         worker = get_worker_info()
         worker_id = worker.id if worker is not None else 0
         num_workers = worker.num_workers if worker is not None else 1
-        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
-        world_size = dist.get_world_size() if dist.is_available() and dist.is_initialized() else 1
+        rank = getattr(self, "data_rank", None)
+        world_size = getattr(self, "data_world_size", None)
+        if rank is None or world_size is None:
+            distributed = dist.is_available() and dist.is_initialized()
+            rank = dist.get_rank() if distributed else 0
+            world_size = dist.get_world_size() if distributed else 1
         shard_id = rank * num_workers + worker_id
         num_shards = world_size * num_workers
 
@@ -115,7 +131,7 @@ class PreTokenizedDataset(IterableDataset):
                 yield x[:-1], targets
 
 
-class StreamingTextDataset(IterableDataset):
+class StreamingTextDataset(DataParallelIterableDataset, IterableDataset):
     """Tokenize and greedily pack a streaming Hugging Face text dataset."""
 
     def __init__(
@@ -227,6 +243,7 @@ class StreamingTextDataset(IterableDataset):
         return load_dataset(**kwargs)
 
     def __iter__(self):
+        self._mark_iterator_started()
         worker = get_worker_info()
         worker_id = worker.id if worker is not None else 0
         num_workers = worker.num_workers if worker is not None else 1
@@ -340,13 +357,15 @@ class StreamingTextDataset(IterableDataset):
         if state.get("unstarted"):
             self.__dict__.pop("_resume_state", None)
             self.__dict__.pop("_iterator_state", None)
+            self.__dict__.pop("_ohara_iterator_started", None)
             self.start_block = state.get("start_block", 0)
             return
+        self._ohara_iterator_started = True
         self._resume_state = copy.deepcopy(state)
         self._iterator_state = copy.deepcopy(state)
 
 
-class TinyShakespeareDataset(IterableDataset):
+class TinyShakespeareDataset(DataParallelIterableDataset, IterableDataset):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizerBase | str | None = None,
@@ -355,8 +374,18 @@ class TinyShakespeareDataset(IterableDataset):
         max_length: int = 512,
         cache_dir=None,
         seed: int = 42,
+        data_rank: int | None = None,
+        data_world_size: int | None = None,
     ):
+        if (data_rank is None) != (data_world_size is None):
+            raise ValueError("data_rank and data_world_size must be provided together")
+        if data_world_size is not None and data_world_size < 1:
+            raise ValueError("data_world_size must be at least 1")
+        if data_rank is not None and not 0 <= data_rank < data_world_size:
+            raise ValueError("data_rank must be between 0 and data_world_size - 1")
         self.seed = seed
+        self.data_rank = data_rank
+        self.data_world_size = data_world_size
         self.tokenizer = _resolve_tokenizer(tokenizer, cache_dir=cache_dir)
         self.length = len(self.tokenizer)
         self.PAD = self.tokenizer.pad_token_id
@@ -380,7 +409,15 @@ class TinyShakespeareDataset(IterableDataset):
         self.length = len(self.data)
 
     def __iter__(self) -> torch.Tensor:
-        rng = random.Random(self.seed)
+        self._mark_iterator_started()
+        rank = self.data_rank
+        if rank is None:
+            distributed = dist.is_available() and dist.is_initialized()
+            rank = dist.get_rank() if distributed else 0
+        worker = get_worker_info()
+        worker_id = worker.id if worker is not None else 0
+        num_workers = worker.num_workers if worker is not None else 1
+        rng = random.Random(self.seed + rank * num_workers + worker_id)
         while True:
             idx = rng.randint(0, (self.length - self.max_length - 1))
             x = self.data[idx : idx + self.max_length + 1]

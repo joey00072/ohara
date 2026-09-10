@@ -240,6 +240,43 @@ def test_quantile_balancing_is_a_noop_until_the_update_is_applied() -> None:
     assert moe.qb_beta_count.item() == 0  # statistics consumed
 
 
+def test_moe_balancing_buffers_keep_exact_fp32_values_across_casts() -> None:
+    moe = MoE(dim=16, hidden_dim=32, num_experts=4, num_experts_per_tok=2)
+    values = torch.tensor([0.1001, -0.2002, 0.3003, -0.4004])
+    with torch.no_grad():
+        moe.router_bias.copy_(values)
+        moe.qb_beta_sum.copy_(values * 3)
+        moe.qb_beta_count.fill_(257)
+
+    moe.bfloat16().half()
+
+    assert moe.gate.weight.dtype == torch.float16
+    assert moe.router_bias.dtype == torch.float32
+    assert moe.qb_beta_sum.dtype == torch.float32
+    assert moe.qb_beta_count.dtype == torch.float32
+    assert torch.equal(moe.router_bias, values)
+    assert torch.equal(moe.qb_beta_sum, values * 3)
+    assert moe.qb_beta_count.item() == 257
+
+
+def test_moe_assign_load_keeps_router_bias_fp32() -> None:
+    moe = MoE(dim=16, hidden_dim=32, num_experts=4, num_experts_per_tok=2).bfloat16()
+    state = moe.state_dict()
+    state["router_bias"] = torch.tensor([1, 2, 3, 4], dtype=torch.bfloat16)
+    moe.load_state_dict(state, assign=True)
+    assert moe.router_bias.dtype == torch.float32
+
+
+def test_moe_to_empty_materializes_fp32_balancing_buffers() -> None:
+    with torch.device("meta"):
+        moe = MoE(dim=16, hidden_dim=32, num_experts=4, num_experts_per_tok=2)
+    moe.to_empty(device="cpu")
+    for name in ("router_bias", "qb_beta_sum", "qb_beta_count"):
+        buffer = getattr(moe, name)
+        assert buffer.device.type == "cpu"
+        assert buffer.dtype == torch.float32
+
+
 def test_quantile_balancing_reduces_load_imbalance() -> None:
     torch.manual_seed(0)
     moe = MoE(dim=16, hidden_dim=32, num_experts=8, num_experts_per_tok=2)

@@ -145,6 +145,15 @@ def parse_args() -> argparse.Namespace:
         default=True,
     )
     parser.add_argument(
+        "--loss-chunk-size",
+        type=int,
+        default=0,
+        help=(
+            "project and score this many tokens at a time, checkpointing each chunk "
+            "to reduce peak vocabulary-logit memory (0 disables)"
+        ),
+    )
+    parser.add_argument(
         "--lr-schedule",
         choices=("cosine", "wsd"),
         default="cosine",
@@ -205,6 +214,51 @@ def run() -> None:
         _run(cleanup)
 
 
+def _restore_training_checkpoint(
+    *, engine, checkpoint_path, model, optimizer, train_dataloader, trainer,
+    gradient_accumulation_steps: int,
+) -> int:
+    """Restore a run and let the loaded checkpoint payload die on return."""
+    checkpoint = engine.load(
+        checkpoint_path,
+        {"model": model, "optimizer": optimizer},
+    )
+    start_iter = int(checkpoint["idx"])
+    input_states = checkpoint.get("input_states")
+    if input_states is None or len(input_states) != engine.world_size:
+        raise ValueError(
+            "checkpoint lacks input states for the current world size; "
+            "legacy exact resume is unsupported"
+        )
+    restore_input_state(
+        train_dataloader,
+        input_states[engine.global_rank],
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        data_rank=engine.data_parallel_rank,
+        data_world_size=engine.data_parallel_world_size,
+    )
+    trainer.train_batches_consumed = int(checkpoint["train_batches_consumed"])
+    trainer.train_tokens_seen = int(checkpoint.get("train_tokens_seen", 0))
+
+    rng = checkpoint.get("rng_states")
+    if rng is not None:
+        if len(rng) != engine.world_size:
+            raise ValueError("exact --resume requires the saved distributed world size")
+        rng = rng[engine.global_rank]
+    else:
+        rng = checkpoint
+    if "torch_rng_state" in rng:
+        torch.set_rng_state(rng["torch_rng_state"].cpu())
+    if torch.cuda.is_available() and "cuda_rng_state_all" in rng:
+        torch.cuda.set_rng_state_all(rng["cuda_rng_state_all"])
+    if engine.is_global_zero:
+        print(
+            f"resumed checkpoint={checkpoint_path} at iter={start_iter}; "
+            "restored validated input cursor"
+        )
+    return start_iter
+
+
 def _run(cleanup: ExitStack) -> None:
     args = parse_args()
     if args.hidden_size % args.num_heads != 0:
@@ -219,6 +273,8 @@ def _run(cleanup: ExitStack) -> None:
         raise ValueError("invalid evaluation or checkpoint interval")
     if args.num_workers < 0:
         raise ValueError("num-workers cannot be negative")
+    if args.loss_chunk_size < 0:
+        raise ValueError("loss-chunk-size cannot be negative")
     if not 0.0 <= args.dropout < 1.0:
         raise ValueError("dropout must be in [0, 1)")
     optimizer_lrs = (
@@ -422,6 +478,10 @@ def _run(cleanup: ExitStack) -> None:
             "weight_tying", "hidden_size", "intermediate_size", "num_layers", "num_heads",
         } or key.startswith("moe_")
     }
+    # Keep legacy recipe equality when chunking is disabled. A nonzero setting is
+    # recorded so exact resume still rejects changing this memory/compute mode.
+    if args.loss_chunk_size:
+        train_ds.training_recipe["loss_chunk_size"] = args.loss_chunk_size
     loader_args = {
         "batch_size": args.batch_size,
         "num_workers": args.num_workers,
@@ -511,43 +571,20 @@ def _run(cleanup: ExitStack) -> None:
             if args.moe_num_experts > 0 and not args.moe_no_quantile_balancing
             else None
         ),
+        loss_chunk_size=args.loss_chunk_size,
     )
 
     start_iter = 0
     if args.resume:
-        checkpoint = engine.load(
-            args.checkpoint_path,
-            {"model": model, "optimizer": optimizer},
-        )
-        start_iter = int(checkpoint["idx"])
-        input_states = checkpoint.get("input_states")
-        if input_states is None or len(input_states) != engine.world_size:
-            raise ValueError("checkpoint lacks input states for the current world size; legacy exact resume is unsupported")
-        restore_input_state(
-            train_dl, input_states[engine.global_rank],
+        start_iter = _restore_training_checkpoint(
+            engine=engine,
+            checkpoint_path=args.checkpoint_path,
+            model=model,
+            optimizer=optimizer,
+            train_dataloader=train_dl,
+            trainer=trainer,
             gradient_accumulation_steps=args.grad_accum_steps,
-            data_rank=engine.data_parallel_rank,
-            data_world_size=engine.data_parallel_world_size,
         )
-        trainer.train_batches_consumed = int(checkpoint["train_batches_consumed"])
-        trainer.train_tokens_seen = int(checkpoint.get("train_tokens_seen", 0))
-        rng = checkpoint
-        if "rng_states" in checkpoint:
-            if len(checkpoint["rng_states"]) != engine.world_size:
-                raise ValueError("exact --resume requires the saved distributed world size")
-            rng = checkpoint["rng_states"][engine.global_rank]
-        if "torch_rng_state" in rng:
-            torch.set_rng_state(rng["torch_rng_state"].cpu())
-        if torch.cuda.is_available() and "cuda_rng_state_all" in rng:
-            torch.cuda.set_rng_state_all(rng["cuda_rng_state_all"])
-        if engine.is_global_zero:
-            print(
-                f"resumed checkpoint={args.checkpoint_path} at iter={start_iter}; "
-                "restored validated input cursor"
-            )
-
-    if args.resume:
-        del checkpoint
 
     parameter_count = sum(parameter.numel() for parameter in raw_model.parameters())
     tokens_per_step = args.batch_size * args.seq_len * args.grad_accum_steps

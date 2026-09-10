@@ -41,6 +41,13 @@ uv run torchrun --nproc-per-node 2 examples/train_llama_engine.py
 uv run torchrun --nproc-per-node 2 examples/train_llama_engine.py --tp 2
 ```
 
+With tensor parallelism, keep attention dropout at zero and prepare the model
+before constructing its optimizer. Prepare dataloaders before creating an
+iterator or starting workers. Ohara binds its supported iterable datasets to
+the data-parallel rank and world size; custom iterable datasets should expose
+`configure_data_parallel(rank, world_size)` and must yield identical inputs on
+all tensor-parallel ranks.
+
 For resumable runs, use `--num-workers 0` from the start. Remote streaming also
 needs `--dataset-revision` set to the dataset's immutable 40-character commit;
 local text/JSON/Parquet and token-bin inputs are fingerprinted automatically.
@@ -61,6 +68,13 @@ only after interruption does not recover the missing worker state.
 `--print-every` defaults to 10. Loss/timing scalars are read at reporting,
 evaluation, and checkpoint intervals; use `--print-every 1` for per-step output.
 MFU accounts for every participating GPU, including tensor-parallel ranks.
+
+Large vocabularies can make the output logits the peak-memory allocation. Pass
+`--loss-chunk-size 1024` (or another token count) to apply the vocabulary head
+and FP32 cross entropy in checkpointed chunks during training, and in ordinary
+chunks during evaluation. This recomputes each output chunk during backward to
+avoid retaining vocabulary-sized activations. The default `0` keeps the regular
+logits path.
 
 To watch it in W&B, run `uv run wandb login` first; `--logger trackio` logs locally without an account. It looks something like this:
 

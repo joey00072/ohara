@@ -64,11 +64,15 @@ def _to_torch_style(style: TensorParallelStyle):
     raise ValueError(f"Unsupported tensor parallel style: {style}")
 
 
-def apply_tensor_parallel(
+def validate_tensor_parallel(
     module: nn.Module,
-    tp_mesh: DeviceMesh,
     plan: TensorParallelPlan,
-) -> nn.Module:
+) -> tuple[nn.Module, dict[str, Any], list[nn.Module]]:
+    """Validate TP without changing parameters or attention metadata.
+
+    Attention dropout must currently be zero. Sharded attention needs a
+    checkpointable TP-specific random stream before nonzero dropout is safe.
+    """
     plan.validate()
     root = module
     while isinstance(getattr(root, "_orig_mod", None), nn.Module):
@@ -104,6 +108,15 @@ def apply_tensor_parallel(
         for attr in ("num_attention_heads", "num_key_value_heads"):
             if getattr(child, attr) % plan.degree:
                 raise ValueError(f"{fqn}.{attr} must be divisible by tp={plan.degree}")
+        dropout = getattr(child, "attn_dropout", None)
+        dropout_probability = dropout.p if isinstance(dropout, nn.Dropout) else dropout
+        if dropout_probability is None:
+            dropout_probability = getattr(child, "dropout", 0.0)
+        if plan.degree > 1 and float(dropout_probability) != 0.0:
+            raise ValueError(
+                f"{fqn}: tensor-parallel attention requires zero attention dropout; "
+                "independent TP-shard RNG streams are not implemented"
+            )
         attentions.append(child)
 
     if not layer_plan:
@@ -111,6 +124,16 @@ def apply_tensor_parallel(
             "No modules matched tensor parallel rules. "
             "Provide matching TensorParallelRule patterns for your model."
         )
+    return root, layer_plan, attentions
+
+
+def apply_tensor_parallel(
+    module: nn.Module,
+    tp_mesh: DeviceMesh,
+    plan: TensorParallelPlan,
+) -> nn.Module:
+    """Validate and apply a tensor-parallel plan."""
+    root, layer_plan, attentions = validate_tensor_parallel(module, plan)
 
     parallelize_module(root, tp_mesh, layer_plan)
     for attention in attentions:

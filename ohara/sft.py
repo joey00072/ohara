@@ -23,6 +23,8 @@ from typing import Any, Callable, Iterator, Sequence
 import torch
 import torch.distributed as dist
 from torch.utils.data import IterableDataset, get_worker_info
+
+from ohara.data_parallel import DataParallelIterableDataset
 from transformers import PreTrainedTokenizerBase
 
 from ohara.chat import IGNORE_INDEX, render_conversation
@@ -231,7 +233,7 @@ def build_mixture(
 # Packing
 
 
-class ConversationDataset(IterableDataset):
+class ConversationDataset(DataParallelIterableDataset, IterableDataset):
     """Pack rendered conversations into fixed-length rows with masked targets.
 
     Yields ``(inputs, targets)`` of shape ``(max_length,)``, ready for the same
@@ -321,6 +323,7 @@ class ConversationDataset(IterableDataset):
             yield ids, mask
 
     def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+        self._mark_iterator_started()
         epoch = 0
         while True:
             source = self._rendered(epoch)

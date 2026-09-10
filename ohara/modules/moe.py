@@ -72,6 +72,38 @@ class MoE(nn.Module):
 
         self.reset_parameters()
 
+    def _apply(self, fn, recurse: bool = True):
+        """Move balancing state without applying reduced-precision casts to it."""
+        # ``Module.to(dtype=...)`` applies ``fn`` to every buffer. Keep an exact
+        # FP32 copy first: converting the buffer back to FP32 afterwards would
+        # preserve the dtype but not the values that were rounded by BF16/FP16.
+        fp32_buffers = {
+            name: self._buffers[name].detach().clone()
+            for name in ("router_bias", "qb_beta_sum", "qb_beta_count")
+            if self._buffers.get(name) is not None
+        }
+        result = super()._apply(fn, recurse=recurse)
+        for name, value in fp32_buffers.items():
+            converted = self._buffers[name]
+            self._buffers[name] = (
+                converted.float()
+                if value.is_meta
+                else value.to(device=converted.device, dtype=torch.float32)
+            )
+        return result
+
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
+        # ``load_state_dict(assign=True)`` replaces buffers instead of copying
+        # into their registered storage, so normalize the persistent bias here.
+        key = prefix + "router_bias"
+        if key in state_dict and state_dict[key].dtype != torch.float32:
+            state_dict[key] = state_dict[key].float()
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, dim = x.shape
         flat_x = x.reshape(batch_size * seq_len, dim)  # (N, dim)

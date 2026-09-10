@@ -73,6 +73,7 @@ class Trainer:
         checkpoint_path: str | Path = "./ckpt/model.pt",
         token_bytes: torch.Tensor | None = None,
         apply_router_balancing: Callable[[nn.Module], None] | None = None,
+        loss_chunk_size: int = 0,
     ):
         if micro_batch < 1:
             raise ValueError("micro_batch must be at least 1")
@@ -84,6 +85,8 @@ class Trainer:
             raise ValueError("eval_val_batches must be at least 1")
         if iter_loss_window < 1:
             raise ValueError("iter_loss_window must be at least 1")
+        if loss_chunk_size < 0:
+            raise ValueError("loss_chunk_size cannot be negative")
         self.engine = engine
         self.model = model
         self.optimizer = optimizer
@@ -110,6 +113,7 @@ class Trainer:
         self.cudagraph_mark_step_begin = cudagraph_mark_step_begin
         self.checkpoint_path = Path(checkpoint_path)
         self.apply_router_balancing = apply_router_balancing
+        self.loss_chunk_size = int(loss_chunk_size)
         if token_bytes is not None and token_bytes.ndim != 1:
             raise ValueError("token_bytes must be a one-dimensional vocabulary lookup")
         self.token_bytes = (
@@ -300,29 +304,45 @@ class Trainer:
         for _ in range(requested_batches):
             data, target = self.engine.to_device(next(evaluation_iterator))
             self._maybe_cudagraph_step_begin()
-            with self.engine.autocast_context():
-                logits: torch.Tensor = self.model(data)
-
-            # Match nanochat: reduced-precision model compute, FP32 loss math.
-            flat_logits = logits.float().reshape(-1, logits.size(-1))
             flat_target = target.reshape(-1)
             valid = flat_target != self.ignore_index
             valid_count = valid.sum()
+
+            with self.engine.autocast_context():
+                if self.loss_chunk_size:
+                    loss_sum, token_losses, preds = self.model(
+                        data,
+                        targets=target,
+                        loss_chunk_size=self.loss_chunk_size,
+                        ignore_index=self.ignore_index,
+                        return_loss_details=True,
+                    )
+                    config = getattr(self._raw_model(), "config", None)
+                    batch_vocab_size = getattr(config, "vocab_size", None)
+                else:
+                    logits: torch.Tensor = self.model(data)
+                    # Match nanochat: reduced-precision model compute, FP32 loss math.
+                    flat_logits = logits.float().reshape(-1, logits.size(-1))
+                    token_losses = F.cross_entropy(
+                        flat_logits,
+                        flat_target,
+                        ignore_index=self.ignore_index,
+                        reduction="none",
+                    )
+                    loss_sum = token_losses.sum()
+                    preds = flat_logits.argmax(dim=-1)
+                    batch_vocab_size = flat_logits.size(-1)
+            # Every rank must participate in the wrapped forward before a
+            # rank-local empty mask can skip metric accumulation.
             if valid_count.item() == 0:
                 continue
-
-            token_losses = F.cross_entropy(
-                flat_logits,
-                flat_target,
-                ignore_index=self.ignore_index,
-                reduction="none",
-            )
-            loss_sum = token_losses.sum()
-            preds = flat_logits.argmax(dim=-1)
             correct = (preds.eq(flat_target) & valid).sum()
 
             if self.token_bytes is not None:
-                if self.token_bytes.numel() < flat_logits.size(-1):
+                if (
+                    batch_vocab_size is not None
+                    and self.token_bytes.numel() < batch_vocab_size
+                ):
                     raise ValueError("token_bytes is smaller than the model vocabulary")
                 safe_target = torch.where(valid, flat_target, torch.zeros_like(flat_target))
                 byte_counts = self.token_bytes[safe_target]
@@ -558,14 +578,22 @@ class Trainer:
                 with sync_context:
                     self._maybe_cudagraph_step_begin()
                     with self.engine.autocast_context():
-                        logits: torch.Tensor = self.model(data)
-                        loss_sum = F.cross_entropy(
-                            logits.float().reshape(-1, logits.size(-1)),
-                            target.reshape(-1),
-                            ignore_index=self.ignore_index,
-                            reduction="sum",
-                        )
-                    del logits
+                        if self.loss_chunk_size:
+                            loss_sum = self.model(
+                                data,
+                                targets=target,
+                                loss_chunk_size=self.loss_chunk_size,
+                                ignore_index=self.ignore_index,
+                            )
+                        else:
+                            logits: torch.Tensor = self.model(data)
+                            loss_sum = F.cross_entropy(
+                                logits.float().reshape(-1, logits.size(-1)),
+                                target.reshape(-1),
+                                ignore_index=self.ignore_index,
+                                reduction="sum",
+                            )
+                            del logits
                     if not uses_scaler:
                         loss_is_finite.logical_and_(torch.isfinite(loss_sum.detach()))
                     if observe_step:

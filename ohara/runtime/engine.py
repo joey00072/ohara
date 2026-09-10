@@ -18,7 +18,11 @@ from torch.utils.data import DataLoader, DistributedSampler, IterableDataset, Ra
 from .config import EngineConfig
 from .enums import Backend, PrecisionMode, ReduceType, StrategyType
 from .strategy import BaseStrategy, DDPStrategy, SingleStrategy
-from .tensor_parallel import TensorParallelPlan, apply_tensor_parallel
+from .tensor_parallel import (
+    TensorParallelPlan,
+    apply_tensor_parallel,
+    validate_tensor_parallel,
+)
 from .topology import ParallelTopology
 
 
@@ -237,6 +241,13 @@ class OharaEngine:
         return None
 
     def prepare(self, module: torch.nn.Module, *optimizers: Optimizer):
+        if optimizers and (
+            self.config.parallel.tp > 1 or (self.launched and self.topology.tp_enabled)
+        ):
+            raise ValueError(
+                "prebuilt optimizers cannot be prepared together with tensor parallelism; "
+                "prepare the model first, then build the optimizer from the prepared parameters"
+            )
         module = self.prepare_module(module)
         if not optimizers:
             return module
@@ -249,6 +260,8 @@ class OharaEngine:
         self, module: torch.nn.Module, *, move_to_device: bool = True
     ) -> torch.nn.Module:
         self.launch()
+        if self.topology.tp_enabled:
+            validate_tensor_parallel(module, self._resolve_tensor_parallel_plan(module))
         if move_to_device:
             if self.config.precision.mode == PrecisionMode.BF16_TRUE:
                 module = module.to(device=self._device, dtype=torch.bfloat16)
@@ -397,10 +410,35 @@ class OharaEngine:
             kwargs["multiprocessing_context"] = dataloader.multiprocessing_context
         return DataLoader(**kwargs)
 
+    def _configure_iterable_dataset(self, dataloader: DataLoader) -> None:
+        dataset = getattr(dataloader, "dataset", None)
+        if not isinstance(dataset, IterableDataset):
+            return
+        configure = getattr(dataset, "configure_data_parallel", None)
+        if callable(configure):
+            requested = (self.data_parallel_rank, self.data_parallel_world_size)
+            current = (
+                getattr(dataset, "data_rank", None),
+                getattr(dataset, "data_world_size", None),
+            )
+            if getattr(dataloader, "_iterator", None) is not None and current != requested:
+                raise RuntimeError(
+                    "cannot assign data topology after DataLoader workers have started"
+                )
+            configure(self.data_parallel_rank, self.data_parallel_world_size)
+            return
+        if self.topology.tp_enabled:
+            raise ValueError(
+                "tensor parallelism requires iterable datasets to implement "
+                "configure_data_parallel(rank, world_size) so TP ranks receive identical inputs"
+            )
+
     def prepare_dataloaders(self, *dataloaders: DataLoader):
         self.launch()
         if len(dataloaders) == 0:
             raise ValueError("At least one dataloader is required")
+        for dataloader in dataloaders:
+            self._configure_iterable_dataset(dataloader)
         distributed = (
             [self._replace_sampler(dl) for dl in dataloaders]
             if self._dp_world_size > 1

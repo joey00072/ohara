@@ -5,8 +5,10 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file, save_file
+from torch.utils.checkpoint import checkpoint
 
 from ohara.embeddings_pos.rotary import apply_rope, precompute_freqs_cis
 from ohara.modules.kv_cache import KVCache
@@ -278,9 +280,23 @@ class Llama(nn.Module):
         x: torch.Tensor,
         kv_cache: list[KVCache] | None = None,
         position_ids: int | torch.Tensor | None = None,
+        *,
+        targets: torch.Tensor | None = None,
+        loss_chunk_size: int | None = None,
+        ignore_index: int = -1,
+        return_loss_details: bool = False,
     ):
         if x.ndim != 2:
             raise ValueError("input token IDs must have shape (batch, sequence)")
+        if targets is not None:
+            if targets.shape != x.shape:
+                raise ValueError("targets must match the input batch and sequence dimensions")
+            if loss_chunk_size is None or loss_chunk_size < 1:
+                raise ValueError("loss_chunk_size must be positive when targets are provided")
+            if return_loss_details and torch.is_grad_enabled():
+                raise ValueError("return_loss_details is only available with gradients disabled")
+        elif return_loss_details:
+            raise ValueError("return_loss_details requires targets")
         if isinstance(position_ids, torch.Tensor):
             if position_ids.numel() != 1:
                 raise ValueError("position_ids must be a scalar cache position")
@@ -289,6 +305,8 @@ class Llama(nn.Module):
         start_pos = 0
         mask = self.mask
         if kv_cache is not None:
+            if targets is not None:
+                raise ValueError("targets cannot be used with a KV cache")
             if len(kv_cache) != len(self.layers):
                 raise ValueError("KV cache must contain one entry per model layer")
             if position_ids is None or position_ids < 0:
@@ -316,8 +334,67 @@ class Llama(nn.Module):
             x = layer(x, mask, freqs_cis, cache, start_pos if cache is not None else None)
 
         x = self.norm(x)
-        x = self.vocab_proj(x)
-        return x
+        if targets is None:
+            return self.vocab_proj(x)
+        return self._chunked_loss(
+            x,
+            targets,
+            chunk_size=loss_chunk_size,
+            ignore_index=ignore_index,
+            return_details=return_loss_details,
+        )
+
+    def _chunked_loss(
+        self,
+        hidden: torch.Tensor,
+        targets: torch.Tensor,
+        *,
+        chunk_size: int,
+        ignore_index: int,
+        return_details: bool,
+    ):
+        """Project and score token chunks without retaining full-vocabulary logits."""
+        flat_hidden = hidden.reshape(-1, hidden.size(-1))
+        flat_targets = targets.reshape(-1)
+        loss_chunks = []
+        prediction_chunks = []
+        total_loss = hidden.new_zeros((), dtype=torch.float32)
+
+        for hidden_chunk, target_chunk in zip(
+            flat_hidden.split(chunk_size), flat_targets.split(chunk_size), strict=True
+        ):
+            if return_details:
+                logits = self.vocab_proj(hidden_chunk).float()
+                token_loss = F.cross_entropy(
+                    logits,
+                    target_chunk,
+                    ignore_index=ignore_index,
+                    reduction="none",
+                )
+                total_loss = total_loss + token_loss.sum()
+                loss_chunks.append(token_loss)
+                prediction_chunks.append(logits.argmax(dim=-1))
+                continue
+
+            def project_and_score(h: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+                logits = self.vocab_proj(h)
+                return F.cross_entropy(
+                    logits.float(),
+                    labels,
+                    ignore_index=ignore_index,
+                    reduction="sum",
+                )
+
+            chunk_loss = (
+                checkpoint(project_and_score, hidden_chunk, target_chunk, use_reentrant=False)
+                if torch.is_grad_enabled()
+                else project_and_score(hidden_chunk, target_chunk)
+            )
+            total_loss = total_loss + chunk_loss
+
+        if return_details:
+            return total_loss, torch.cat(loss_chunks), torch.cat(prediction_chunks)
+        return total_loss
 
     def build_kv_cache(
         self, batch_size: int = 1, *, max_sequence_length: int | None = None, int8: bool = False

@@ -43,6 +43,8 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.utils.data import IterableDataset, get_worker_info
 
+from ohara.data_parallel import DataParallelIterableDataset
+
 from ohara.tokenbin import DTYPES, read_token_bin_metadata
 
 INDEX_DTYPE = np.uint32
@@ -158,7 +160,7 @@ def distillation_loss(
     return per_token.sum()
 
 
-class DistillTokenBinDataset(IterableDataset):
+class DistillTokenBinDataset(DataParallelIterableDataset, IterableDataset):
     """Token-bin blocks paired with their cached teacher predictions.
 
     Yields ``(inputs, targets, teacher_index, teacher_logit, teacher_logsumexp)``.
@@ -232,6 +234,7 @@ class DistillTokenBinDataset(IterableDataset):
         return rank * num_workers + worker_id, world_size * num_workers
 
     def __iter__(self) -> Iterator[tuple[torch.Tensor, ...]]:
+        self._mark_iterator_started()
         if self._tokens is None:
             self._tokens = np.memmap(self.bin_path, dtype=self.token_dtype, mode="r")
         shard_id, num_shards = self._shard()
