@@ -2,16 +2,10 @@ import torch
 
 
 def get_alibi_mask(number_of_heads, max_seq_len):
-    """
-    https://arxiv.org/abs/2108.12409 \\
-    ref: https://www.youtube.com/watch?v=Pp61ShI9VGc \\
-    Add this with casulmask then use that mask for efficeny \\
-    example:
-    ```
-    >> mask = casual_mask + get_alibi_mask(number_of_heads,max_seq_len)
-    >> wei = softmax(q@k.transpose(-1,-2) + mask[:,:T,:T])
-    ```
+    """Return per-head distance penalties with shape (heads, sequence, sequence).
 
+    Add to a causal attention mask before softmax; this bias does not mask
+    future positions itself. Paper: https://arxiv.org/abs/2108.12409.
     """
 
     nh = number_of_heads

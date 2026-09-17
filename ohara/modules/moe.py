@@ -9,19 +9,11 @@ from ohara.modules.quantile import update_bias, valid_tokens
 
 
 class MoE(nn.Module):
-    """Top-k mixture of experts with optional quantile balancing.
+    """Top-k experts with FP32 routing and optional quantile balancing.
 
-    Routing is the usual: a linear gate scores every expert, the top-k win the token,
-    and their outputs are combined with the gate weights. Two things are worth knowing:
-
-    Top-1 uses an unnormalised probability so the router receives a gradient.
-    For k > 1, softmax weights sum to one; sigmoid weights are unnormalised
-    (unlike GroupedMoE, which exposes normalize_weights).
-
-    - Dispatch sorts the (token, expert) pairs by expert and runs one contiguous slice
-      per expert, instead of replicating the input k times and masking it E times.
-    - Load balancing is quantile balancing (Jianlin Su, used in Kimi K2/K3), which needs
-      no auxiliary loss and no loss coefficient to tune. See ``apply_qb_update``.
+    Top-1 keeps its unnormalized probability so the router receives gradients.
+    For k > 1, softmax weights sum to one; sigmoid weights are unnormalized.
+    Call ``apply_qb_update`` once per optimizer step to consume routing statistics.
     """
 
     def __init__(
@@ -186,7 +178,7 @@ class MoE(nn.Module):
 
     @torch.no_grad()
     def apply_qb_update(self, process_group=None) -> None:
-        """Solve over all valid tokens once per optimizer step."""
+        """Update quantile balancing for every loop or grouped MoE after an optimizer step."""
         update_bias(self, process_group)
 
     @torch.no_grad()
@@ -214,12 +206,7 @@ class MoE(nn.Module):
 
 
 def apply_qb_update(module: nn.Module) -> None:
-    """Apply the quantile balancing update to every MoE in a model.
-
-    Drop this into the training loop right next to `optimizer.step()`. Covers both
-    the loop dispatch here and the grouped one in ohara.modules.moe_grouped, since
-    a model may use either.
-    """
+    """Update quantile balancing for every loop or grouped MoE after an optimizer step."""
     from ohara.modules.moe_grouped import GroupedMoE
 
     for submodule in module.modules():

@@ -1,26 +1,17 @@
-## Alibi
-This is so simple I love it
+# ALiBi
 
-![Alt text](image.png)
-This is lower tringuer matrix with with every token in past multiplied by -1
+Implementation: [alibi.py](../../../ohara/embeddings_pos/alibi.py).
 
-### Imp
-you multiplay each each by no $m$ and it is diffent for each head.
+ALiBi adds a distance penalty to attention scores. In causal attention, head `h`
+adds `-m_h * (query_position - key_position)` for visible keys. Each head has a
+different slope, so heads penalize distant tokens at different rates.
 
-1. **When `seq_len` is 8**:
-   The series is $\frac{1}{2^n}$ where $ n $ ranges from 1 to 8. In LaTeX, this can be written as:
-$\frac{1}{2^1}, \frac{1}{2^2}, \frac{1}{2^3}, \ldots, \frac{1}{2^8}$
-
-2. **When `seq_len` is 16**:
-   The series is $ \frac{1}{2^n} $ where $ n $ starts at 0.5 and increases in increments of 0.5 up to 8. In LaTeX, this can be represented as:
-$\frac{1}{2^{0.5}}, \frac{1}{2^1}, \frac{1}{2^{1.5}}, \ldots, \frac{1}{2^8}$
-
-
-explained in code if you like me stranger
+Ohara uses this slope schedule:
 
 ```python
-s = torch.arange(1,nh+1)
-p = s/(nh/8)
-m = 1/2**p
+slopes = 2 ** (-8 * torch.arange(1, num_heads + 1) / num_heads)
 ```
 
+The schedule depends on the number of heads, not sequence length.
+
+![Causal attention distance penalties](image.png)

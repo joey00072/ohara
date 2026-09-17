@@ -1,14 +1,18 @@
-## LoRA: Low-Rank Adaptation of Large Language Models
+# LoRA
 
-paper: https://arxiv.org/pdf/2106.09685.pdf
-![lora](lora.png)
+Paper: [Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685).
+Implementation: [lora.py](../../../ohara/adaptor/lora.py).
 
-## TLDR
-geadient update is low rank. So we can decompose dW into A,B where A(mxr)and B(rxm).
-dW = A@B
-<br>
-- so take transformer
-- freeze weigths 
-- modify linear layer xW to xW+ xAB 
-- train 
-- W new = W+ A@B
+Freeze the pretrained weight and train a low-rank update. With PyTorch's
+`W` shape `(out_features, in_features)`, the adapter uses:
+
+```text
+A: (rank, in_features)
+B: (out_features, rank)
+delta_W = (alpha / rank) * B @ A
+```
+
+The forward pass adds the adapter output to the original linear output.
+At inference, `merge()` adds `delta_W` to the base weight.
+
+![LoRA adapter alongside a frozen weight](lora.png)

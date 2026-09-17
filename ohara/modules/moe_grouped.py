@@ -1,31 +1,11 @@
-"""Fine-grained mixture of experts with a shared expert, dispatched as grouped matmuls.
+"""Top-k MoE with grouped expert matmuls and optional shared experts.
 
-:class:`ohara.modules.moe.MoE` runs one contiguous slice per expert in a Python
-loop. That is clear and correct, and it is fine at 8 experts. It stops being fine
-at 256: the loop issues 256 tiny GEMMs per layer -- 3,072 for a 12-layer model --
-and ``counts.tolist()`` forces a host sync every layer, which also breaks
-``torch.compile`` into fragments.
+CUDA BF16 uses three grouped matmuls; other configurations use a per-expert
+reference loop. Dispatch runs eagerly because grouped-mm tracing has
+data-dependent shape guards. Routing uses FP32 logits and optional quantile
+balancing, applied once per optimizer step.
 
-This module keeps the same routing but stacks the expert weights into single
-``(num_experts, in, out)`` tensors and dispatches every expert in one
-``torch._grouped_mm``. One kernel replaces the loop, no host sync, static graph.
-
-Two design points beyond that, both from the DeepSeek MoE line of work
-(https://arxiv.org/abs/2401.06066, https://arxiv.org/abs/2412.19437):
-
-**Shared experts.** A fraction of the feed-forward is always active for every
-token. Routed experts then no longer each have to relearn the common
-transformation, so they specialise instead of duplicating. This is the "shared
-expert isolation" of DeepSeekMoE.
-
-**Fine granularity.** Many narrow experts rather than a few wide ones. With E
-experts and top-k routing there are C(E, k) possible combinations, so shrinking
-experts while raising k buys combinatorially more specialisation at equal FLOPs.
-
-Load balancing stays quantile balancing (Jianlin Su; Kimi K2/K3), matching
-:mod:`ohara.modules.moe`: the router bias is solved in closed form each step, so
-there is no auxiliary loss and no balancing coefficient to tune. DeepSeek-V3
-reaches the same place by a different update rule.
+Shared experts follow DeepSeekMoE: https://arxiv.org/abs/2401.06066.
 """
 
 from __future__ import annotations
@@ -43,28 +23,20 @@ def _grouped_mm_available() -> bool:
 
 
 class GroupedMoE(nn.Module):
-    """Top-k routed experts plus always-on shared experts, batched into grouped GEMMs.
+    """Top-k routed experts with optional always-on shared experts.
 
     Args:
-        dim: model width.
-        hidden_dim: width of a *single* expert. Keep ``hidden_dim * (k + shared)``
-            equal to the dense feed-forward width to hold FLOPs per token fixed.
-        num_experts: routed experts per layer.
-        num_experts_per_tok: how many routed experts each token uses.
-        num_shared_experts: experts every token always passes through.
-        gate_fn: ``sigmoid`` (DeepSeek-V3) or ``softmax``. Sigmoid scores each
-            expert independently, which behaves better as ``num_experts`` grows
-            because softmax over hundreds of logits drives every weight tiny.
-        normalize_weights: rescale the chosen weights to sum to 1. With sigmoid
-            this keeps the residual contribution at a stable scale. Top-1 keeps
-            its unnormalised probability so the router can learn.
-        quantile_balancing: closed-form router bias, no auxiliary loss.
-        shared_exclusive: make the routed sum orthogonal to the shared expert's
-            output before adding them, so routed experts can only contribute in
-            directions the shared expert does not already cover. Borrowed from
-            exclusive self-attention (XSA), which rejects an attention output
-            against the token's own value. Turns shared-expert isolation from a
-            hope into a constraint. Costs no parameters.
+        dim: Model width.
+        hidden_dim: Width of each expert.
+        num_experts: Number of routed experts.
+        num_experts_per_tok: Number of routed experts selected per token.
+        num_shared_experts: Number of shared experts.
+        gate_fn: Router weighting function: sigmoid or softmax.
+        normalize_weights: Normalize selected sigmoid weights for top-k > 1.
+            Softmax always normalizes for top-k > 1. Top-1 keeps its probability.
+        quantile_balancing: Update routing bias from per-step global quantiles.
+        shared_exclusive: Remove the routed output's projection onto the shared
+            output before adding them. Requires shared experts.
     """
 
     def __init__(
@@ -109,8 +81,7 @@ class GroupedMoE(nn.Module):
         self.w_up = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
         self.w_down = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
 
-        # Shared experts are dense: every token uses them, so there is nothing to
-        # route and a plain matmul of the full batch is the fastest form.
+        # Shared experts process every token as one dense projection.
         if num_shared_experts > 0:
             shared_hidden = hidden_dim * num_shared_experts
             self.shared_gate = nn.Linear(dim, shared_hidden, bias=False)
@@ -119,9 +90,7 @@ class GroupedMoE(nn.Module):
 
         self.router = RouterLinear(dim, num_experts, bias=False)
 
-        # A buffer, not a Parameter: quantile balancing solves for it directly, so
-        # the optimizer must never touch it. Checkpointed, so a resumed run starts
-        # already balanced.
+        # Checkpoint the solved bias; optimizer-step statistics are transient.
         self.register_buffer("router_bias", torch.zeros(num_experts))
         self.register_buffer("qb_samples", torch.empty(0, num_experts), persistent=False)
         self.register_buffer(
@@ -191,11 +160,7 @@ class GroupedMoE(nn.Module):
 
     # -- dispatch --------------------------------------------------------
 
-    # torch._grouped_mm carries shape guards that dynamo cannot discharge -- the
-    # group offsets are data-dependent, so tracing fails on an internal check.
-    # Running this one function eagerly costs little: it is already three fused
-    # kernels, and everything around it (norms, attention, the head) still
-    # compiles. The alternative is not compiling the model at all.
+    # Data-dependent grouped-mm shape guards prevent Dynamo tracing.
     @torch.compiler.disable
     def _dispatch_grouped(
         self, flat_x: torch.Tensor, expert_indices: torch.Tensor, expert_weights: torch.Tensor
@@ -251,16 +216,9 @@ class GroupedMoE(nn.Module):
 
     @staticmethod
     def _reject(target: torch.Tensor, basis: torch.Tensor) -> torch.Tensor:
-        """Remove the component of ``target`` lying along ``basis``, per token.
+        """Remove the component of target along basis, per token, in FP32.
 
-        Vector rejection, the operation behind exclusive self-attention (XSA):
-        normalize the basis, project onto it, subtract. The result is orthogonal
-        to ``basis`` in every row.
-
-        ``F.normalize`` returns zeros for a zero-length vector rather than NaN,
-        which matters here: the shared expert's output projection is zero-init, so
-        ``basis`` is exactly zero on the first step and this has to degrade to a
-        no-op instead of poisoning the model.
+        A zero basis leaves target unchanged, including at zero-initialized startup.
         """
         unit = F.normalize(basis.float(), dim=-1)
         projection = (target.float() * unit).sum(dim=-1, keepdim=True) * unit

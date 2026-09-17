@@ -46,7 +46,8 @@ for your own data, multiple GPUs, and resuming runs. Each script accepts `--help
 
 - [Models](./ohara/models/) — Llama, Qwen3, Mamba, RetNet, and others.
 - [Examples](./examples/) — training, evaluation, export, and scaling sweeps.
-- [Paper notes](./docs/notes/) and [experiments](./experiments/).
+- [Documentation and paper notes](./docs/README.md).
+- [Experiments](./experiments/) — per-paper research snapshots.
 - [Speedrun](./runs/speedrun.sh) — the full data → pretrain → fine-tune → chat pipeline.
 
 ## Development

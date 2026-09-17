@@ -1,5 +1,8 @@
 # TorchTitan comparison — 2026-09-09
 
+> Historical review. Findings and test results describe the revisions reviewed,
+> not the current repository. See the [documentation index](../README.md) for usage.
+
 Compared Ohara `014f74b` with the local official `pytorch/torchtitan` checkout
 `c4bef0bb7adf8ad2ffb2d4df62780a1e742a6b35`. Three subagents reviewed models,
 distributed runtime, and training/data; the primary reviewer checked findings

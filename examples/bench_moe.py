@@ -1,18 +1,9 @@
-"""Benchmark dense vs mixture-of-experts throughput at matched FLOPs.
+"""Compare dense and MoE throughput at matched estimated FLOPs per token.
 
-    python examples/bench_moe.py --device-batch-size 8
+    uv run python examples/bench_moe.py --device-batch-size 8
 
-MoE is often reached for in the hope of "more MFU". It does not work that way:
-MFU is achieved FLOPs over peak FLOPs, and routing tokens to experts adds work
-that is *not* matmul — a sort, a bincount, a device sync, and one small GEMM per
-expert instead of one large one. At equal FLOPs per token an MoE will generally
-show **lower** MFU than the dense model it replaces.
-
-What MoE buys is parameters at constant compute, so the fair question is loss per
-FLOP, not utilisation. This script measures the throughput half of that trade so
-the cost is at least known: it matches FLOPs per token by shrinking each expert
-to ``intermediate_size // experts_per_tok`` and reports step time and MFU side by
-side.
+Expert width is ``intermediate_size // experts_per_tok``. Reports step time and
+MFU, including routing overhead; it does not measure model quality.
 """
 
 from __future__ import annotations

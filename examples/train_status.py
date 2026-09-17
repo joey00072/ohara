@@ -1,15 +1,9 @@
-"""A progress dashboard for a running training job.
+"""Show training progress from a log file.
 
-    python examples/train_status.py --log runs/moe.log --port 8082
+    uv run python examples/train_status.py --log runs/moe.log --port 8082
 
-Reads the training log directly rather than a tracker, because the log has a line
-for *every* iteration while experiment trackers here only receive metrics on the
-evaluation interval. That makes the loss curve dense and the time estimate honest
-without changing anything about the running job.
-
-Works with the multi-stage ``speedrun.sh`` log and with a single ``train_llama_engine``
-or ``train_sft`` log. Pass ``--log`` or let it pick the most recently modified log
-in ``runs/``.
+Supports speedrun, pretraining, and SFT logs. Without ``--log``, selects the most
+recently modified log in ``runs/``. Curve resolution follows the log interval.
 """
 
 from __future__ import annotations

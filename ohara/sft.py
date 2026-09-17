@@ -1,17 +1,8 @@
-"""Supervised finetuning data: conversation sources and packed, masked batches.
+"""Packed conversations for supervised finetuning.
 
-Pretraining streams undifferentiated text; SFT streams *conversations*, and the
-two differ in one way that matters for the data pipeline. A conversation is an
-indivisible unit — split it across two rows and the second row trains the model
-to answer a question it never saw — so rows are packed rather than cut from a
-continuous stream.
-
-The packer here follows nanochat's ``sft_data_generator_bos_bestfit``: every row
-begins at a conversation boundary, conversations are placed best-fit into the
-remaining space, and whatever space is left over is padded rather than filled
-with a truncated conversation. Padding costs a little compute; discarding tokens
-costs data. Padded positions and all non-assistant tokens carry ``ignore_index``
-targets, so neither reaches the loss.
+A best-fit buffer packs complete conversations into each row and pads the tail.
+Only assistant targets contribute to the loss. An optional input padding mask
+excludes padding from MoE balancing while retaining prompt tokens.
 """
 
 from __future__ import annotations

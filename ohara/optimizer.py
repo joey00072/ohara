@@ -60,21 +60,14 @@ def _hypersphere_update_(
     *,
     eps: float = 1e-10,
 ) -> None:
-    """Take a constant-norm ("hyperspherical") step, in place, over a whole group.
+    """Apply a relative step and restore each parameter's Frobenius norm.
 
-    For each parameter and its update direction::
+    For parameter p and update direction u::
 
-        p' = p - lr * u * ||p|| / ||u||       # step size is relative to ||p||
-        p  = p' * ||p|| / ||p'||              # project back onto the sphere
+        p_new = p - lr * u * ||p|| / ||u||
+        p_new *= ||p|| / ||p_new||
 
-    The Frobenius norm of every parameter is therefore preserved exactly, which is
-    what makes weight decay unnecessary: it has no first-order effect once the
-    parameter is renormalized. Because the update is divided by ``||u||``, only the
-    *direction* of ``u`` matters -- any constant rescaling of it cancels.
-
-    Every quantity stays on device (no ``.item()``) and every operation is a
-    ``torch._foreach_*`` call, so one group costs a handful of fused kernels
-    regardless of how many parameters it holds.
+    Uses device-side foreach operations. Constant scaling of u cancels.
     """
     if not params:
         return
@@ -139,19 +132,15 @@ def _polar_express(matrix: Tensor, steps: int) -> Tensor:
 
 
 class MuonAdamW(optim.Optimizer):
-    """Hybrid optimizer: Muon for matrices, AdamW elsewhere, either optionally on a sphere.
+    """Muon for matrices and AdamW for other parameters, with optional fixed norms.
 
-    Muon groups must contain same-shaped 2-D parameters, or one 3-D parameter
-    representing a pre-stacked batch of matrices. AdamW groups may contain
-    arbitrary dense parameters. Keeping every algorithm in one Optimizer makes
-    checkpointing and AMP stepping behave exactly like a normal PyTorch optimizer.
+    Muon groups contain same-shaped 2-D parameters or one 3-D stack of matrices.
+    AdamW groups accept arbitrary dense parameters. One Optimizer owns all state
+    for checkpointing and AMP stepping.
 
-    Setting ``hypersphere=True`` on a group switches it from an additive step to a
-    constant-norm one, giving the AdamH / MuonH variants from *Rethinking Language
-    Model Scaling under Transferable Hypersphere Optimization*
-    (https://arxiv.org/abs/2603.28743). See :func:`_hypersphere_update_`. Such a
-    group must have ``weight_decay=0``; its ``lr`` is a relative step size
-    (roughly a rotation angle), not an absolute one.
+    ``hypersphere=True`` enables the AdamH/MuonH update from
+    https://arxiv.org/abs/2603.28743. These groups require ``weight_decay=0`` and
+    interpret ``lr`` as a relative step size; see :func:`_hypersphere_update_`.
     """
 
     def __init__(self, param_groups: list[dict[str, Any]]):
@@ -638,21 +627,15 @@ def build_adamh(
     betas: tuple[float, float] = (0.9, 0.95),
     eps: float = 1e-8,
 ) -> MuonAdamW:
-    """AdamH: constant-norm Adam on every matrix, plain AdamW on everything else.
+    """AdamH for matrices; AdamW for embeddings and vector parameters.
 
-    From *Rethinking Language Model Scaling under Transferable Hypersphere
-    Optimization* (https://arxiv.org/abs/2603.28743). Each matrix keeps the
-    Frobenius norm it was initialized with, so there is no weight decay to tune;
-    ``learning_rate`` is the *relative* step size ||dW||/||W||.
-
-    To port an AdamW recipe, use ``learning_rate = sqrt(lr * weight_decay)``. The
-    default is that formula applied to ohara's own AdamW defaults
-    (``sqrt(5e-4 * 0.1) = 0.0071``).
+    Matrix norms stay fixed and ``learning_rate`` is the relative step size.
+    The default 0.0071 follows ``sqrt(lr * weight_decay)`` from the AdamW recipe.
+    Reference: https://arxiv.org/abs/2603.28743.
 
     Args:
-        learning_rate: Relative step size for the hyperspherical matrix groups.
-        adam_learning_rate: Absolute LR for embeddings and vector parameters,
-            which stay on ordinary AdamW.
+        learning_rate: Relative step size for hyperspherical matrix groups.
+        adam_learning_rate: Absolute LR for embeddings and vector parameters.
     """
     if learning_rate <= 0 or adam_learning_rate <= 0:
         raise ValueError("all learning rates must be positive")
@@ -724,24 +707,17 @@ def build_muonh_adamh(
     betas: tuple[float, float] = (0.9, 0.95),
     eps: float = 1e-8,
 ) -> MuonAdamW:
-    """MuonH on hidden matrices, AdamH on the lm_head, plain AdamW on the rest.
+    """MuonH for hidden matrices, AdamH for the head, and AdamW for the rest.
 
-    From *Rethinking Language Model Scaling under Transferable Hypersphere
-    Optimization* (https://arxiv.org/abs/2603.28743). Both hyperspherical
-    algorithms normalize the update to a fixed fraction of ``||W||``, which is why
-    they share one ``learning_rate`` -- the paper's central practical claim, and the
-    reason there is no separate matrix/unembedding rate to retune here.
-
-    To port a Muon recipe, use ``learning_rate = sqrt(lr * weight_decay)``. The
-    default is that formula applied to ohara's nanochat defaults
-    (``sqrt(0.02 * 0.28) = 0.0748``).
+    Both matrix groups share a relative learning rate. The default 0.0748 follows
+    ``sqrt(lr * weight_decay)`` from the Muon recipe.
+    Reference: https://arxiv.org/abs/2603.28743.
 
     Args:
-        learning_rate: Relative step size shared by the MuonH and AdamH groups.
+        learning_rate: Relative step size for MuonH and AdamH groups.
         adam_learning_rate: Absolute LR for embeddings and vector parameters.
-        momentum: Muon momentum. Its scale cancels in the projection, so this only
-            sets how much history the update direction carries.
-        ns_steps: Newton-Schulz iterations used to orthogonalize the update.
+        momentum: Muon momentum.
+        ns_steps: Newton-Schulz iterations.
     """
     if learning_rate <= 0 or adam_learning_rate <= 0:
         raise ValueError("all learning rates must be positive")

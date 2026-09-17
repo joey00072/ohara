@@ -1,33 +1,14 @@
-"""Top-k logit distillation from a cached teacher.
+"""Top-k logit distillation from a memory-mapped teacher cache.
 
-Distillation normally means running the teacher forward on every batch, which
-makes the teacher part of the training cost and muddies the question "is
-distilling faster than training from scratch?". But our corpus is fixed and
-pre-tokenized, so the teacher's output for a given block is *deterministic*.
-Compute it once, memory-map it, and every student run afterwards pays nothing.
+The cache stores top-k indices, logits, and the full-vocabulary logsumexp.
+The loss matches k explicit probabilities and one residual probability::
 
-That also separates the two questions worth measuring:
+    p_i = exp(logit_i - logsumexp)
+    p_other = 1 - sum(p_i)
 
-- **sample efficiency** — at equal tokens, does the distilled student reach a
-  lower loss? The cache makes this a clean comparison, since both arms have the
-  same step cost.
-- **wall-clock efficiency** — does it win once the teacher's own forward pass is
-  counted? That is the cache build time, reported separately and amortized over
-  however many student runs use it.
-
-**Why the logsumexp is stored.** Keeping only the top-k logits and renormalizing
-them to sum to one throws away how much probability mass lives *outside* the
-top-k -- and that is real information about how confident the teacher is. Storing
-the teacher's logsumexp costs one float per position and makes the top-k
-probabilities exact::
-
-    p_i     = exp(logit_i - logsumexp)      # exact, for each of the k
-    p_other = 1 - sum(p_i)                  # the residual mass, now known
-
-The loss then matches a (k + 1)-way distribution: the k explicit tokens plus one
-"everything else" bucket. Because the probabilities are exact rather than
-renormalized, temperature is unnecessary -- a real temperature would need the
-full logit vector, which is the thing we are trying not to store.
+Probabilities use temperature 1 and are subject to cache storage precision.
+Changing temperature requires the full teacher distribution. Cache-build time
+is measured separately from student training.
 """
 
 from __future__ import annotations

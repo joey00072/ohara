@@ -1,117 +1,100 @@
 # Pretraining
 
-Two ways to feed the trainer:
+Run commands from the repository root after `uv sync`. Each script accepts `--help`.
 
-- **stream** straight from Hugging Face — nothing to prepare, good for getting going.
-- **pretokenize** to disk first — faster per step, worth it once you train the same corpus twice.
+## Streaming data
 
-## Train (streaming)
-
-`examples/train_llama_engine.py` is the current entrypoint. It tokenizes on the fly, so you can
-start immediately:
+Train a small Llama on TinyStories:
 
 ```bash
-uv run python examples/train_llama_engine.py
+uv run python examples/train_llama_engine.py --chat-tokens
 ```
 
-Everything is a flag; `--help` lists them all. A few worth knowing:
+Defaults: sequence length 256, batch size 8 per rank, four accumulation steps,
+10,000 optimizer steps, and checkpoints at `./ckpt/model.pt`. `--chat-tokens`
+reserves vocabulary entries for later chat fine-tuning.
+
+To change the model and training recipe:
 
 ```bash
 uv run python examples/train_llama_engine.py \
-    --dataset roneneldan/TinyStories \
-    --tokenizer EleutherAI/gpt-neo-125m \
-    --hidden-size 512 --num-layers 8 --num-heads 8 \
-    --seq-len 512 --batch-size 16 --grad-accum-steps 4 \
-    --max-iters 20000 \
-    --optimizer muon --lr-schedule wsd \
-    --precision bf16_mixed
+  --dataset roneneldan/TinyStories \
+  --tokenizer EleutherAI/gpt-neo-125m \
+  --hidden-size 512 --num-layers 8 --num-heads 8 \
+  --seq-len 512 --batch-size 16 --grad-accum-steps 4 \
+  --max-iters 20000 --optimizer muon --lr-schedule wsd \
+  --precision bf16_mixed --chat-tokens
 ```
 
-The script drives [`ohara.runtime.OharaEngine`](../ohara/runtime/engine.py) for device placement,
-mixed precision, DDP and tensor parallel, and [`ohara.trainer.Trainer`](../ohara/trainer.py) for the
-loop itself (periodic eval, checkpoints, tok/s, MFU, bits-per-byte).
+`--dataset` also accepts local text, JSON, and Parquet inputs. Use `--text-column`,
+`--train-split`, and `--validation-split` to match the source.
 
-Multi-GPU is torchrun plus the same script:
+## Token bins
+
+For repeated runs, stage text and tokenize it once:
 
 ```bash
-# data parallel across 2 GPUs
+uv run python examples/prepare_scaling_data.py \
+  --dataset roneneldan/TinyStories --output-dir ./data/tinystories
+uv run python examples/pretokenize_corpus.py \
+  --corpus ./data/tinystories --chat-tokens
+uv run python examples/train_llama_engine.py \
+  --dataset ./data/tinystories --chat-tokens
+```
+
+Staging defaults to 100,000 training documents and 10,000 validation documents;
+set `--train-documents` and `--validation-documents` to change those limits.
+The tokenizer writes `train.bin`, `validation.bin`, and metadata sidecars.
+Training automatically uses bins when both splits exist. Pass `--no-token-bins`
+to read text instead. Tokenizer and chat-token settings must match the bins.
+
+The older `examples/prepare_dataset.py` workflow writes datasets for
+[`PreTokenizedDataset`](../ohara/dataset.py), not token bins for this entrypoint.
+
+## Multiple GPUs
+
+```bash
+# Data parallelism on two GPUs.
 uv run torchrun --nproc-per-node 2 examples/train_llama_engine.py
 
-# tensor parallel instead (--tp also reads the OHARA_TP env var)
+# Tensor parallelism on two GPUs.
 uv run torchrun --nproc-per-node 2 examples/train_llama_engine.py --tp 2
 ```
 
-With tensor parallelism, keep attention dropout at zero and prepare the model
-before constructing its optimizer. Prepare dataloaders before creating an
-iterator or starting workers. Ohara binds its supported iterable datasets to
-the data-parallel rank and world size; custom iterable datasets should expose
-`configure_data_parallel(rank, world_size)` and must yield identical inputs on
-all tensor-parallel ranks.
+`--tp` also reads `OHARA_TP`. Tensor-parallel attention requires zero dropout.
+When using the runtime API, prepare the model before constructing the optimizer
+and prepare dataloaders before creating iterators or workers. Custom iterable
+datasets must expose `configure_data_parallel(rank, world_size)` and yield the
+same inputs on tensor-parallel ranks.
 
-For resumable runs, use `--num-workers 0` from the start. Remote streaming also
-needs `--dataset-revision` set to the dataset's immutable 40-character commit;
-local text/JSON/Parquet and token-bin inputs are fingerprinted automatically.
-Then `--resume` restores model, optimizer, precision state, RNG, and the saved
-input cursor without tokenizing the consumed history again:
+## Resume
 
-```bash
-# Example: resume a run started with these same local-corpus arguments.
-uv run python examples/train_llama_engine.py --dataset ./data/my-corpus --num-workers 0 --resume
-```
-
-Resume validates batch size, sequence length, seed, data identity, DP layout,
-and the training recipe. Old checkpoints without an input contract and runs
-started with worker prefetch cannot provide exact resume and are rejected by
-`--resume`; their model weights remain loadable. Changing worker count to zero
-only after interruption does not recover the missing worker state.
-
-`--print-every` defaults to 10. Loss/timing scalars are read at reporting,
-evaluation, and checkpoint intervals; use `--print-every 1` for per-step output.
-MFU accounts for every participating GPU, including tensor-parallel ranks.
-
-Large vocabularies can make the output logits the peak-memory allocation. Pass
-`--loss-chunk-size 1024` (or another token count) to apply the vocabulary head
-and FP32 cross entropy in checkpointed chunks during training, and in ordinary
-chunks during evaluation. This recomputes each output chunk during backward to
-avoid retaining vocabulary-sized activations. The default `0` keeps the regular
-logits path.
-
-To watch it in W&B, run `uv run wandb login` first; `--logger trackio` logs locally without an account. It looks something like this:
-
-![train](./src/image.png)
-
-## Pretokenize first (optional)
-
-Download and tokenize a dataset into `./data`:
+Use `--num-workers 0` from the start. Remote streaming also requires an immutable
+40-character `--dataset-revision`; local inputs and token bins are fingerprinted.
+Resume with the same data and training arguments plus `--resume`:
 
 ```bash
-uv run python examples/prepare_dataset.py tinystories
+uv run python examples/train_llama_engine.py \
+  --dataset ./data/tinystories --chat-tokens --num-workers 0 --resume
 ```
 
-`tinystories`, `minipile`, `fineweb-edu` and `openhermes` are wired up; `--help` shows the flags
-(`--tokenizer` to override, `--push --hf-username you` to upload the result). Depending on the
-dataset this takes a while.
+Resume restores model, optimizer, precision, RNG, and input cursor. It validates
+the batch size, sequence length, seed, data identity, data-parallel layout, and
+training recipe. Legacy checkpoints without input state and runs started with
+worker prefetch cannot resume exactly; their model weights remain loadable.
+Changing worker count after interruption cannot recover the missing state.
 
-Under the hood that is [`ohara.pretokenize.DatasetPreprocessor`](../ohara/pretokenize.py), which you
-can also call directly for a corpus that is not in the list:
+## Memory and metrics
 
-```python
-from ohara.pretokenize import DatasetPreprocessor
+- `--loss-chunk-size 1024` applies the vocabulary head and loss in token chunks.
+  Training recomputes those chunks during backward to reduce activation memory.
+  The default `0` uses full logits.
+- `--print-every 10` controls progress output; use `1` for every step.
+- `--evaluate-bpb` enables bits-per-byte evaluation.
+- `--logger trackio` logs locally. For W&B, run `uv run wandb login` first.
+- MoE quantile balancing retains FP32 token-by-expert statistics until each
+  optimizer step. Memory grows with accumulated tokens and expert count;
+  distributed updates also gather statistics across ranks.
 
-DatasetPreprocessor(
-    dataset_name="roneneldan/TinyStories",
-    tokenizer_name="microsoft/phi-2",
-    splits=["train", "validation"],
-).process_and_save()
-```
-
-The result is read back by [`ohara.dataset.PreTokenizedDataset`](../ohara/dataset.py).
-
-## Scaling sweeps
-
-For iso-FLOP sweeps rather than a single run, `examples/scaling_laws.py` plans the grid, shells out
-to the training script for each point, and fits the curves:
-
-```bash
-uv run python examples/scaling_laws.py --help
-```
+For scaling sweeps, run `uv run python examples/scaling_laws.py --help`.
+For fine-tuning and serving, see the [quick start](../README.md#quick-start).

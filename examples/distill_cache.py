@@ -1,15 +1,10 @@
-"""Precompute a teacher's top-k logits over a pre-tokenized corpus.
+"""Cache teacher top-k logits for repeated student training runs.
 
-    python examples/distill_cache.py --teacher Qwen/Qwen3-0.6B-Base \
+    uv run python examples/distill_cache.py --teacher Qwen/Qwen3-0.6B-Base \
         --bin data/qwen_corpus/train.bin --out runs/qwen_top8 --blocks 76700
 
-Run once. Every student trained against this cache afterwards pays nothing for
-the teacher, which is what makes "is distillation faster than training from
-scratch?" answerable: the teacher's cost becomes a single measurable number
-rather than a tax on every step.
-
-The corpus must be tokenized with the *teacher's* tokenizer -- top-k indices are
-positions in the teacher's vocabulary, and token boundaries have to line up.
+The corpus must use the teacher's tokenizer so token boundaries and vocabulary
+indices match. Cache-build time is reported separately from student training.
 """
 
 from __future__ import annotations

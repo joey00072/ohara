@@ -1,11 +1,4 @@
-"""Checks for the grouped fine-grained MoE.
-
-The grouped dispatch is an optimisation of a loop that is easy to read and hard
-to get wrong. So the load-bearing test is that the two agree: if the sort,
-offsets, or scatter-add are subtly off, tokens silently get the wrong expert's
-output and training still "works", just worse. Everything else here guards a
-property that a shape check would not catch.
-"""
+"""Grouped MoE routing, dispatch gradients, balancing, and shared experts."""
 
 import unittest
 

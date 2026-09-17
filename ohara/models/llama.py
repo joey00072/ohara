@@ -35,24 +35,17 @@ class Config:
     moe_expert_hidden_dim: int | None = None
     rope_theta: float = 100000
     init_style: str = "standard"
-    # Mixture of experts. 0 experts keeps every layer's feed-forward dense.
-    # With moe_layer_interval=N, every Nth layer is an MoE and the rest stay dense,
-    # which is the usual way to buy capacity without paying routing cost everywhere.
+    # Zero experts selects dense layers; interval N selects every Nth layer for MoE.
     moe_num_experts: int = 0
     moe_experts_per_tok: int = 2
     moe_layer_interval: int = 1
     moe_gate_fn: str = "softmax"
     moe_quantile_balancing: bool = True
-    # Fine-grained MoE: many narrow routed experts plus always-on shared experts,
-    # dispatched with grouped matmuls instead of a per-expert Python loop. Required
-    # in practice above ~32 experts, where the loop's per-expert GEMMs and host
-    # sync dominate. See ohara/modules/moe_grouped.py.
+    # Grouped matmuls with optional shared experts; see modules/moe_grouped.py.
     moe_grouped: bool = False
     moe_num_shared_experts: int = 0
     moe_normalize_weights: bool = True
-    # Make the routed sum orthogonal to the shared expert's output before adding
-    # them (vector rejection, as in exclusive self-attention). Enforces shared
-    # expert isolation instead of hoping for it. See ohara/modules/moe_grouped.py.
+    # Remove the routed output's projection onto the shared output before adding.
     moe_shared_exclusive: bool = False
 
 

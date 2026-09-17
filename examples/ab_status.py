@@ -1,19 +1,10 @@
-"""Side-by-side dashboard for an A/B training comparison.
+"""Compare two training logs at their latest shared step.
 
-    python examples/ab_status.py --a runs/xsa_off.log --b runs/xsa_on.log \
-        --label-a baseline --label-b "shared-exclusive" --port 8083
+    uv run python examples/ab_status.py --a runs/xsa_off.log --b runs/xsa_on.log \
+        --label-a baseline --label-b shared-exclusive --port 8083
 
-Reads two training logs and shows both loss curves plus their difference. The
-difference is the point of the page, so it is the thing rendered largest and
-coloured: **green when B is better than A** (lower loss), red when it is worse.
-
-Both runs are read from their logs rather than a tracker, so the curves are dense
-(one point per iteration) and the page needs nothing from the training jobs.
-
-A note on reading the number: "better" here means lower validation
-bits-per-byte, compared at the same iteration. Comparing at the latest iteration
-of each run would be meaningless if one is ahead, so the page always aligns on
-the newest step both runs have reached.
+Shows both curves and their difference. Lower validation bits per byte for B
+is green; higher is red.
 """
 
 from __future__ import annotations

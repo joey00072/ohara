@@ -1,9 +1,4 @@
-"""Checks for the SFT entrypoint's checkpoint-loading path.
-
-``load_pretrained`` reconstructs a model from tensor shapes alone, so a change
-to the Llama module layout would silently break resuming from a base
-checkpoint. These tests pin that reconstruction against real checkpoints.
-"""
+"""SFT checkpoint reconstruction and vocabulary resizing."""
 
 import importlib.util
 import tempfile

@@ -1,19 +1,9 @@
-"""Flat pre-tokenized corpora, memory-mapped at training time.
+"""Memory-mapped, pre-tokenized corpora.
 
-Streaming text and tokenizing inside the training loop makes the tokenizer part
-of the critical path: the GPUs idle while the CPU turns bytes into ids, and the
-same documents get re-tokenized every epoch. Measured on a 2xA100 ClimbMix run,
-that showed up as a steady ~4.0s step punctuated by a ~15s stall every ~17
-steps, dragging the mean to 4.8s.
-
-The fix is to tokenize once, ahead of time, into a flat array of token ids on
-disk. Training then memory-maps that array and slices contiguous blocks out of
-it, which costs a memcpy and no Python.
-
-Layout is deliberately simple: one ``.bin`` of little-endian uint16 or uint32 ids, and
-a ``.json`` sidecar recording the tokenizer, token count and dtype so a corpus
-cannot be silently paired with the wrong vocabulary. uint16 holds any vocabulary
-up to 65,536, and larger vocabularies use uint32.
+Each corpus has a flat ``.bin`` of little-endian token IDs and a ``.json``
+sidecar with tokenizer identity, token count, and dtype. Vocabularies up to
+65,536 tokens use uint16; larger vocabularies use uint32. Training slices
+contiguous blocks without tokenizing text again.
 """
 
 from __future__ import annotations

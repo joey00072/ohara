@@ -1,16 +1,8 @@
-"""Supervised finetuning of a pretrained Llama into a chat model.
+"""Fine-tune a pretrained Llama on packed conversations with assistant-only loss.
 
-Picks up where ``train_llama_engine.py`` leaves off: loads a pretrained
-checkpoint, swaps the raw-text stream for packed conversations with
-assistant-only loss masks, and runs a short low-LR pass.
+    uv run python examples/train_sft.py --pretrained-checkpoint ./ckpt/model.pt
 
-    python examples/train_sft.py --pretrained-checkpoint ./ckpt/base.pt
-
-Following nanochat's ``chat_sft``: weight decay stays at zero (pretraining's
-cosine schedule already ramped it there), the learning rate starts at a fraction
-of the pretraining rate, and half the run is spent warming down. The model is
-small and the mixture is small, so SFT is minutes of work against hours of
-pretraining — the point is to teach the conversation format, not new knowledge.
+Uses zero weight decay, a reduced learning rate, and a warmdown schedule.
 """
 
 from __future__ import annotations

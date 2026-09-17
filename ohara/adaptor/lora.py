@@ -34,7 +34,6 @@ class LoRALinear(nn.Module):
     def reset_lora_parameters(self):
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
         nn.init.zeros_(self.lora_B)
-        # funny story behind math.sqrt(5) I'll write blog later
 
     def reset_parameters(self):
         if hasattr(self, "lora_A") and hasattr(self, "lora_B"):

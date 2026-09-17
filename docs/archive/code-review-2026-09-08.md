@@ -1,5 +1,8 @@
 # Ohara code review — fix report (2026-09-08)
 
+> Historical review. Findings and test results describe the revisions reviewed,
+> not the current repository. See the [documentation index](../README.md) for usage.
+
 Scope: everything under `ohara/`, `examples/`, `tests/`, packaging and docs.
 `experiments/` is excluded from this report.
 

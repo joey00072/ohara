@@ -1,14 +1,7 @@
-"""Streaming chat inference: load a finetuned checkpoint and talk to it.
+"""Streaming chat inference with conversation formatting and a KV cache.
 
-``ohara.inference.Inference`` generates a completion and prints it; a chat UI
-needs the opposite arrangement — incremental text handed back to a caller that
-decides what to do with it. :class:`ChatEngine` wraps a finetuned model with the
-conversation rendering from :mod:`ohara.chat` and yields decoded deltas as they
-are sampled.
-
-Decoding is incremental in a way that matters for BPE: a token can decode to a
-partial UTF-8 sequence or split a word, so text is emitted by diffing the decode
-of the full generated sequence rather than decoding tokens one at a time.
+ChatEngine yields text deltas from the decoded generated sequence. Decoding the
+sequence together preserves BPE boundaries and partial UTF-8 characters.
 """
 
 from __future__ import annotations

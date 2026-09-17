@@ -1,12 +1,9 @@
-# LLAMA
+# Llama
 
-build by meta ai (facebook)
+Meta's decoder language model family:
 
-LLAMA 1: https://arxiv.org/abs/2302.13971
+- [Llama 1 paper](https://arxiv.org/abs/2302.13971)
+- [Llama 2 paper](https://arxiv.org/abs/2307.09288)
+- [Ohara implementation](../../../ohara/models/llama.py)
 
-LLAMA 2: https://arxiv.org/abs/2307.09288
-
-### Key finding
-loss continues gose down train for longer, So train longer 
-
-![Alt text](image.png)
+![Llama training results](image.png)

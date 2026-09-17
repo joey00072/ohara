@@ -1,28 +1,14 @@
-"""Train a student with hard-label loss, cached teacher logits, or a blend.
+"""Train with hard labels, cached teacher logits, or a weighted blend.
 
-    # baseline: pure next-token cross-entropy
     uv run python examples/train_distill.py --distill-alpha 1.0 --teacher-cache runs/qwen_top8 ...
-
-    # distillation: half hard labels, half teacher top-k
     uv run python examples/train_distill.py --distill-alpha 0.5 --teacher-cache runs/qwen_top8 ...
 
-Both arms of an A/B run this same script and differ only in ``--distill-alpha``,
-so no code-path difference can confound the comparison. At ``alpha=1.0`` the
-teacher terms are skipped entirely and the loss is identical to ordinary
-pretraining.
+The token-averaged loss is::
 
-The loss is::
+    L = alpha * CE(hard labels) + (1 - alpha) * CE(teacher top-k + other)
 
-    L = alpha * CE(hard labels) + (1 - alpha) * CE(teacher top-k + "other")
-
-Both terms are summed over tokens and divided by the same token count, so the
-weighting means what it looks like it means.
-
-Validation is always pure cross-entropy on held-out data, which keeps
-bits-per-byte comparable between arms even though their training objectives
-differ. Bits-per-byte is also byte-normalised, so it stays comparable across
-tokenizers -- useful here, since this script runs on a Qwen-tokenized corpus
-while earlier runs used gpt-neo.
+At alpha=1, teacher terms are skipped. Validation always uses hard-label cross
+entropy and reports bits per byte for comparison across training objectives.
 """
 
 from __future__ import annotations

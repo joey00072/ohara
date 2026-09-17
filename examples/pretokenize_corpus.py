@@ -1,14 +1,9 @@
-"""Tokenize a staged corpus once into flat token bins for fast training.
+"""Convert staged JSONL splits to memory-mapped token bins.
 
-    python examples/pretokenize_corpus.py --corpus ./data/scaling_corpus
+    uv run python examples/pretokenize_corpus.py --corpus ./data/scaling_corpus
 
-Reads the ``{split}.jsonl`` files written by ``prepare_scaling_data.py`` and
-writes ``{split}.bin`` beside them. Training then memory-maps those instead of
-tokenizing text inside the training loop, which is what keeps the GPUs waiting.
-
-Run it once per (corpus, tokenizer) pair; the sidecar records which tokenizer
-produced each bin so a mismatch fails loudly at load rather than training on
-garbage ids.
+Reads ``{split}.jsonl`` and writes ``{split}.bin`` with tokenizer metadata for
+load-time compatibility checks. Run once per corpus and tokenizer combination.
 """
 
 from __future__ import annotations

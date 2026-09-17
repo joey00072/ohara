@@ -128,18 +128,10 @@ def batch_sequences_schema(tokenizer, prompts):
 
 
 def batch_sequences_lm(tokenizer, prompts):
-    """Locate the continuation inside the full sequence for a language-modeling task.
+    """Find the continuation span after the tokenized common prefix.
 
-    The two prompts are the context and the context plus its continuation, so the
-    scored span is whatever the second adds. Ideally the first tokenizes to an
-    exact prefix of the second, but with BPE that is not guaranteed: a
-    continuation starting mid-word merges with the last context token and both
-    sequences diverge one token early. Rather than reject those examples, score
-    from the last genuinely shared token onward.
-
-    The boundary token is then included in the scored span. That is the
-    conservative choice -- it can only add uncertainty to the continuation, never
-    hide any -- and it keeps tokenizer choice from silently dropping whole tasks.
+    BPE may merge the last context token with the continuation. Include that
+    boundary token in the scored span when the tokenizations diverge.
     """
     tokens = [_encode_with_bos(tokenizer, prompt) for prompt in prompts]
     tokens_without, tokens_with = tokens

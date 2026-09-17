@@ -1,22 +1,11 @@
-"""Export a training checkpoint to safetensors plus a config sidecar.
+"""Export checkpoint weights to ``model.safetensors`` and ``config.json``.
 
-    python examples/export_safetensors.py --checkpoint ckpt/moe_d12.pt --out export/moe-base
+    uv run python examples/export_safetensors.py --checkpoint ckpt/moe_d12.pt --out export/moe-base
 
-Training checkpoints are pickled ``.pt`` files holding optimizer state, RNG state
-and wrapper-prefixed weights. That is the right format to resume from and the
-wrong one to publish: it executes arbitrary code on load, it is several times
-larger than the weights, and the architecture is only recoverable by guessing
-from tensor shapes.
-
-The exported names and config are Ohara-native; load with Llama.from_pretrained,
-not Hugging Face AutoModel. The directory layout alone follows HF conventions.
-Use --dtype bfloat16 to publish smaller weights.
-
-This writes ``model.safetensors`` (weights only, no code execution) next to a
-``config.json`` recording the architecture. The config matters more than it
-looks: ``moe_experts_per_tok`` leaves no trace in any tensor shape, so without it
-a mixture-of-experts checkpoint loads with correct weights but routes differently
-than it was trained to.
+Exports Ohara-native weights for ``Llama.from_pretrained``, not HF AutoModel.
+Optimizer and RNG state are omitted. The config preserves settings such as MoE
+top-k that cannot be inferred from tensor shapes. Use ``--dtype bfloat16`` to
+reduce weight storage.
 """
 
 from __future__ import annotations

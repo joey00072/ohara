@@ -1,20 +1,10 @@
-"""Experiment tracking that degrades gracefully when nothing is configured.
+"""Noninteractive experiment tracking.
 
-``wandb`` is a dependency of this package, so it is always importable — but
-importable is not the same as usable. Without an API key it prompts on stdin,
-which on a detached training box means the run blocks forever on a question
-nobody will answer. That failure is worse than not logging at all.
+The ``auto`` backend tries configured W&B, then local Trackio, then disables
+logging with a diagnostic. W&B requires an API key, a netrc entry, or explicit
+offline mode so unattended runs cannot block on a login prompt.
 
-So the default backend is ``auto``, which resolves in this order:
-
-1. **wandb**, if a key is actually configured (``WANDB_API_KEY`` or a netrc
-   entry), or if an explicit offline ``WANDB_MODE`` is selected.
-2. **trackio**, which is local-first and needs no account — it writes SQLite
-   under ``~/.cache/huggingface/trackio``. https://github.com/gradio-app/trackio
-3. **nothing**, with a one-line note saying why, so the run still proceeds.
-
-Loggers here match the interface ``OharaEngine.log_dict`` expects: a
-``log_metrics(payload, step=None)`` method.
+Loggers implement ``log_metrics(payload, step=None)`` for ``OharaEngine``.
 """
 
 from __future__ import annotations

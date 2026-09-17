@@ -1,5 +1,6 @@
 # GPT
 
-Build by OpenAI
-this decoder of transformer
-source https://openai.com/research/language-unsupervised
+OpenAI's decoder-only Transformer language model.
+
+- [Original research](https://openai.com/research/language-unsupervised)
+- [Ohara model implementations](../../../ohara/models/)

@@ -1,12 +1,7 @@
-"""A small HTTP server for chatting with a finetuned ohara model.
+"""HTTP chat server with Server-Sent Events for streamed replies.
 
-Built on the standard library's ``http.server`` rather than a web framework:
-the whole surface is three endpoints, and a training box should not need a new
-dependency stack to talk to the model it just trained.
-
-Replies stream over Server-Sent Events, so tokens appear as they are sampled.
-Generation is serialized behind a lock — there is one model and one KV cache, so
-concurrent requests would interleave into each other's cache.
+Uses the standard library's ``http.server``. A lock serializes generation
+because requests share one model and KV cache.
 """
 
 from __future__ import annotations

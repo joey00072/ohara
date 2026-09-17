@@ -1,22 +1,12 @@
-"""Conversation rendering for chat finetuning, in nanochat's token layout.
+"""Chat tokens, conversation rendering, and assistant-only supervision masks.
 
-Pretraining sees raw text; a chat model additionally needs to know where a turn
-starts and stops, and which tokens it is supposed to *produce* rather than merely
-read. Both come from the same place: a small set of special tokens that wrap each
-message, plus a per-token supervision mask that is 1 only inside assistant turns.
+The turn layout follows nanochat::
 
-The token layout mirrors ``ref/nanochat``::
+    <bos> <|user_start|> ... <|user_end|> <|assistant_start|> ... <|assistant_end|>
 
-    <bos> <|user_start|> ... <|user_end|> <|assistant_start|> ... <|assistant_end|> ...
-
-with two differences that follow from ohara using Hugging Face tokenizers rather
-than a tokenizer trained in-repo:
-
-- there is no ``<|bos|>`` of our own; the wrapped tokenizer's BOS (or EOS, if it
-  has no BOS) delimits documents, exactly as it does during pretraining.
-- the conversation tokens are *added* to an existing vocabulary, so
-  ``len(tokenizer)`` grows. Build the model from the chat tokenizer in both
-  pretraining and SFT and the sizes line up; see :func:`load_chat_tokenizer`.
+Document boundaries use the tokenizer's BOS token, or EOS when BOS is absent.
+Chat tokens extend the existing vocabulary; size models with ``len(tokenizer)``
+after calling :func:`load_chat_tokenizer`.
 """
 
 from __future__ import annotations
