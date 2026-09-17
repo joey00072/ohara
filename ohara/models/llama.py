@@ -190,9 +190,14 @@ class Block(nn.Module):
         freqs_cis,
         kv_cache: KVCache | None = None,
         position_ids: int | None = None,
+        padding_mask: torch.Tensor | None = None,
     ):
         x = x + self.attn(self.norm1(x), mask, freqs_cis, kv_cache, position_ids)
-        x = x + self.ff(self.norm2(x))
+        normalized = self.norm2(x)
+        if self.is_moe:
+            x = x + self.ff(normalized, padding_mask=padding_mask)
+        else:
+            x = x + self.ff(normalized)
         return x
 
 
@@ -285,9 +290,15 @@ class Llama(nn.Module):
         loss_chunk_size: int | None = None,
         ignore_index: int = -1,
         return_loss_details: bool = False,
+        padding_mask: torch.Tensor | None = None,
     ):
         if x.ndim != 2:
             raise ValueError("input token IDs must have shape (batch, sequence)")
+        if padding_mask is not None:
+            if padding_mask.dtype != torch.bool or padding_mask.shape != x.shape:
+                raise ValueError("padding_mask must be boolean and match input token IDs")
+            if padding_mask.device != x.device:
+                raise ValueError("padding_mask must be on the input device")
         if targets is not None:
             if targets.shape != x.shape:
                 raise ValueError("targets must match the input batch and sequence dimensions")
@@ -331,7 +342,10 @@ class Llama(nn.Module):
         # Forward through layers with KV cache
         for idx, layer in enumerate(self.layers):
             cache = kv_cache[idx] if kv_cache is not None else None
-            x = layer(x, mask, freqs_cis, cache, start_pos if cache is not None else None)
+            x = layer(
+                x, mask, freqs_cis, cache, start_pos if cache is not None else None,
+                padding_mask=padding_mask,
+            )
 
         x = self.norm(x)
         if targets is None:

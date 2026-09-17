@@ -302,7 +302,9 @@ class Trainer:
         total_bytes = torch.zeros((), device=self.engine.device, dtype=torch.float64)
 
         for _ in range(requested_batches):
-            data, target = self.engine.to_device(next(evaluation_iterator))
+            batch = self.engine.to_device(next(evaluation_iterator))
+            data, target = batch[:2]
+            model_kwargs = {"padding_mask": batch[2]} if len(batch) == 3 else {}
             self._maybe_cudagraph_step_begin()
             flat_target = target.reshape(-1)
             valid = flat_target != self.ignore_index
@@ -316,11 +318,12 @@ class Trainer:
                         loss_chunk_size=self.loss_chunk_size,
                         ignore_index=self.ignore_index,
                         return_loss_details=True,
+                        **model_kwargs,
                     )
                     config = getattr(self._raw_model(), "config", None)
                     batch_vocab_size = getattr(config, "vocab_size", None)
                 else:
-                    logits: torch.Tensor = self.model(data)
+                    logits: torch.Tensor = self.model(data, **model_kwargs)
                     # Match nanochat: reduced-precision model compute, FP32 loss math.
                     flat_logits = logits.float().reshape(-1, logits.size(-1))
                     token_losses = F.cross_entropy(
@@ -546,10 +549,10 @@ class Trainer:
                 for _ in range(self.micro_batch)
             ]
             self.train_batches_consumed += self.micro_batch
-            self.tokens_per_iter = sum(data.numel() for data, _ in accumulated_batches)
+            self.tokens_per_iter = sum(batch[0].numel() for batch in accumulated_batches)
             local_valid_tokens = sum(
-                (target != self.ignore_index).sum()
-                for _, target in accumulated_batches
+                (batch[1] != self.ignore_index).sum()
+                for batch in accumulated_batches
             )
             counts = self._all_reduce_data_sum(torch.stack((
                 local_valid_tokens,
@@ -567,7 +570,9 @@ class Trainer:
                 (), device=self.engine.device, dtype=torch.float32
             )
             loss_is_finite = torch.ones((), device=self.engine.device, dtype=torch.int32)
-            for micro_step, (data, target) in enumerate(accumulated_batches):
+            for micro_step, batch in enumerate(accumulated_batches):
+                data, target = batch[:2]
+                model_kwargs = {"padding_mask": batch[2]} if len(batch) == 3 else {}
                 sync_context = (
                     self.engine.no_backward_sync(
                         self.model, enabled=micro_step < self.micro_batch - 1
@@ -584,9 +589,10 @@ class Trainer:
                                 targets=target,
                                 loss_chunk_size=self.loss_chunk_size,
                                 ignore_index=self.ignore_index,
+                                **model_kwargs,
                             )
                         else:
-                            logits: torch.Tensor = self.model(data)
+                            logits: torch.Tensor = self.model(data, **model_kwargs)
                             loss_sum = F.cross_entropy(
                                 logits.float().reshape(-1, logits.size(-1)),
                                 target.reshape(-1),
@@ -626,10 +632,8 @@ class Trainer:
                 # them with the skipped gradients rather than updating the bias
                 # or carrying them into the next valid optimizer step.
                 for module in self._raw_model().modules():
-                    for name in ("qb_beta_sum", "qb_beta_count"):
-                        buffer = getattr(module, name, None)
-                        if isinstance(buffer, torch.Tensor):
-                            buffer.zero_()
+                    if callable(getattr(module, "reset_qb_stats", None)):
+                        module.reset_qb_stats()
             elif self.apply_router_balancing is not None:
                 # Quantile balancing solves for the router bias in closed form from
                 # statistics accumulated over this step's micro-batches, so it belongs

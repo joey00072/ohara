@@ -349,6 +349,7 @@ def _run(cleanup: ExitStack) -> None:
         "tokenizer": tokenizer,
         "max_length": seq_len,
         "buffer_size": args.buffer_size,
+        "return_padding_mask": config.moe_num_experts > 0,
         "data_rank": engine.data_parallel_rank,
         "data_world_size": engine.data_parallel_world_size,
     }

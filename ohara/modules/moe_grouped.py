@@ -31,11 +31,11 @@ reaches the same place by a different update rule.
 from __future__ import annotations
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
 from ohara.modules.router import RouterLinear
+from ohara.modules.quantile import update_bias, valid_tokens
 
 
 def _grouped_mm_available() -> bool:
@@ -123,8 +123,7 @@ class GroupedMoE(nn.Module):
         # the optimizer must never touch it. Checkpointed, so a resumed run starts
         # already balanced.
         self.register_buffer("router_bias", torch.zeros(num_experts))
-        self.register_buffer("qb_beta_sum", torch.zeros(num_experts), persistent=False)
-        self.register_buffer("qb_beta_count", torch.zeros(()), persistent=False)
+        self.register_buffer("qb_samples", torch.empty(0, num_experts), persistent=False)
         self.register_buffer(
             "expert_counts", torch.zeros(num_experts, dtype=torch.long), persistent=False
         )
@@ -134,7 +133,7 @@ class GroupedMoE(nn.Module):
         """Move balancing state without applying reduced-precision casts to it."""
         fp32_buffers = {
             name: self._buffers[name].detach().clone()
-            for name in ("router_bias", "qb_beta_sum", "qb_beta_count")
+            for name in ("router_bias", "qb_samples")
             if self._buffers.get(name) is not None
         }
         result = super()._apply(fn, recurse=recurse)
@@ -267,7 +266,8 @@ class GroupedMoE(nn.Module):
         projection = (target.float() * unit).sum(dim=-1, keepdim=True) * unit
         return (target.float() - projection).to(target.dtype)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, padding_mask: torch.Tensor | None = None) -> torch.Tensor:
+        valid = valid_tokens(x, padding_mask)
         batch, seq_len, dim = x.shape
         flat_x = x.reshape(batch * seq_len, dim)
 
@@ -296,43 +296,32 @@ class GroupedMoE(nn.Module):
 
         if self.training:
             if self.quantile_balancing:
-                self._accumulate_qb(logits.detach(), alpha.detach())
+                self._accumulate_qb(logits.detach(), alpha.detach(), valid)
             self.expert_counts += torch.bincount(
-                expert_indices.detach().reshape(-1), minlength=self.num_experts
+                (expert_indices if valid is None else expert_indices[valid]).detach().reshape(-1),
+                minlength=self.num_experts
             )
         return out.view(batch, seq_len, dim)
 
     # -- balancing -------------------------------------------------------
 
     @torch.no_grad()
-    def _accumulate_qb(self, logits: torch.Tensor, alpha: torch.Tensor) -> None:
-        # An expert wins a token when its logit beats that token's threshold alpha.
-        # So the bias giving an expert exactly its fair share is the fair-share-th
-        # largest of (logit - alpha) across the batch. No loss, no coefficient.
-        s_minus_alpha = logits - alpha
-        num_tokens = s_minus_alpha.size(0)
-        fair_share = max(1, num_tokens * self.num_experts_per_tok // self.num_experts)
-        beta = torch.topk(s_minus_alpha.t(), fair_share, dim=-1).values[:, -1]
-        self.qb_beta_sum += beta
-        self.qb_beta_count += 1
+    def _accumulate_qb(
+        self, logits: torch.Tensor, alpha: torch.Tensor, valid: torch.Tensor | None = None
+    ) -> None:
+        samples = (logits - alpha).detach().float()
+        if valid is not None:
+            samples = samples[valid]
+        self.qb_samples = torch.cat((self.qb_samples, samples), dim=0)
 
     @torch.no_grad()
-    def apply_qb_update(self) -> None:
-        """Fold accumulated statistics into the router bias. Once per optimizer step."""
-        beta_sum = self.qb_beta_sum.clone()
-        count = self.qb_beta_count.clone()
-        if dist.is_available() and dist.is_initialized():
-            dist.all_reduce(beta_sum)
-            dist.all_reduce(count)
-        if count.item() == 0:
-            return
-        beta = beta_sum / count
-        bias = -beta
-        # Adding a constant to every expert cannot change the top-k, so remove the
-        # mean to stop the vector drifting over a long run.
-        self.router_bias.copy_(bias - bias.mean())
-        self.qb_beta_sum.zero_()
-        self.qb_beta_count.zero_()
+    def reset_qb_stats(self) -> None:
+        self.qb_samples = self.qb_samples.new_empty((0, self.num_experts))
+
+    @torch.no_grad()
+    def apply_qb_update(self, process_group=None) -> None:
+        """Solve over all valid tokens once per optimizer step."""
+        update_bias(self, process_group)
 
     @torch.no_grad()
     def expert_load(self, reset: bool = True) -> torch.Tensor:

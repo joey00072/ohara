@@ -239,6 +239,8 @@ class ConversationDataset(DataParallelIterableDataset, IterableDataset):
     Yields ``(inputs, targets)`` of shape ``(max_length,)``, ready for the same
     ``DataLoader`` and ``Trainer`` the pretraining path uses. ``targets`` is
     ``ignore_index`` everywhere except tokens an assistant turn should produce.
+    With ``return_padding_mask=True``, yields a third boolean tensor marking
+    actual input padding for MoE statistics; ignored prompt tokens remain valid.
 
     Rows are filled best-fit from a lookahead buffer: take the longest remaining
     conversation that still fits. This keeps padding low without ever cutting a
@@ -258,6 +260,7 @@ class ConversationDataset(DataParallelIterableDataset, IterableDataset):
         infinite: bool = True,
         data_rank: int | None = None,
         data_world_size: int | None = None,
+        return_padding_mask: bool = False,
     ) -> None:
         super().__init__()
         if max_length < 2:
@@ -273,6 +276,7 @@ class ConversationDataset(DataParallelIterableDataset, IterableDataset):
         self.max_length = max_length
         self.buffer_size = buffer_size
         self.ignore_index = ignore_index
+        self.return_padding_mask = return_padding_mask
         self.seed = seed
         self.shuffle = shuffle
         self.infinite = infinite
@@ -322,7 +326,7 @@ class ConversationDataset(DataParallelIterableDataset, IterableDataset):
                 continue
             yield ids, mask
 
-    def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+    def __iter__(self) -> Iterator[tuple[torch.Tensor, ...]]:
         self._mark_iterator_started()
         epoch = 0
         while True:
@@ -378,7 +382,12 @@ class ConversationDataset(DataParallelIterableDataset, IterableDataset):
                     targets,
                     torch.full_like(targets, self.ignore_index),
                 )
-                yield inputs, targets
+                if self.return_padding_mask:
+                    # Use lengths: PAD may equal EOS, and prompt targets are ignored too.
+                    padding_mask = torch.arange(self.max_length) >= self.row_capacity - padding
+                    yield inputs, targets, padding_mask
+                else:
+                    yield inputs, targets
 
             if not self.infinite:
                 return

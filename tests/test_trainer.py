@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 from ohara.runtime import EngineConfig, OharaEngine, PrecisionConfig, PrecisionMode
 from ohara.trainer import Trainer
+from ohara.modules.moe import MoE
 
 
 class EchoDataset(IterableDataset):
@@ -223,8 +224,8 @@ class TrainerTests(unittest.TestCase):
         trainer.grad_clip_norm = 1.0
         before = trainer.model.scale.detach().clone()
         old_scale = trainer.engine._scaler.get_scale()
-        trainer.model.register_buffer("qb_beta_sum", torch.tensor(float("inf")))
-        trainer.model.register_buffer("qb_beta_count", torch.tensor(1.0))
+        trainer.model.balancer = MoE(2, 4, num_experts=2, num_experts_per_tok=1)
+        trainer.model.balancer.qb_samples = torch.full((3, 2), float("inf"))
         calls = []
         trainer.apply_router_balancing = lambda model: calls.append(model)
         # A backward hook causes an overflow while the forward loss is finite.
@@ -236,8 +237,7 @@ class TrainerTests(unittest.TestCase):
         torch.testing.assert_close(trainer.model.scale, before)
         self.assertLess(trainer.engine._scaler.get_scale(), old_scale)
         self.assertEqual(calls, [])
-        self.assertEqual(trainer.model.qb_beta_sum.item(), 0)
-        self.assertEqual(trainer.model.qb_beta_count.item(), 0)
+        self.assertEqual(trainer.model.balancer.qb_samples.numel(), 0)
 
     def test_resume_timing_warmup_is_relative_to_restart(self):
         trainer = self._build_trainer(max_iters=20, eval_iters=0)

@@ -33,19 +33,29 @@ class DispatchEquivalenceTests(unittest.TestCase):
     def test_reference_and_grouped_agree(self):
         if not torch.cuda.is_available():
             self.skipTest("grouped_mm needs CUDA")
-        moe = build().cuda().to(torch.float32).eval()
-        x = torch.randn(2, 16, 32, device="cuda")
+        moe = build(num_shared_experts=0).cuda().bfloat16().eval()
+        with torch.no_grad():
+            moe.w_down.normal_(0, 0.1)
+        x = torch.randn(2, 16, 32, device="cuda", dtype=torch.bfloat16, requires_grad=True)
         flat = x.reshape(-1, 32)
         indices, weights, _, _ = moe._route(flat)
         weights = weights.to(flat.dtype)
         reference = moe._dispatch_reference(flat, indices, weights)
         grouped = moe._dispatch_grouped(flat, indices, weights)
-        torch.testing.assert_close(grouped, reference, rtol=1e-4, atol=1e-4)
+        self.assertGreater(reference.abs().sum().item(), 0)
+        torch.testing.assert_close(grouped, reference, rtol=0.05, atol=0.005)
+        parameters = (x, *moe.parameters())
+        ref_grads = torch.autograd.grad(reference.float().square().sum(), parameters, retain_graph=True)
+        grouped_grads = torch.autograd.grad(grouped.float().square().sum(), parameters)
+        for got, expected in zip(grouped_grads, ref_grads):
+            torch.testing.assert_close(got, expected, rtol=0.05, atol=0.005)
 
     def test_reference_dispatch_routes_each_token_to_its_experts(self):
         # Verified without CUDA: build the expected output one token at a time.
         moe = build(num_shared_experts=0).eval()
-        x = torch.randn(1, 6, 32)
+        with torch.no_grad():
+            moe.w_down.normal_(0, 0.1)
+        x = torch.randn(1, 6, 32, requires_grad=True)
         flat = x.reshape(-1, 32)
         indices, weights, _, _ = moe._route(flat)
         got = moe._dispatch_reference(flat, indices, weights.to(flat.dtype))
@@ -57,7 +67,13 @@ class DispatchEquivalenceTests(unittest.TestCase):
                 xt = flat[token : token + 1]
                 hidden = torch.nn.functional.silu(xt @ moe.w_gate[e]) * (xt @ moe.w_up[e])
                 expected[token] += (hidden @ moe.w_down[e])[0] * weights[token, slot]
+        self.assertGreater(expected.abs().sum().item(), 0)
         torch.testing.assert_close(got, expected, rtol=1e-4, atol=1e-4)
+        parameters = (x, *moe.parameters())
+        actual_grads = torch.autograd.grad(got.square().sum(), parameters, retain_graph=True)
+        expected_grads = torch.autograd.grad(expected.square().sum(), parameters)
+        for actual, reference in zip(actual_grads, expected_grads):
+            torch.testing.assert_close(actual, reference, rtol=1e-4, atol=1e-5)
 
 
 class SharedExpertTests(unittest.TestCase):
@@ -203,7 +219,7 @@ class QuantileBalancingTests(unittest.TestCase):
     def test_eval_mode_does_not_accumulate(self):
         moe = build().eval()
         moe(torch.randn(4, 16, 32))
-        self.assertEqual(float(moe.qb_beta_count), 0.0)
+        self.assertEqual(moe.qb_samples.numel(), 0)
 
     def test_global_load_helper_includes_grouped_moe(self):
         from ohara.modules.moe import expert_load
@@ -219,17 +235,15 @@ class QuantileBalancingTests(unittest.TestCase):
         values = torch.tensor([0.1001, -0.2002, 0.3003, -0.4004, 0.5005, -0.6006, 0.7007, -0.8008])
         with torch.no_grad():
             moe.router_bias.copy_(values)
-            moe.qb_beta_sum.copy_(values * 3)
-            moe.qb_beta_count.fill_(257)
+            moe.qb_samples = (values * 3).unsqueeze(0).clone()
 
         moe.bfloat16().half()
 
         self.assertEqual(moe.w_gate.dtype, torch.float16)
-        for name in ("router_bias", "qb_beta_sum", "qb_beta_count"):
+        for name in ("router_bias", "qb_samples"):
             self.assertEqual(getattr(moe, name).dtype, torch.float32)
         self.assertTrue(torch.equal(moe.router_bias, values))
-        self.assertTrue(torch.equal(moe.qb_beta_sum, values * 3))
-        self.assertEqual(moe.qb_beta_count.item(), 257)
+        self.assertTrue(torch.equal(moe.qb_samples, (values * 3).unsqueeze(0)))
 
     def test_assign_load_keeps_router_bias_fp32(self):
         moe = build().bfloat16()
@@ -242,7 +256,7 @@ class QuantileBalancingTests(unittest.TestCase):
         with torch.device("meta"):
             moe = build()
         moe.to_empty(device="cpu")
-        for name in ("router_bias", "qb_beta_sum", "qb_beta_count"):
+        for name in ("router_bias", "qb_samples"):
             buffer = getattr(moe, name)
             self.assertEqual(buffer.device.type, "cpu")
             self.assertEqual(buffer.dtype, torch.float32)
