@@ -60,6 +60,8 @@ def test_real_training_resume_matches_dropout_optimizer_and_cursor(tmp_path):
     trainer.train_batches_consumed = state["train_batches_consumed"]
     trainer.train_tokens_seen = state["train_tokens_seen"]
     torch.set_rng_state(state["torch_rng_state"])
+    if "cuda_rng_state_all" in state:
+        torch.cuda.set_rng_state_all(state["cuda_rng_state_all"])
     # Match CLI startup validation after restoring the process RNG.
     trainer.evaluate(trainer.val_dataloader, 1)
     trainer.train(start_iter=state["idx"])

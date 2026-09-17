@@ -46,6 +46,7 @@ for your own data, multiple GPUs, and resuming runs. Each script accepts `--help
 
 - [Models](./ohara/models/) — Llama, Qwen3, Mamba, RetNet, and others.
 - [Examples](./examples/) — training, evaluation, export, and scaling sweeps.
+- [Qwen3.8-Flash-Next](./docs/qwen38.md) — small-scale backbone and MTP training example.
 - [Documentation and paper notes](./docs/README.md).
 - [Experiments](./experiments/) — per-paper research snapshots.
 - [Speedrun](./runs/speedrun.sh) — the full data → pretrain → fine-tune → chat pipeline.

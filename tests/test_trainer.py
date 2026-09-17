@@ -1,5 +1,7 @@
 import unittest
 import tempfile
+import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -292,7 +294,10 @@ class TrainerTests(unittest.TestCase):
             )
 
     def test_nonfinite_unlogged_step_stops_before_optimizer(self):
-        trainer = self._build_trainer(max_iters=5, eval_iters=0)
+        # The catchable exception is a CPU contract. CUDA's asynchronous assert
+        # aborts its device context and must be exercised in a separate process.
+        with patch("torch.cuda.is_available", return_value=False):
+            trainer = self._build_trainer(max_iters=5, eval_iters=0)
         trainer.print_every = 100
         trainer.model.scale.data.fill_(float("nan"))
         with patch.object(trainer.engine, "optimizer_step") as step:
@@ -300,6 +305,22 @@ class TrainerTests(unittest.TestCase):
                 trainer.train()
         step.assert_not_called()
         trainer.close()
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_cuda_nonfinite_guard_fails_in_isolated_process(self):
+        script = """
+import torch
+from ohara.trainer import Trainer
+Trainer._check_device_condition(torch.tensor(False, device="cuda"), "Non-finite test")
+torch.cuda.synchronize()
+"""
+        result = subprocess.run(
+            ["uv", "run", "--active", "--no-sync", "python", "-c", script],
+            capture_output=True, text=True, timeout=90,
+            env={**os.environ, "CUDA_LAUNCH_BLOCKING": "1"},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Non-finite test", result.stderr)
 
     def test_evaluation_preserves_stateful_training_cursor(self):
         class StatefulEcho(EchoDataset):

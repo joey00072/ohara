@@ -2,6 +2,7 @@
 
 - [Quick start](../README.md): install, train, and chat.
 - [Pretraining](pretrain.md): data preparation, distributed training, and resume.
+- [Qwen3.8-Flash-Next](qwen38.md): small-scale backbone and MTP example, GPU kernels, and tests.
 
 ## Implementation notes
 

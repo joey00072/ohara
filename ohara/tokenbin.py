@@ -56,7 +56,7 @@ def write_token_bin(
 ) -> dict[str, object]:
     """Tokenize ``documents`` into a flat unsigned ``.bin`` plus a JSON sidecar.
 
-    Each document is prefixed with a boundary token (BOS, else EOS) so packed
+    Each document is prefixed with a boundary token (BOS, else EOS).
     No separate EOS is appended: tokenizers with distinct BOS/EOS need a
     different document recipe to learn explicit stopping. Packed
     blocks keep document starts visible to the model, matching how

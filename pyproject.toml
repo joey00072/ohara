@@ -43,6 +43,7 @@ include = ["ohara*"]
 [tool.setuptools.package-data]
 "ohara.utils" = ["data/*.txt"]
 "ohara.webui" = ["static/*"]
+"ohara.models.qwen38" = ["LICENSE"]
 
 [tool.uv]
 required-version = ">=0.8.0"
