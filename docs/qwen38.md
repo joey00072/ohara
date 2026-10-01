@@ -20,6 +20,10 @@ For real data, replace `--synthetic` with `--train-bin path/to/train.bin` from
 the [token-bin pipeline](pretrain.md#token-bins). Pass `--config settings.json`
 with `vocab_size` and `eos_token_id` matching the tokenizer.
 
+Use `--tokens-per-step` to set the global token budget per optimizer update, or
+`--grad-accum-steps` to set accumulation directly (default: 1). The token budget
+must divide evenly by `seq_len * micro_batch_size * (world_size / cp_size)`.
+
 The default model has 4 layers, width 128, 8 experts with top-2 routing, and one
 MTP horizon. Inspect either preset without allocating weights:
 

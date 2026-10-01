@@ -8,6 +8,7 @@ See docs/qwen38.md for token bins, FSDP2, kernel dependencies, and checkpoints.
 
 import argparse
 import json
+import math
 import os
 import time
 from contextlib import nullcontext
@@ -39,7 +40,9 @@ def parse_args():
     parser.add_argument("--synthetic", action="store_true", help="random-token smoke test; not a model-quality benchmark")
     parser.add_argument("--seq-len", type=int, default=128)
     parser.add_argument("--micro-batch-size", type=int, default=1)
-    parser.add_argument("--grad-accum-steps", type=int, default=1)
+    batch = parser.add_mutually_exclusive_group()
+    batch.add_argument("--grad-accum-steps", type=int)
+    batch.add_argument("--tokens-per-step", type=int, help="global token budget per optimizer step; derives gradient accumulation")
     parser.add_argument("--cp-size", type=int, default=1, help="context ranks per training example")
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
@@ -53,6 +56,30 @@ def parse_args():
     parser.add_argument("--resume", type=Path, help="completed step directory written by this script")
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
+
+
+def validate_training_args(args, world):
+    for name in ("seq_len", "micro_batch_size", "cp_size", "steps", "loss_chunk_size", "save_every", "plan_world_size"):
+        if getattr(args, name) < 1:
+            raise ValueError(f"{name} must be positive")
+    if args.seq_len < 2:
+        raise ValueError("seq_len must be at least 2")
+    for name in ("learning_rate", "grad_clip", "weight_decay"):
+        value = getattr(args, name)
+        if not math.isfinite(value) or value < 0 or (name != "weight_decay" and value == 0):
+            raise ValueError(f"invalid {name}: {value}")
+    if world < 1 or world % args.cp_size:
+        raise ValueError("cp-size must divide a positive WORLD_SIZE")
+    tokens_per_microstep = world // args.cp_size * args.micro_batch_size * args.seq_len
+    if args.tokens_per_step is not None:
+        if args.tokens_per_step < 1 or args.tokens_per_step % tokens_per_microstep:
+            raise ValueError(f"tokens-per-step must be a positive multiple of {tokens_per_microstep}")
+        args.grad_accum_steps = args.tokens_per_step // tokens_per_microstep
+    elif args.grad_accum_steps is None:
+        args.grad_accum_steps = 1
+    if args.grad_accum_steps < 1:
+        raise ValueError("grad_accum_steps must be positive")
+    return tokens_per_microstep * args.grad_accum_steps
 
 
 class TrainingState:
@@ -126,11 +153,8 @@ def resume_checkpoint(path, model, optimizer, loader, recipe, rank):
 
 def main():
     args = parse_args()
-    for name in ("seq_len", "micro_batch_size", "grad_accum_steps", "cp_size", "steps", "loss_chunk_size", "save_every", "plan_world_size"):
-        if getattr(args, name) < 1:
-            raise ValueError(f"{name} must be positive")
-    if args.seq_len < 2 or args.learning_rate <= 0 or args.grad_clip <= 0 or args.weight_decay < 0:
-        raise ValueError("invalid sequence length or optimizer settings")
+    world = int(os.environ.get("WORLD_SIZE", "1"))
+    tokens_per_step = validate_training_args(args, world)
     overrides = json.loads(args.config.read_text()) if args.config else {}
     overrides["backend"] = args.backend
     if args.preset == "official":
@@ -154,9 +178,6 @@ def main():
     if args.preset == "official" and (not torch.cuda.is_available() or int(os.environ.get("WORLD_SIZE", "1")) < 2):
         raise ValueError("official-size training requires a multi-GPU torchrun launch; use --describe without GPUs")
 
-    world = int(os.environ.get("WORLD_SIZE", "1"))
-    if world % args.cp_size:
-        raise ValueError("cp-size must divide WORLD_SIZE")
     if args.cp_size > 1 and args.seq_len % (args.cp_size * cfg.block_size):
         raise ValueError("seq-len must be divisible by cp-size * block_size")
     if args.cp_size > 1 and args.backend != "torch" and args.micro_batch_size != 1:
@@ -226,8 +247,11 @@ def main():
                 mean_loss += loss.detach()
             norm = (clip_grad_norm(model, args.grad_clip) if distributed
                     else torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip))
-            if not bool(torch.isfinite(norm)):
-                raise RuntimeError("non-finite gradient norm")
+            finite = (torch.isfinite(mean_loss) & torch.isfinite(norm)).to(torch.int32)
+            if distributed:
+                dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+            if not bool(finite):
+                raise RuntimeError("non-finite loss or gradient norm")
             optimizer.step()
             step += 1
             if distributed:
@@ -236,7 +260,6 @@ def main():
             if device.type == "cuda":
                 torch.cuda.synchronize()
             elapsed = time.perf_counter() - started
-            tokens_per_step = world // args.cp_size * args.micro_batch_size * args.seq_len * args.grad_accum_steps
             if rank == 0:
                 print(f"step={step} loss={mean_loss.item():.4f} seconds={elapsed:.3f} tokens/s={tokens_per_step / elapsed:,.0f}", flush=True)
             if args.checkpoint_dir and (step % args.save_every == 0 or step == args.steps):
