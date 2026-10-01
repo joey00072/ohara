@@ -3,6 +3,7 @@
 - [Quick start](../README.md): install, train, and chat.
 - [Pretraining](pretrain.md): data preparation, distributed training, and resume.
 - [Qwen3.8-Flash-Next](qwen38.md): small-scale backbone and MTP example, GPU kernels, and tests.
+- [Llama versus Qwen Next](pretraining-comparison.md): matched-token 100M pretraining experiment.
 
 ## Implementation notes
 
