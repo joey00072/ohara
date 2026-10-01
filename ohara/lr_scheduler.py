@@ -14,8 +14,8 @@ class Scheduler:
 
 @dataclass
 class CosineScheduler:
-    learning_rate: float = 3e-4  # Karpathy constant
-    min_lr: float = 3e-5  # 1/10 of lr as per chichilla papaer
+    learning_rate: float = 3e-4
+    min_lr: float = 3e-5
     warmup_iters: int = 1000
     max_iters: int = 100_0000
 
@@ -45,8 +45,3 @@ class CosineScheduler:
 
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
         return self.min_lr + coeff * (self.learning_rate - self.min_lr)
-
-
-# TODO: jagged cosine learning rate for relora
-# I belive parameter efficiency pretraning is possibe only one way to find out
-# relora would be good start

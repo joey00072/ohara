@@ -44,12 +44,22 @@ for your own data, multiple GPUs, and resuming runs. Each script accepts `--help
 
 ## Explore
 
-- [Models](./ohara/models/) — Llama, Qwen3, Mamba, RetNet, and others.
-- [Examples](./examples/) — training, evaluation, export, and scaling sweeps.
-- [Qwen3.8-Flash-Next](./docs/qwen38.md) — small-scale backbone and MTP training example.
-- [Documentation and paper notes](./docs/README.md).
-- [Experiments](./experiments/) — per-paper research snapshots.
-- [Speedrun](./runs/speedrun.sh) — the full data → pretrain → fine-tune → chat pipeline.
+| Location | Purpose |
+| --- | --- |
+| [ohara/models/](./ohara/models/) | Model implementations: start with Llama or Qwen3. |
+| [ohara/modules/](./ohara/modules/) | Shared attention, feed-forward, routing, and cache layers. |
+| [ohara/runtime/](./ohara/runtime/) | Device placement, precision, parallelism, and checkpointing. |
+| [ohara/trainer.py](./ohara/trainer.py) | Training loop, evaluation, and metrics. |
+| [ohara/adaptor/lora.py](./ohara/adaptor/lora.py) | LoRA replacement, freezing, and merging. |
+| [examples/](./examples/) | Command-line entrypoints for training, evaluation, and export. |
+| [tests/](./tests/) | Unit, integration, and distributed regression tests. |
+| [docs/](./docs/README.md) | Usage guides, paper notes, and archived reviews. |
+| [experiments/](./experiments/) | Frozen per-paper research snapshots. |
+
+The [speedrun script](./runs/speedrun.sh) connects data preparation, pretraining,
+fine-tuning, and chat. See the [Qwen3.8 guide](./docs/qwen38.md) for its backbone,
+MTP training, and GPU kernels. `ref/` contains local read-only reference clones;
+the package does not depend on them.
 
 ## Development
 

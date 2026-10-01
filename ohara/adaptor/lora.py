@@ -1,3 +1,5 @@
+"""Low-rank adapters for linear layers, with in-place merging for inference."""
+
 from __future__ import annotations
 
 import math
@@ -20,7 +22,6 @@ class LoRALinear(nn.Module):
         self.rank = rank
         self.lora_alpha = lora_alpha
         self.merged = False
-        self.enable_lora = True
 
         self.lora_dropout = nn.Dropout(p=lora_dropout) if lora_dropout > 0.0 else nn.Identity()
         self.linear = torch.nn.Linear(in_features, out_features, **kwargs)
@@ -30,6 +31,19 @@ class LoRALinear(nn.Module):
             self.lora_B = nn.Parameter(torch.zeros((out_features, rank)))
             self.scaling = self.lora_alpha / self.rank
             self.reset_parameters()
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        destination[prefix + "_merged"] = torch.tensor(self.merged, dtype=torch.bool)
+
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
+        # Legacy checkpoints have no marker and are treated as unmerged.
+        self.merged = bool(state_dict.pop(prefix + "_merged", False))
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
 
     def reset_lora_parameters(self):
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
@@ -59,7 +73,9 @@ class LoRALinear(nn.Module):
         return pretrained + lora
 
 
-def lora_from_linear(linear: nn.Linear, lora_alpha: int = 1, lora_dropout: float = 0.0, rank: int = 16):
+def lora_from_linear(
+    linear: nn.Linear, lora_alpha: int = 1, lora_dropout: float = 0.0, rank: int = 16
+):
     device = linear.weight.device
     dtype = linear.weight.dtype
     lora = LoRALinear(
@@ -80,24 +96,21 @@ def replace_with_lora(
     target_layer: list[str] | None = None,
     lora_alpha: int = 1,
     lora_dropout: float = 0.0,
-    rank: int = 16,  # Pass rank 16
+    rank: int = 16,
 ):
     if isinstance(model, nn.Linear) and target_layer is None:
         return lora_from_linear(model, lora_alpha, lora_dropout, rank)
 
-    if isinstance(model, (nn.Module, nn.ModuleDict)):
-        for name, module in model.named_children():
-            if isinstance(module, nn.Linear) and (target_layer is None or name in target_layer):
-                setattr(model, name, lora_from_linear(module, lora_alpha, lora_dropout, rank))
-            else:
-                replace_with_lora(module, target_layer, lora_alpha, lora_dropout, rank)
+    for name, module in model.named_children():
+        if isinstance(module, nn.Linear) and (target_layer is None or name in target_layer):
+            setattr(model, name, lora_from_linear(module, lora_alpha, lora_dropout, rank))
+        else:
+            replace_with_lora(module, target_layer, lora_alpha, lora_dropout, rank)
     return model
 
 
 def mark_lora_as_trainable(model: nn.Module, target_layer: list[str] | None = None):
-    # freeze hole model
-    for param in model.parameters():
-        param.requires_grad = False
+    model.requires_grad_(False)
     for name, module in model.named_modules():
         if isinstance(module, LoRALinear) and (
             target_layer is None or name in target_layer or name.rsplit(".", 1)[-1] in target_layer

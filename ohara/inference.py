@@ -106,14 +106,14 @@ class Inference:
             for _ in range(max_new_tokens):
                 logits = (
                     self.model(model_inputs, self.kv_cache, input_pos)
-                    if self.use_kv_cache
+                    if self.kv_cache is not None
                     else self.model(generated)
                 )
                 next_token = self.sampler(logits, temperature=temperature, top_p=top_p)
                 if next_token.item() == self.tokenizer.eos_token_id:
                     break
                 generated = torch.cat((generated, next_token), dim=-1)
-                if self.use_kv_cache:
+                if self.kv_cache is not None:
                     input_pos += model_inputs.size(1)
                     model_inputs = next_token
                 if stream:

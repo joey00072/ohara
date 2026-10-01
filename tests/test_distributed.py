@@ -37,6 +37,9 @@ class _BinTokenizer:
     def __len__(self):
         return 256
 
+    def get_vocab(self):
+        return {chr(code): code for code in range(256)}
+
     def __call__(self, batch, add_special_tokens=False):
         return {"input_ids": [[ord(character) for character in text] for text in batch]}
 

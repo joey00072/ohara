@@ -1,4 +1,5 @@
 """Validated rank-local input checkpoint state for zero-worker loaders."""
+
 from __future__ import annotations
 
 import hashlib
@@ -33,6 +34,12 @@ def _contract(loader, *, gradient_accumulation_steps, data_rank, data_world_size
     dataset = loader.dataset
     if not hasattr(dataset, "_resume_identity"):
         source = getattr(dataset, "bin_path", getattr(dataset, "dataset_name", None))
+        if hasattr(dataset, "_source_files"):
+            source_identity = [_file_identity(path) for path in dataset._source_files]
+        elif source is not None:
+            source_identity = _file_identity(source)
+        else:
+            source_identity = None
         tokenizer = getattr(dataset, "tokenizer", None)
         backend = getattr(tokenizer, "backend_tokenizer", None)
         token_config = {
@@ -42,18 +49,30 @@ def _contract(loader, *, gradient_accumulation_steps, data_rank, data_world_size
             "special_tokens": getattr(tokenizer, "special_tokens_map", None),
         }
         dataset._resume_identity = {
-            "source": ([_file_identity(path) for path in dataset._source_files]
-                       if hasattr(dataset, "_source_files") else
-                       _file_identity(source) if source is not None else None),
+            "source": source_identity,
             "metadata": getattr(dataset, "metadata", None),
-            "tokenizer": hashlib.sha256(json.dumps(token_config, sort_keys=True, default=str).encode()).hexdigest(),
+            "tokenizer": hashlib.sha256(
+                json.dumps(token_config, sort_keys=True, default=str).encode()
+            ).hexdigest(),
         }
     return {
         "dataset_class": f"{type(dataset).__module__}.{type(dataset).__qualname__}",
         "identity": dataset._resume_identity,
-        "dataset_options": {key: getattr(dataset, key, None) for key in (
-            "name", "revision", "split", "boundary_token_id", "max_length", "text_column", "shuffle", "shuffle_buffer_size", "seed", "infinite",
-        )},
+        "dataset_options": {
+            key: getattr(dataset, key, None)
+            for key in (
+                "name",
+                "revision",
+                "split",
+                "boundary_token_id",
+                "max_length",
+                "text_column",
+                "shuffle",
+                "shuffle_buffer_size",
+                "seed",
+                "infinite",
+            )
+        },
         "training_recipe": getattr(dataset, "training_recipe", None),
         "batch_size": loader.batch_size,
         "num_workers": loader.num_workers,
@@ -67,23 +86,44 @@ def _contract(loader, *, gradient_accumulation_steps, data_rank, data_world_size
 def capture_input_state(loader, *, gradient_accumulation_steps, data_rank, data_world_size):
     loader = _loader(loader)
     if loader.num_workers:
-        return {"version": 1, "resumable": False, "reason": "exact input resume requires num_workers=0; worker prefetch state is unavailable"}
+        return {
+            "version": 1,
+            "resumable": False,
+            "reason": "exact input resume requires num_workers=0; worker prefetch state is unavailable",
+        }
     if not hasattr(loader.dataset, "state_dict"):
-        return {"version": 1, "resumable": False, "reason": "dataset has no resumable iterator state"}
+        return {
+            "version": 1,
+            "resumable": False,
+            "reason": "dataset has no resumable iterator state",
+        }
     dataset = loader.dataset
     if getattr(dataset, "infinite", True) is False:
-        return {"version": 1, "resumable": False, "reason": "finite iterable loader cycling is not exactly resumable; use infinite=True"}
+        return {
+            "version": 1,
+            "resumable": False,
+            "reason": "finite iterable loader cycling is not exactly resumable; use infinite=True",
+        }
     if hasattr(dataset, "dataset_name") and not Path(dataset.dataset_name).expanduser().exists():
         if not re.fullmatch(r"[0-9a-fA-F]{40}", getattr(dataset, "revision", None) or ""):
-            return {"version": 1, "resumable": False, "reason": "remote streaming exact resume requires an immutable 40-character --dataset-revision commit"}
+            return {
+                "version": 1,
+                "resumable": False,
+                "reason": "remote streaming exact resume requires an immutable 40-character --dataset-revision commit",
+            }
     try:
         cursor = loader.dataset.state_dict()
     except ValueError as exc:
         return {"version": 1, "resumable": False, "reason": str(exc)}
     return {
-        "version": 1, "resumable": True,
-        "contract": _contract(loader, gradient_accumulation_steps=gradient_accumulation_steps,
-                              data_rank=data_rank, data_world_size=data_world_size),
+        "version": 1,
+        "resumable": True,
+        "contract": _contract(
+            loader,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            data_rank=data_rank,
+            data_world_size=data_world_size,
+        ),
         "cursor": cursor,
     }
 
@@ -91,14 +131,20 @@ def capture_input_state(loader, *, gradient_accumulation_steps, data_rank, data_
 def restore_input_state(loader, state, *, gradient_accumulation_steps, data_rank, data_world_size):
     loader = _loader(loader)
     if not state or state.get("version") != 1:
-        raise ValueError("checkpoint lacks a validated input contract; legacy exact resume is unsupported")
+        raise ValueError(
+            "checkpoint lacks a validated input contract; legacy exact resume is unsupported"
+        )
     if not state.get("resumable"):
         raise ValueError(state.get("reason", "checkpoint input is not exactly resumable"))
     if hasattr(loader.dataset, "_load_stream"):
         # Resolve the same local split files before validating their identity.
         loader.dataset._load_stream()
-    current = _contract(loader, gradient_accumulation_steps=gradient_accumulation_steps,
-                        data_rank=data_rank, data_world_size=data_world_size)
+    current = _contract(
+        loader,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        data_rank=data_rank,
+        data_world_size=data_world_size,
+    )
     mismatch = [key for key in current if current[key] != state["contract"].get(key)]
     if mismatch:
         raise ValueError("checkpoint input contract mismatch: " + ", ".join(mismatch))

@@ -13,11 +13,15 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import pytest
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast
 
 from ohara.tokenbin import (
     TOKEN_DTYPE,
     TokenBinDataset,
     read_token_bin_metadata,
+    tokenizer_fingerprint,
     write_token_bin,
 )
 
@@ -35,6 +39,9 @@ class FakeTokenizer:
 
     def __len__(self):
         return self._vocab_size
+
+    def get_vocab(self):
+        return dict(self._vocab)
 
     def __call__(self, batch, add_special_tokens=False):
         return {"input_ids": [[self._vocab[c] for c in text if c in self._vocab] for text in batch]}
@@ -276,6 +283,44 @@ class TokenBinIntegrityTests(unittest.TestCase):
             self.assertEqual(first, read(0, 2))
             self.assertFalse(set(first) & set(second))
             self.assertEqual(set(first + second), set(read(0, 1)))
+
+
+def test_token_bin_rejects_same_size_remapped_vocabulary(tmp_path):
+    path = tmp_path / "train.bin"
+    original, changed = FakeTokenizer(), FakeTokenizer()
+    changed._vocab["a"], changed._vocab["b"] = changed._vocab["b"], changed._vocab["a"]
+    write_token_bin(["abababab"], original, path, log=False)
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        TokenBinDataset(path, max_length=4, tokenizer=changed)
+    # A renamed copy with identical mappings is safe.
+    original.name_or_path = "another-directory"
+    next(iter(TokenBinDataset(path, max_length=4, tokenizer=original)))
+
+
+def test_legacy_bin_requires_regeneration_for_tokenizer_validation(tmp_path):
+    path = tmp_path / "train.bin"
+    tokenizer = FakeTokenizer()
+    metadata = write_token_bin(["abcdefgh"], tokenizer, path, log=False)
+    del metadata["tokenizer_fingerprint"]
+    path.with_suffix(".json").write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="no tokenizer fingerprint"):
+        TokenBinDataset(path, max_length=4, tokenizer=tokenizer)
+    next(iter(TokenBinDataset(path, max_length=4)))
+
+
+def test_fast_tokenizer_fingerprint_survives_save_and_batch_settings(tmp_path):
+    backend = Tokenizer(models.WordLevel({"<unk>": 0, "a": 1, "b": 2}, unk_token="<unk>"))
+    backend.pre_tokenizer = pre_tokenizers.Whitespace()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>",
+                                       bos_token="<unk>", pad_token="<unk>")
+    fingerprint = tokenizer_fingerprint(tokenizer)
+    tokenizer(["a", "a b"], padding=True, truncation=True, max_length=8)
+    assert tokenizer_fingerprint(tokenizer) == fingerprint
+    tokenizer.save_pretrained(tmp_path)
+    restored = PreTrainedTokenizerFast.from_pretrained(tmp_path, local_files_only=True)
+    assert tokenizer_fingerprint(restored) == fingerprint
+    restored.backend_tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel()
+    assert tokenizer_fingerprint(restored) != fingerprint
 
 
 if __name__ == "__main__":

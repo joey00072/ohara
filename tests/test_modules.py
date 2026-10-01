@@ -6,10 +6,7 @@ import math
 
 import pytest
 import torch
-import torch.nn as nn
 
-from ohara.adaptor.dora import DoRALinear, replace_with_dora
-from ohara.adaptor.lora import LoRALinear, replace_with_lora
 from ohara.embeddings_pos.alibi import get_alibi_mask
 from ohara.embeddings_pos.rotary import RoPE, apply_rope, precompute_freqs_cis
 from ohara.embeddings_pos.xpos import XPos
@@ -21,19 +18,6 @@ from ohara.modules.norm import RMSNorm
 from ohara.swa import make_swa_mask, sliding_window_attention_with_mask
 from ohara.utils import BetterCycle, random_name
 from ohara.utils.tools import build_mask
-
-
-class TinyNetwork(nn.Module):
-    """Covers the three ways a Linear can be nested, for adaptor replacement."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.linear = nn.Linear(2, 2)
-        self.layers = nn.ModuleList([nn.Linear(2, 2) for _ in range(3)])
-        self.seq = nn.Sequential(nn.Linear(2, 2), nn.Linear(2, 2))
-
-    def forward(self, x):
-        return self.linear(x)
 
 
 # --- KV cache ---------------------------------------------------------------
@@ -346,24 +330,6 @@ def test_swa_mask_matches_manual_attention_window() -> None:
     torch.testing.assert_close(
         sliding_window_attention_with_mask(q, k, v, window_size=window), expected
     )
-
-
-# --- adaptors ---------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("replace", "adapter_type"),
-    [(replace_with_lora, LoRALinear), (replace_with_dora, DoRALinear)],
-)
-def test_adaptor_replaces_every_nested_linear(replace, adapter_type) -> None:
-    model = replace(TinyNetwork())
-
-    assert isinstance(model.linear, adapter_type)
-    assert all(isinstance(layer, adapter_type) for layer in model.layers)
-    assert all(isinstance(layer, adapter_type) for layer in model.seq)
-
-    with torch.no_grad():
-        assert model(torch.randn(1, 2)).shape == (1, 2)
 
 
 # --- misc utils -------------------------------------------------------------

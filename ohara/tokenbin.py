@@ -9,6 +9,7 @@ contiguous blocks without tokenizing text again.
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 from typing import Iterable, Iterator
 
@@ -42,6 +43,29 @@ def _sidecar_path(bin_path: str | Path) -> Path:
     return Path(bin_path).with_suffix(".json")
 
 
+def tokenizer_fingerprint(tokenizer: PreTrainedTokenizerBase) -> str:
+    """Identify token mappings and, for fast tokenizers, encoding rules.
+
+    Paths and transient batch padding/truncation settings are excluded so a
+    saved/reloaded copy of the same tokenizer has the same identity.
+    """
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    encoding = json.loads(backend.to_str()) if backend is not None else None
+    if encoding is not None:
+        encoding.pop("padding", None)
+        encoding.pop("truncation", None)
+    identity = {
+        "vocab": tokenizer.get_vocab(),
+        "encoding": encoding,
+        "special_ids": {name: getattr(tokenizer, name, None) for name in (
+            "bos_token_id", "eos_token_id", "pad_token_id", "unk_token_id",
+            "all_special_ids",
+        )},
+    }
+    serialized = json.dumps(identity, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
 def write_token_bin(
     documents: Iterable[str],
     tokenizer: PreTrainedTokenizerBase,
@@ -66,6 +90,7 @@ def write_token_bin(
     token_dtype = DTYPES[token_type.__name__]
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
+    fingerprint = tokenizer_fingerprint(tokenizer)
 
     if boundary_token_id is None:
         boundary_token_id = tokenizer.bos_token_id
@@ -133,6 +158,7 @@ def write_token_bin(
             "dtype": token_type.__name__,
             "vocab_size": len(tokenizer),
             "tokenizer": str(getattr(tokenizer, "name_or_path", "unknown")),
+            "tokenizer_fingerprint": fingerprint,
             "boundary_token_id": int(boundary_token_id),
             "build_options": build_options,
         }
@@ -214,6 +240,16 @@ class TokenBinDataset(DataParallelIterableDataset, IterableDataset):
                 f"{self.bin_path} was tokenized with a {self.metadata['vocab_size']:,} token "
                 f"vocabulary but the tokenizer has {len(tokenizer):,}; re-run pretokenization"
             )
+        if tokenizer is not None:
+            recorded_fingerprint = self.metadata.get("tokenizer_fingerprint")
+            if recorded_fingerprint is None:
+                raise ValueError(
+                    f"{self.bin_path} has no tokenizer fingerprint; re-run pretokenization"
+                )
+            if recorded_fingerprint != tokenizer_fingerprint(tokenizer):
+                raise ValueError(
+                    f"{self.bin_path} tokenizer fingerprint mismatch; re-run pretokenization"
+                )
 
         expected_size = int(self.metadata["tokens"]) * self.token_dtype.itemsize
         if self.bin_path.stat().st_size != expected_size:

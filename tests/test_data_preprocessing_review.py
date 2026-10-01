@@ -59,3 +59,9 @@ def test_bin_reuse_rejects_same_size_tokenizer_and_document_limit_changes(tmp_pa
         args.max_documents = None
         with pytest.raises(FileExistsError):
             main()
+        args.max_documents = 1
+        tokenizer.backend_tokenizer.model = models.WordLevel(
+            {"<unk>": 0, "hello": 2, "<bos>": 1}, unk_token="<unk>"
+        )
+        with pytest.raises(FileExistsError):
+            main()

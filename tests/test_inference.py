@@ -3,6 +3,7 @@ import unittest
 import torch
 
 from ohara.inference import Inference
+from ohara.models.gpt import Config, GPT
 
 
 class DummyTokenizer:
@@ -97,6 +98,35 @@ class InferenceTests(unittest.TestCase):
             Inference(DummyModel(), DummyTokenizer(), device="cpu").generate(
                 "hello", max_new_tokens=-1, stream=False
             )
+
+
+def test_default_gpt_inference_matches_explicit_uncached_generation():
+    model = GPT(Config(vocab_size=32, hidden_size=16, num_attention_heads=2,
+                       num_hidden_layers=1, dropout=0.0, max_sequence_length=8))
+    automatic = Inference(model, DummyTokenizer(), device="cpu")
+    uncached = Inference(model, DummyTokenizer(), device="cpu", use_kv_cache=False)
+    options = dict(max_new_tokens=4, temperature=0.0, stream=False)
+    assert automatic.generate("hi", **options) == uncached.generate("hi", **options)
+
+
+def test_cache_builder_returning_none_uses_full_prefix():
+    class NoCacheModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lengths = []
+
+        def build_kv_cache(self):
+            return None
+
+        def forward(self, inputs):
+            self.lengths.append(inputs.size(1))
+            return torch.zeros(*inputs.shape, 8)
+
+    model = NoCacheModel()
+    Inference(model, DummyTokenizer(), device="cpu").generate(
+        "hi", max_new_tokens=3, temperature=0.0, stream=False,
+    )
+    assert model.lengths == [3, 4, 5]
 
 
 if __name__ == "__main__":

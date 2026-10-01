@@ -5,6 +5,7 @@ import urllib.error
 import urllib.request
 
 import torch
+import pytest
 
 from ohara.chat import (
     ASSISTANT_END,
@@ -628,6 +629,37 @@ class WebUIServerTests(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 self.post("/api/chat", payload)
             self.assertEqual(caught.exception.code, 400, payload)
+
+
+@pytest.mark.parametrize("case", ["empty_shard", "truncated", "malformed"])
+def test_infinite_sft_rejects_unusable_data(case, monkeypatch):
+    messages = [{"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "ok"}]
+    options = {}
+    if case == "empty_shard":
+        options = dict(data_rank=1, data_world_size=2)
+    elif case == "truncated":
+        messages[0]["content"] = "x" * 100
+    else:
+        messages[0]["role"] = "invalid"
+    dataset = ConversationDataset([{"messages": messages}], chat_tokenizer(),
+                                  max_length=16, **options)
+    rendered = dataset._rendered
+
+    def bounded_rendered(epoch):
+        # Turn an infinite-loop regression into a fast test failure.
+        assert epoch == 0, "empty SFT input restarted instead of failing"
+        return rendered(epoch)
+
+    monkeypatch.setattr(dataset, "_rendered", bounded_rendered)
+    with pytest.raises((ValueError, RuntimeError), match="rank/worker shards|no usable conversations"):
+        next(iter(dataset))
+
+
+def test_finite_sft_empty_shard_still_terminates():
+    dataset = ConversationDataset([{"messages": []}], chat_tokenizer(), max_length=16,
+                                  infinite=False, data_rank=1, data_world_size=2)
+    assert list(dataset) == []
 
 
 if __name__ == "__main__":

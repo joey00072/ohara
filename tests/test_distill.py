@@ -43,6 +43,9 @@ class Tokenizer:
     def __len__(self):
         return 8
 
+    def get_vocab(self):
+        return {chr(code): code % 7 + 1 for code in range(128)}
+
     def __call__(self, texts, **kwargs):
         return {"input_ids": [[ord(c) % 7 + 1 for c in text] for text in texts]}
 

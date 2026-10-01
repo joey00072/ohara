@@ -30,7 +30,7 @@ class MLP(nn.Module):
         self.down = nn.Linear(hidden_dim, dim, bias=bias)
         self.activation_fn = ACT2FN[activation_fn]
 
-        self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
+        self.dropout = nn.Dropout(dropout) if dropout else nn.Identity()
 
     def forward(self, x):
         x = self.up(x)
@@ -43,7 +43,7 @@ class MLP(nn.Module):
         in_init_std = init_std or (self.dim ** (-0.5))
         out_init_std = init_std or (self.hidden_dim ** (-0.5))
         out_init_std = out_init_std / factor
-        
+
         nn.init.trunc_normal_(
             self.up.weight,
             mean=0.0,
@@ -80,7 +80,7 @@ class GLU(nn.Module):
         """
         super().__init__()
         self.dim = dim
-        
+
         if hidden_dim is None:
             hidden_dim = 4 * dim
             hidden_dim = int(2 * hidden_dim / 3)
@@ -92,7 +92,7 @@ class GLU(nn.Module):
         self.down = nn.Linear(hidden_dim, dim, bias=bias)
 
         self.activation = ACT2FN[activation_fn]
-        self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
+        self.dropout = nn.Dropout(dropout) if dropout else nn.Identity()
 
     def forward(self, x):
         up = self.up(x)
@@ -104,7 +104,7 @@ class GLU(nn.Module):
         in_init_std = init_std or (self.dim ** (-0.5))
         out_init_std = init_std or (self.hidden_dim ** (-0.5))
         out_init_std = out_init_std / factor
-        
+
         for w in [self.up, self.gate]:
             nn.init.trunc_normal_(
                 w.weight,
@@ -146,7 +146,7 @@ class SwiGLU(nn.Module):
         self.up = nn.Linear(dim, hidden_dim, bias=bias)
         self.down = nn.Linear(hidden_dim, dim, bias=bias)
         self.gate = nn.Linear(dim, hidden_dim, bias=bias)
-        self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
+        self.dropout = nn.Dropout(dropout) if dropout else nn.Identity()
 
     def forward(self, x):
         return self.dropout(self.down(F.silu(self.gate(x)) * self.up(x)))
@@ -155,7 +155,7 @@ class SwiGLU(nn.Module):
         in_init_std = init_std or (self.dim ** (-0.5))
         out_init_std = init_std or (self.hidden_dim ** (-0.5))
         out_init_std = out_init_std / factor
-        
+
         for w in [self.up, self.gate]:
             nn.init.trunc_normal_(
                 w.weight,
@@ -197,7 +197,7 @@ class BiLinear(nn.Module):
         self.w1 = nn.Linear(dim, hidden_dim, bias=bias)
         self.w2 = nn.Linear(hidden_dim, dim, bias=bias)
         self.w3 = nn.Linear(dim, hidden_dim, bias=bias)
-        self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
+        self.dropout = nn.Dropout(dropout) if dropout else nn.Identity()
 
     def forward(self, x):
         return self.dropout(self.w2(self.w1(x) * self.w3(x)))
@@ -228,15 +228,10 @@ class ReGLU(nn.Module):
         self.w1 = nn.Linear(dim, hidden_dim, bias=bias)
         self.w2 = nn.Linear(hidden_dim, dim, bias=bias)
         self.w3 = nn.Linear(dim, hidden_dim, bias=bias)
-        self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
+        self.dropout = nn.Dropout(dropout) if dropout else nn.Identity()
 
     def forward(self, x):
         return self.dropout(self.w2(F.relu(self.w1(x)) * self.w3(x)))
-
-
-# This might not me most efficient implementation of MOE
-# but it is easy to understand
-# TODO: Write a more efficient implementation
 
 
 class GEGLU(nn.Module):
@@ -265,7 +260,7 @@ class GEGLU(nn.Module):
         self.up = nn.Linear(dim, hidden_dim, bias=bias)
         self.down = nn.Linear(hidden_dim, dim, bias=bias)
 
-        self.dropout = nn.Dropout(dropout) if dropout else lambda x: x
+        self.dropout = nn.Dropout(dropout) if dropout else nn.Identity()
 
     def forward(self, x):
         return self.dropout(self.down(F.gelu(self.gate(x)) * self.up(x)))

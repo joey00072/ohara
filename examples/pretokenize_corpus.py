@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Iterator
 
 from ohara.chat import add_chat_tokens
-from ohara.tokenbin import read_token_bin_metadata, write_token_bin
+from ohara.tokenbin import read_token_bin_metadata, tokenizer_fingerprint, write_token_bin
 from ohara.tokenizer import get_tokenizer
 
 
@@ -79,6 +79,7 @@ def main() -> None:
     if args.chat_tokens:
         add_chat_tokens(tokenizer)
     print(f"tokenizer {args.tokenizer}: vocab {len(tokenizer):,}")
+    fingerprint = tokenizer_fingerprint(tokenizer)
 
     for split in (item.strip() for item in args.splits.split(",") if item.strip()):
         source = corpus / f"{split}.jsonl"
@@ -97,6 +98,7 @@ def main() -> None:
             if (
                 existing["vocab_size"] == len(tokenizer)
                 and existing.get("tokenizer") == tokenizer.name_or_path
+                and existing.get("tokenizer_fingerprint") == fingerprint
                 and existing.get("build_options") == build_options
             ):
                 print(f"reuse {destination}: {existing['tokens']:,} tokens")

@@ -319,8 +319,15 @@ class ConversationDataset(DataParallelIterableDataset, IterableDataset):
 
     def __iter__(self) -> Iterator[tuple[torch.Tensor, ...]]:
         self._mark_iterator_started()
+        shard_id, num_shards = self._shard()
+        if self.infinite and len(self.conversations) < num_shards:
+            raise ValueError(
+                f"SFT dataset has {len(self.conversations)} conversations for "
+                f"{num_shards} rank/worker shards"
+            )
         epoch = 0
         while True:
+            yielded_row = False
             source = self._rendered(epoch)
             buffer: list[tuple[list[int], list[int]]] = []
             exhausted = False
@@ -373,6 +380,7 @@ class ConversationDataset(DataParallelIterableDataset, IterableDataset):
                     targets,
                     torch.full_like(targets, self.ignore_index),
                 )
+                yielded_row = True
                 if self.return_padding_mask:
                     # Use lengths: PAD may equal EOS, and prompt targets are ignored too.
                     padding_mask = torch.arange(self.max_length) >= self.row_capacity - padding
@@ -382,4 +390,9 @@ class ConversationDataset(DataParallelIterableDataset, IterableDataset):
 
             if not self.infinite:
                 return
+            if not yielded_row:
+                raise RuntimeError(
+                    f"SFT shard {shard_id}/{num_shards} has no usable conversations "
+                    f"at max_length={self.max_length}; check formatting and assistant supervision"
+                )
             epoch += 1

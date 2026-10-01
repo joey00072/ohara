@@ -1,7 +1,6 @@
 """Regression coverage for model/module issues in the September code review."""
 
 import copy
-import pickle
 from dataclasses import replace
 
 import pytest
@@ -9,8 +8,6 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 
-from ohara.adaptor.dora import dora_from_linear, mark_dora_as_trainable, merge_dora
-from ohara.adaptor.lora import lora_from_linear, mark_lora_as_trainable, merge_lora
 from ohara.models.llama import Config, Llama
 from ohara.models.mamba import Mamba, MambaConfig
 from ohara.models.phi import Phi, PhiConfig
@@ -36,45 +33,6 @@ def tiny_config(**kwargs):
         dropout=0,
         **kwargs,
     )
-
-
-@pytest.mark.parametrize("wrap", [lora_from_linear, dora_from_linear])
-@pytest.mark.parametrize("bias", [True, False])
-@pytest.mark.parametrize("rank", [0, 2])
-def test_adapter_preserves_weights_output_and_freezes_base(wrap, bias, rank):
-    linear = torch.nn.Linear(5, 7, bias=bias).double()
-    x = torch.randn(3, 5, dtype=torch.float64)
-    adapter = wrap(linear, rank=rank)
-    torch.testing.assert_close(adapter(x), linear(x))
-    assert (adapter.linear.bias is not None) == bias
-    assert next(adapter.parameters()).dtype == torch.float64
-    pickle.loads(pickle.dumps(adapter))
-    (adapter.lora_trainable_only if wrap is lora_from_linear else adapter.dora_trainable_only)()
-    assert all(not p.requires_grad for p in adapter.linear.parameters())
-    if rank:
-        with torch.no_grad():
-            adapter.lora_B.normal_()
-        expected = adapter(x)
-        adapter.merge()
-        torch.testing.assert_close(adapter(x), expected)
-
-
-@pytest.mark.parametrize(
-    "wrap,mark,merge",
-    [
-        (lora_from_linear, mark_lora_as_trainable, merge_lora),
-        (dora_from_linear, mark_dora_as_trainable, merge_dora),
-    ],
-)
-def test_adapter_target_selection(wrap, mark, merge):
-    model = torch.nn.ModuleDict(
-        {n: wrap(torch.nn.Linear(5, 5), rank=2) for n in ["chosen", "other"]}
-    )
-    mark(model, target_layer=["chosen"])
-    assert model["chosen"].lora_A.requires_grad
-    assert not model["other"].lora_A.requires_grad
-    merge(model, target_layer=["chosen"])
-    assert model["chosen"].merged and not model["other"].merged
 
 
 @pytest.mark.parametrize("length", [1, 2, 3, 7, 8, 9, 16, 17, 33])

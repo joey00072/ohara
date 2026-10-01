@@ -45,6 +45,10 @@ uv run python examples/train_llama_engine.py \
 Staging defaults to 100,000 training documents and 10,000 validation documents;
 set `--train-documents` and `--validation-documents` to change those limits.
 The tokenizer writes `train.bin`, `validation.bin`, and metadata sidecars.
+Token-bin metadata includes a tokenizer fingerprint to reject incompatible token
+mappings. Re-run `examples/pretokenize_corpus.py` with `--force` for older bins
+without this fingerprint.
+
 Training automatically uses bins when both splits exist. Pass `--no-token-bins`
 to read text instead. Tokenizer and chat-token settings must match the bins.
 
