@@ -13,5 +13,7 @@ slopes = 2 ** (-8 * torch.arange(1, num_heads + 1) / num_heads)
 ```
 
 The schedule depends on the number of heads, not sequence length.
+`get_alibi_mask` returns `(heads, sequence, sequence)` distance biases. Add a
+separate causal mask; the bias itself does not hide future tokens.
 
 ![Causal attention distance penalties](image.png)

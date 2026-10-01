@@ -1,8 +1,6 @@
 # Ohara
 
-My collection of PyTorch implementations of language models and research papers.
-It includes dense and MoE models, training and fine-tuning scripts, and a browser
-chat UI. Use it to run experiments or copy pieces into your own projects.
+PyTorch language models, training and fine-tuning scripts, and a browser chat UI.
 
 ## Install
 
@@ -46,7 +44,7 @@ for your own data, multiple GPUs, and resuming runs. Each script accepts `--help
 
 | Location | Purpose |
 | --- | --- |
-| [ohara/models/](./ohara/models/) | Model implementations: start with Llama or Qwen3. |
+| [ohara/models/](./ohara/models/) | Dense, MoE, and recurrent models. |
 | [ohara/modules/](./ohara/modules/) | Shared attention, feed-forward, routing, and cache layers. |
 | [ohara/runtime/](./ohara/runtime/) | Device placement, precision, parallelism, and checkpointing. |
 | [ohara/trainer.py](./ohara/trainer.py) | Training loop, evaluation, and metrics. |
@@ -56,10 +54,9 @@ for your own data, multiple GPUs, and resuming runs. Each script accepts `--help
 | [docs/](./docs/README.md) | Usage guides, paper notes, and archived reviews. |
 | [experiments/](./experiments/) | Frozen per-paper research snapshots. |
 
-The [speedrun script](./runs/speedrun.sh) connects data preparation, pretraining,
-fine-tuning, and chat. See the [Qwen3.8 guide](./docs/qwen38.md) for its backbone,
-MTP training, and GPU kernels. `ref/` contains local read-only reference clones;
-the package does not depend on them.
+The [speedrun script](./runs/speedrun.sh) runs data preparation through chat.
+See [the guides](./docs/README.md) for pretraining, Qwen3.8, and model comparisons.
+`ref/` contains local read-only reference clones, not package dependencies.
 
 ## Development
 

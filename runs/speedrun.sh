@@ -18,7 +18,7 @@
 #   SEQ_LEN           context window in tokens                         (default 2048)
 #   TOKEN_RATIO       training tokens per effective parameter          (default 12)
 #   SHARDS            ClimbMix parquet shards to stage                 (default 24)
-#   NUM_WORKERS       dataloader processes per rank                    (default 8)
+#   NUM_WORKERS       dataloader processes per rank                    (default 1)
 #   SERVE             launch the chat web UI when training finishes    (default 1)
 #   PORT              port for the chat web UI                         (default 8080)
 set -euo pipefail
@@ -28,15 +28,9 @@ SEQ_LEN="${SEQ_LEN:-2048}"
 DEVICE_BATCH_SIZE="${DEVICE_BATCH_SIZE:-16}"
 TOKEN_RATIO="${TOKEN_RATIO:-12}"
 SHARDS="${SHARDS:-24}"
-# The corpus is stored as text, so every batch is tokenized on the fly. At 0 the
-# main process does that work and the GPUs stall waiting on it; 1 worker moves it
-# off the training loop and prefetches the next batch during the backward pass.
-#
-# Do not raise this above 1 for the staged corpus. It is a single JSONL file, so
-# the streaming reader exposes exactly one shard: extra workers would get an empty
-# stream, and StreamingTextDataset's own modulo sharding would additionally thin
-# the corpus by a factor of num_workers. Use NUM_WORKERS=0 with --resume, which
-# needs to replay the data stream exactly.
+# One worker prefetches tokenized batches from the staged JSONL file. Extra
+# workers may receive empty shards. Use NUM_WORKERS=0 from the start when exact
+# input-cursor resume is needed; worker prefetch state is not saved.
 NUM_WORKERS="${NUM_WORKERS:-1}"
 TRAIN_DOCS="${TRAIN_DOCS:-4000000}"
 VAL_DOCS="${VAL_DOCS:-20000}"

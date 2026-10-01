@@ -65,11 +65,11 @@ uv run torchrun --nproc-per-node 2 examples/train_llama_engine.py
 uv run torchrun --nproc-per-node 2 examples/train_llama_engine.py --tp 2
 ```
 
-`--tp` also reads `OHARA_TP`. Tensor-parallel attention requires zero dropout.
-When using the runtime API, prepare the model before constructing the optimizer
-and prepare dataloaders before creating iterators or workers. Custom iterable
-datasets must expose `configure_data_parallel(rank, world_size)` and yield the
-same inputs on tensor-parallel ranks.
+`--tp` also reads `OHARA_TP`. Tensor parallelism requires AdamW and zero dropout;
+the runtime does not combine it with data parallelism. With the runtime API,
+prepare the model before building its optimizer, and prepare dataloaders before
+starting iteration. Custom iterable datasets must implement
+`configure_data_parallel(rank, world_size)` so TP ranks receive the same inputs.
 
 ## Resume
 
@@ -95,7 +95,8 @@ Changing worker count after interruption cannot recover the missing state.
   The default `0` uses full logits.
 - `--print-every 10` controls progress output; use `1` for every step.
 - `--evaluate-bpb` enables bits-per-byte evaluation.
-- `--logger trackio` logs locally. For W&B, run `uv run wandb login` first.
+- `--logger auto` uses configured W&B, otherwise local Trackio. Choose `none`
+  to disable tracking or `wandb` after `uv run wandb login`.
 - MoE quantile balancing retains FP32 token-by-expert statistics until each
   optimizer step. Memory grows with accumulated tokens and expert count;
   distributed updates also gather statistics across ranks.
